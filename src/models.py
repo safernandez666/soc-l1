@@ -122,3 +122,33 @@ class LdapActionResult(BaseModel):
     target_sam: str
     target_dn: str | None = None
     message: str | None = None
+
+
+# ===== Wazuh Manager API =====
+
+
+class WazuhRuleInfo(BaseModel):
+    """Detalle de una rule del Wazuh manager (para enriquecer alertas)."""
+
+    model_config = ConfigDict(extra="forbid")
+    rule_id: str
+    level: int
+    description: str
+    groups: list[str] = Field(default_factory=list)
+    mitre_ids: list[str] = Field(default_factory=list)
+    mitre_tactics: list[str] = Field(default_factory=list)
+    mitre_techniques: list[str] = Field(default_factory=list)
+    gdpr: list[str] = Field(default_factory=list)
+    pci_dss: list[str] = Field(default_factory=list)
+
+
+class WazuhRecentAlert(BaseModel):
+    """Resumen de una alerta histórica para context windowing."""
+
+    model_config = ConfigDict(extra="forbid")
+    timestamp: str
+    rule_id: str
+    level: int
+    description: str
+    agent_name: str | None = None
+    agent_id: str | None = None

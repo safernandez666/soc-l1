@@ -128,5 +128,36 @@ class Settings(BaseSettings):
     service_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
 
+    # Wazuh manager API (usado por el Enricher para get_rule, recent alerts).
+    # En el server productivo el manager corre local con cert self-signed → verify_ssl=False.
+    wazuh_api_host: str = Field(default="127.0.0.1")
+    wazuh_api_port: int = Field(default=55000)
+    wazuh_api_user: str = Field(default="wazuh")
+    wazuh_api_password: str = Field(default="")
+    wazuh_api_verify_ssl: bool = Field(default=False)
+
+    # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
+    smtp_host: str = Field(default="")
+    smtp_port: int = Field(default=25)
+    smtp_user: str = Field(default="")
+    smtp_password: str = Field(default="")
+    smtp_from: str = Field(default="soc-l1@example.local")
+    smtp_to_approvers: str = Field(
+        default="",
+        description="Lista de destinatarios separados por coma. Ej: soc@org.com,oncall@org.com",
+    )
+    smtp_use_starttls: bool = Field(default=True)
+    smtp_ssl_verify: bool = Field(default=False)  # self-signed cert del Exchange
+
+    # Approval workflow
+    approval_base_url: str = Field(
+        default="http://localhost:8000",
+        description="URL pública del servicio (la que aparece en los emails). Ej: https://soc-l1.org.com",
+    )
+    approval_ttl_hours: int = Field(default=24)
+    state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
+
     # Feature flags
     enable_triage: bool = Field(default=False)
+    enable_enricher: bool = Field(default=False)
+    enable_narrator: bool = Field(default=False)

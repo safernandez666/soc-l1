@@ -1,13 +1,16 @@
-"""FastAPI service - ingesta de alertas Wazuh + Defender.
+"""FastAPI service - ingesta de alertas Wazuh + Defender + approval workflow.
 
-Endpoints actuales:
-  POST /webhook/wazuh-alert    - recibe alerta, verifica HMAC, normaliza, loggea, 202
-  GET  /health                 - healthcheck simple
+Endpoints:
+  POST /webhook/wazuh-alert     - recibe alerta, verifica HMAC, normaliza, lanza pipeline
+  GET  /health                  - healthcheck simple
+  GET  /approve/{token}         - aprobar plan del Narrator (click desde email)
+  GET  /reject/{token}          - rechazar plan del Narrator (click desde email)
 
-Próximo:
-  - Pipeline de agentes (triage → enricher → ti → narrator)
-  - POST /approve/{token} para resume desde email
-  - SQLite state para alertas pendientes
+Pipeline (background, post-202):
+  normalize → Triage → routing
+    ├─ auto_close_benign  → log audit
+    ├─ analyze            → Enricher → Narrator → email approval → executor (post-approve)
+    └─ fast_track_critical→ Narrator → email approval → executor (post-approve)
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.config import Settings
 from src.models import NormalizedAlert
@@ -45,8 +48,6 @@ async def lifespan(app: FastAPI):
     )
     logger.info("SOC L1 service starting up - log level=%s", settings.log_level)
 
-    # Exportar OPENAI_API_KEY al env (la librería openai la lee de os.environ).
-    # pydantic-settings carga al field, no al env. Hay que puentearlo.
     if settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = settings.openai_api_key
         logger.info("OPENAI_API_KEY exported to environment (from .env)")
@@ -57,19 +58,28 @@ async def lifespan(app: FastAPI):
             "El triage va a fallar. Agregá OPENAI_API_KEY=sk-... al .env"
         )
 
+    # Init SQLite si Narrator está habilitado (es lo único que la usa)
+    if settings.enable_narrator:
+        from src.state import init_db
+
+        await init_db(settings.state_db_path)
+
     yield
     logger.info("SOC L1 service shutting down")
 
 
 app = FastAPI(
     title="SOC L1 - Wazuh + Defender",
-    version="0.1.0",
-    description="Multi-agent SOAR for Wazuh alerts (Defender via Wazuh + native)",
+    version="0.2.0",
+    description="Multi-agent SOAR for Wazuh alerts (Defender via Wazuh + native) with email approval",
     lifespan=lifespan,
 )
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+# ===== Health & ingest =====
 
 
 @app.get("/health")
@@ -83,11 +93,7 @@ async def wazuh_webhook(
     settings: SettingsDep,
     x_wazuh_signature: Annotated[str | None, Header(alias="X-Wazuh-Signature")] = None,
 ) -> JSONResponse:
-    """Recibe alerta Wazuh (nativa o Defender-via-Wazuh).
-
-    Verifica HMAC, normaliza al schema interno, loggea (próximamente: lanza pipeline).
-    Devuelve 202 inmediato para no bloquear el integrator.
-    """
+    """Recibe alerta Wazuh. Verifica HMAC, normaliza, lanza pipeline en background."""
     body = await request.body()
 
     if not verify_wazuh_signature(settings.wazuh_webhook_secret, body, x_wazuh_signature):
@@ -118,8 +124,6 @@ async def wazuh_webhook(
         len(alert.files),
     )
 
-    # Si Triage está habilitado, lanzamos pipeline en background y respondemos 202 ya.
-    # El integrator de Wazuh no debería esperar el análisis completo.
     if settings.enable_triage:
         asyncio.create_task(_run_triage_in_background(alert, settings))
 
@@ -133,14 +137,13 @@ async def wazuh_webhook(
     )
 
 
-async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) -> None:
-    """Corre el Triage agent en background y rutea según el verdict.
+# ===== Pipeline =====
 
-    Errores aquí NO afectan al webhook (ya respondió 202). Solo se loggean.
-    """
+
+async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) -> None:
+    """Corre el Triage agent en background y rutea según el verdict."""
     try:
-        # Import diferido para no requerir openai-agents si triage está deshabilitado
-        from src.agents.triage import TriageDecision, triage_alert
+        from src.agents.triage import triage_alert
 
         decision = await triage_alert(alert, model=settings.openai_model_light)
         logger.info(
@@ -158,7 +161,6 @@ async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) 
 async def _dispatch_by_verdict(
     alert: NormalizedAlert, decision, settings: Settings
 ) -> None:
-    """Rutea la alerta al handler correspondiente según el verdict del triage."""
     if decision.verdict == "auto_close_benign":
         await _handle_auto_close(alert, decision)
     elif decision.verdict == "analyze":
@@ -175,7 +177,7 @@ async def _dispatch_by_verdict(
 
 
 async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
-    """Verdict auto_close_benign: log audit y termina. No consume más LLM tokens."""
+    """Verdict auto_close_benign: log audit y termina."""
     logger.info(
         "AUDIT auto_closed | id=%s wazuh_rule=%s host=%s reason=%r confidence=%s",
         alert.alert_id,
@@ -184,34 +186,255 @@ async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
         decision.reason,
         decision.confidence,
     )
-    # TODO: persistir a SQLite cuando agreguemos audit table (task #14)
 
 
 async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) -> None:
-    """Verdict analyze: encolá para Enricher → ThreatIntel → Narrator → email approval."""
+    """analyze: Enricher → (si enable_narrator) Narrator + email approval."""
     logger.info(
-        "PIPELINE_QUEUED analyze | id=%s host=%s users=%s files=%s "
-        "(Enricher/TI/Narrator agents not yet implemented)",
+        "PIPELINE_QUEUED analyze | id=%s host=%s users=%s files=%s",
         alert.alert_id,
         alert.device.hostname,
         len(alert.users_involved),
         len(alert.files),
     )
-    # TODO: invocar Enricher agent (task #12 cont.)
-    # TODO: invocar ThreatIntel agent
-    # TODO: invocar Narrator + email approval (task #14)
+
+    if not settings.enable_enricher:
+        logger.info("enricher_skipped | id=%s ENABLE_ENRICHER=false", alert.alert_id)
+        return
+
+    try:
+        from src.agents.enricher import EnrichmentResult, enrich_alert
+
+        ldap_cfg = _build_ldap_cfg_safely()
+        enrichment = await enrich_alert(
+            alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_light
+        )
+        logger.info(
+            "ENRICHED | id=%s users=%d rule_found=%s flags=%s | %s",
+            alert.alert_id,
+            len(enrichment.users),
+            enrichment.rule is not None,
+            ",".join(enrichment.flags) if enrichment.flags else "none",
+            enrichment.summary,
+        )
+    except Exception:
+        logger.exception("enricher failed for alert id=%s", alert.alert_id)
+        return
+
+    await _run_narrator_and_request_approval(alert, decision, settings, enrichment)
 
 
-async def _handle_fast_track(
-    alert: NormalizedAlert, decision, settings: Settings
-) -> None:
-    """Verdict fast_track_critical: skip Enricher/TI, va directo al Narrator."""
+async def _handle_fast_track(alert: NormalizedAlert, decision, settings: Settings) -> None:
+    """fast_track_critical: skip Enricher, va directo a Narrator con enrichment vacío."""
     logger.warning(
-        "PIPELINE_QUEUED fast_track | id=%s host=%s severity=%s "
-        "(Narrator agent not yet implemented - fast track will queue directly)",
+        "PIPELINE_QUEUED fast_track | id=%s host=%s severity=%s",
         alert.alert_id,
         alert.device.hostname,
         alert.severity_source,
     )
-    # TODO: invocar Narrator directamente con la alerta + decisión
-    # TODO: email approval (task #14)
+    from src.agents.enricher import EnrichmentResult
+
+    empty_enrichment = EnrichmentResult(
+        users=[],
+        rule=None,
+        summary="(fast_track: enrichment skipped por criticidad)",
+        flags=["fast_track_skip_enrichment"],
+    )
+    await _run_narrator_and_request_approval(
+        alert, decision, settings, empty_enrichment
+    )
+
+
+async def _run_narrator_and_request_approval(
+    alert: NormalizedAlert, decision, settings: Settings, enrichment
+) -> None:
+    """Narrator → guardar plan en SQLite → enviar email de approval."""
+    if not settings.enable_narrator:
+        logger.info("narrator_skipped | id=%s ENABLE_NARRATOR=false", alert.alert_id)
+        return
+
+    try:
+        from src.agents.narrator import narrate_incident
+        from src.mailer import send_approval_email
+        from src.state import create_pending_approval
+
+        plan = await narrate_incident(
+            alert, triage=decision, enrichment=enrichment, model=settings.openai_model_heavy
+        )
+        logger.info(
+            "NARRATED | id=%s risk=%s actions=%d | %s",
+            alert.alert_id,
+            plan.risk_level,
+            len(plan.actions),
+            plan.executive_summary,
+        )
+
+        token = await create_pending_approval(
+            settings.state_db_path,
+            alert_id=alert.alert_id,
+            plan_json=plan.model_dump_json(),
+            alert_json=alert.model_dump_json(),
+        )
+        logger.info("APPROVAL_PENDING | id=%s token=%s", alert.alert_id, token[:12] + "…")
+
+        await send_approval_email(settings, alert, plan, token)
+    except Exception:
+        logger.exception("narrator/approval failed for alert id=%s", alert.alert_id)
+
+
+def _build_ldap_cfg_safely():
+    """Intenta construir LdapConfig. Si falta config, devuelve None."""
+    try:
+        from src.config import LdapConfig
+
+        return LdapConfig()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LDAP no disponible (%s) - pipeline correrá sin AD writes", e)
+        return None
+
+
+# ===== Approval endpoints =====
+
+
+def _render_decision_page(title: str, body_html: str, ok: bool) -> HTMLResponse:
+    color = "#28a745" if ok else "#dc3545"
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{title}</title></head>
+<body style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 80px auto; text-align: center;">
+  <h1 style="color: {color};">{title}</h1>
+  <div style="font-size: 16px; color: #333;">{body_html}</div>
+  <p style="color: #888; font-size: 12px; margin-top: 40px;">SOC L1 — Example Corp</p>
+</body></html>
+"""
+    return HTMLResponse(content=html)
+
+
+async def _handle_decision(
+    request: Request, settings: Settings, token: str, decision: str
+) -> HTMLResponse:
+    """Lógica común para /approve y /reject."""
+    from src.state import decide_approval, mark_executed
+
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+
+    result, row = await decide_approval(
+        settings.state_db_path,
+        token=token,
+        decision=decision,
+        ip=ip,
+        user_agent=ua,
+        ttl_hours=settings.approval_ttl_hours,
+    )
+
+    if result == "not_found":
+        logger.warning("APPROVAL_NOT_FOUND | token=%s ip=%s", token[:12], ip)
+        return _render_decision_page(
+            "Token inválido",
+            "Este link no corresponde a ningún approval pendiente.",
+            ok=False,
+        )
+
+    if result == "expired":
+        logger.warning(
+            "APPROVAL_EXPIRED | alert=%s token=%s ip=%s",
+            row["alert_id"] if row else "?",
+            token[:12],
+            ip,
+        )
+        return _render_decision_page(
+            "Expirado",
+            f"Este approval excedió el TTL de {settings.approval_ttl_hours}h y no puede ser decidido.",
+            ok=False,
+        )
+
+    if result == "already_decided":
+        prev = row["status"] if row else "?"
+        logger.info(
+            "APPROVAL_REPLAY | alert=%s token=%s prev_status=%s ip=%s",
+            row["alert_id"] if row else "?",
+            token[:12],
+            prev,
+            ip,
+        )
+        return _render_decision_page(
+            "Ya decidido",
+            f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>).",
+            ok=False,
+        )
+
+    # result == "ok"
+    assert row is not None
+    alert_id = row["alert_id"]
+    logger.info(
+        "APPROVAL_DECISION | alert=%s decision=%s ip=%s ua=%r",
+        alert_id,
+        decision,
+        ip,
+        ua,
+    )
+
+    if decision == "rejected":
+        return _render_decision_page(
+            "Rechazado",
+            f"El plan de acción fue rechazado. No se ejecutará ninguna acción para la alerta <code>{alert_id}</code>.",
+            ok=True,
+        )
+
+    # approved → ejecutar plan
+    from src.agents.narrator import NarratorPlan
+
+    try:
+        plan = NarratorPlan.model_validate_json(row["plan_json"])
+    except Exception:
+        logger.exception("APPROVAL_PLAN_PARSE_FAILED | alert=%s", alert_id)
+        return _render_decision_page(
+            "Error",
+            "Aprobaste, pero el plan guardado no pudo deserializarse. Revisar logs.",
+            ok=False,
+        )
+
+    # Lanzamos el executor en background para responder rápido al humano que clickeó
+    asyncio.create_task(
+        _execute_approved_plan_in_background(settings, token, alert_id, plan)
+    )
+
+    return _render_decision_page(
+        "Aprobado",
+        f"Plan aprobado para la alerta <code>{alert_id}</code>. "
+        f"Se están ejecutando {len(plan.actions)} acción(es) en background. "
+        "Revisá los logs del servicio para ver el resultado.",
+        ok=True,
+    )
+
+
+async def _execute_approved_plan_in_background(
+    settings: Settings, token: str, alert_id: str, plan
+) -> None:
+    from src.executor import execute_plan
+    from src.state import mark_executed
+
+    try:
+        ldap_cfg = _build_ldap_cfg_safely()
+        results = await execute_plan(plan.actions, ldap_cfg=ldap_cfg)
+        await mark_executed(settings.state_db_path, token, results)
+        ok_count = sum(1 for r in results if r.get("ok"))
+        logger.info(
+            "EXECUTED | alert=%s actions=%d ok=%d fail=%d",
+            alert_id,
+            len(results),
+            ok_count,
+            len(results) - ok_count,
+        )
+    except Exception:
+        logger.exception("executor failed | alert=%s token=%s", alert_id, token[:12])
+
+
+@app.get("/approve/{token}")
+async def approve_plan(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
+    return await _handle_decision(request, settings, token, "approved")
+
+
+@app.get("/reject/{token}")
+async def reject_plan(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
+    return await _handle_decision(request, settings, token, "rejected")
