@@ -198,22 +198,52 @@ def _build_html_body(
     reject_url: str,
     ttl_hours: int = 24,
 ) -> str:
-    """Renderiza el email HTML con el design system del integrator Wazuh.
+    """Renderiza el email HTML matcheando el design system del integrator Wazuh unified v4.9.
 
-    Color del banner = plan.risk_level (assessment del Narrator, no la severity raw).
+    Layout (idéntico al Wazuh original):
+      - Header con border-left por severidad (NO banner top coloreado completo)
+      - 2 badges inline en header: rule# + risk asignado
+      - Pivot section destacando la info principal (host + archivo)
+      - Info-table con todos los campos
+      - Card amarilla "Recomendación" (= nuestro Análisis del Narrator)
+      - Card azul "Acciones Sugeridas" (= nuestras ProposedActions)
+      - Approval section subtle al final (botones APROBAR/RECHAZAR)
+      - Footer
+
+    Color del border-left = plan.risk_level (assessment del Narrator).
     """
     sev_cfg = SEV_STYLES.get(plan.risk_level, _DEFAULT_SEV)
     color = sev_cfg["bg"]
+    risk_badge_key = _risk_badge_style(plan.risk_level)
+    risk_badge_html = _badge(plan.risk_level.upper(), risk_badge_key)
+    rule_badge_html = _badge(
+        f"RULE {alert.wazuh_rule.id or '?'} • NIVEL {alert.wazuh_rule.level}",
+        "info",
+    )
+
+    # Pivot value: lo más jugoso de la alerta. Host + archivo malicious (si hay).
+    pivot_value = f"<strong>{_esc(alert.device.hostname)}</strong>"
+    if alert.files:
+        f0 = alert.files[0]
+        verdict_txt = (f0.verdict or "unknown").lower()
+        verdict_style = "critical" if verdict_txt == "malicious" else "warning"
+        pivot_value += (
+            f" → {_badge(verdict_txt, verdict_style)} "
+            f"<code>{_esc(f0.name)}</code>"
+        )
+    elif alert.users_involved:
+        sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
+        pivot_value += f" → usuarios: {sams}"
 
     cta_buttons = (
         f"<a href='{html.escape(approve_url)}' "
         f"style='display:inline-block;background:#16a34a;color:white;"
-        f"padding:14px 28px;text-decoration:none;border-radius:6px;"
+        f"padding:12px 28px;text-decoration:none;border-radius:6px;"
         f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
         f"✅ APROBAR Y EJECUTAR</a>"
         f"<a href='{html.escape(reject_url)}' "
         f"style='display:inline-block;background:#dc2626;color:white;"
-        f"padding:14px 28px;text-decoration:none;border-radius:6px;"
+        f"padding:12px 28px;text-decoration:none;border-radius:6px;"
         f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
         f"❌ RECHAZAR</a>"
     )
@@ -222,16 +252,20 @@ def _build_html_body(
 <html>
 <head>
   <meta charset="utf-8">
-  <title>SOC L1 - {_esc(alert.title)}</title>
+  <title>SOC L1 — {_esc(alert.title)}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
+    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
     .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
-    .title {{ font-size: 22px; font-weight: bold; margin: 0 0 8px 0; color: #0f172a; }}
-    .info-table {{ width: 100%; border-collapse: collapse; margin: 0; }}
+    .title {{ font-size: 24px; font-weight: bold; margin-bottom: 8px; color: #0f172a; }}
+    .pivot-section {{ background: #fef2f2; padding: 16px; margin: 20px; border-radius: 8px; border-left: 4px solid {color}; }}
+    .pivot-label {{ font-weight: bold; color: #374151; margin-bottom: 4px; font-size: 13px; }}
+    .pivot-value {{ font-family: monospace; font-size: 15px; font-weight: bold; color: #1f2937; }}
+    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
     .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
     .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; color: #475569; font-size: 13px; }}
     .info-table .value {{ font-size: 13px; color: #0f172a; }}
+    .approval-section {{ background: #f8fafc; padding: 24px; margin: 20px; border-radius: 8px; border: 1px solid #e5e7eb; text-align: center; }}
     .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
     code {{ font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }}
   </style>
@@ -239,25 +273,27 @@ def _build_html_body(
 <body>
   <div class="container">
 
-    <!-- Banner de severidad -->
-    <div style="background:{color};color:white;padding:18px;text-align:center;">
-      <div style="font-size:18px;font-weight:bold;margin-bottom:6px;">
-        SOC L1 · {sev_cfg["label"]}
-      </div>
-      <div style="font-size:13px;opacity:0.9;">{_esc(alert.title)}</div>
-    </div>
-
-    <!-- Header -->
+    <!-- Header con border-left por severidad (estilo Wazuh) -->
     <div class="header">
-      <div class="title">Aprobación requerida</div>
+      <div class="title">{_esc(alert.title)}</div>
       <div style="font-size:14px;color:#64748b;margin-top:4px;">
         {_esc(alert.wazuh_rule.description)}
       </div>
+      <div style="margin-top:10px;">
+        {rule_badge_html}
+        {risk_badge_html}
+      </div>
     </div>
 
-    <!-- (1) Resumen ejecutivo -->
-    <div style="padding:20px 24px 8px;">
-      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:10px;">
+    <!-- Pivot section: info principal destacada -->
+    <div class="pivot-section">
+      <div class="pivot-label">Información Principal:</div>
+      <div class="pivot-value">{pivot_value}</div>
+    </div>
+
+    <!-- Resumen ejecutivo del Narrator (estilo párrafo, fuera de tabla) -->
+    <div style="padding:0 24px;">
+      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:8px;">
         📝 Resumen ejecutivo
       </div>
       <div style="color:#334155;font-size:14px;line-height:1.6;white-space:pre-line;">
@@ -265,47 +301,47 @@ def _build_html_body(
       </div>
     </div>
 
-    <!-- (2) Contexto -->
-    <div style="padding:12px 24px 8px;">
-      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:10px;">
-        📊 Contexto
-      </div>
+    <!-- Info-table (estilo Wazuh exacto) -->
+    <div style="padding:0 24px;">
       <table class="info-table">
         {_ctx_rows(alert, plan)}
       </table>
     </div>
 
-    <!-- (3) Acciones propuestas (card azul, mismo patrón que "Acciones Sugeridas") -->
-    <div style="background:#f0f9ff;padding:16px;margin:20px 24px;border-radius:8px;border-left:4px solid #0284c7;">
-      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
-        🛠️ Acciones propuestas ({len(plan.actions)})
-      </div>
-      <ul style="margin:8px 0;padding-left:24px;color:#075985;font-size:13px;line-height:1.8;">
-        {_actions_html(plan)}
-      </ul>
-    </div>
-
-    <!-- (4) Análisis (card amarilla, mismo patrón que "Recomendación") -->
-    <div style="background:#fef3c7;padding:16px;margin:20px 24px;border-radius:8px;border-left:4px solid #f59e0b;">
+    <!-- Card amarilla "Recomendación" (= Análisis del Narrator) -->
+    <div style="background:#fef3c7;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
       <div style="font-weight:bold;color:#92400e;margin-bottom:8px;font-size:14px;">
-        🔍 Análisis
+        💡 Análisis del incidente:
       </div>
       <div style="color:#78350f;font-size:13px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.rationale)}
       </div>
     </div>
 
-    <!-- Botones de approval -->
-    <div style="background:{color};color:white;padding:24px;text-align:center;">
-      <div style="font-size:14px;margin-bottom:14px;opacity:0.95;">
-        Esta alerta requiere tu aprobación. Link single-use, válido por {ttl_hours}h.
+    <!-- Card azul "Acciones Sugeridas" (= ProposedActions del Narrator) -->
+    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
+      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
+        📋 Acciones propuestas ({len(plan.actions)}):
+      </div>
+      <ul style="margin:8px 0;padding-left:24px;color:#075985;font-size:13px;line-height:1.8;">
+        {_actions_html(plan)}
+      </ul>
+    </div>
+
+    <!-- Approval section: sutil, sin banner fuerte -->
+    <div class="approval-section">
+      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:6px;">
+        ⚠️ Esta alerta requiere tu aprobación
+      </div>
+      <div style="color:#64748b;font-size:12px;margin-bottom:16px;">
+        Link single-use, válido por {ttl_hours}h. Primer click decide.
       </div>
       {cta_buttons}
     </div>
 
     <div class="footer">
-      <strong>SOC L1 · Wazuh + Defender</strong><br>
-      Generado por el pipeline multi-agente — no responder a este email.
+      <strong>SOC L1 · Wazuh + Defender</strong> • Pipeline multi-agente<br>
+      Generado automáticamente — no responder a este email.
     </div>
   </div>
 </body>
