@@ -127,3 +127,6 @@ class Settings(BaseSettings):
     service_host: str = Field(default="0.0.0.0")
     service_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
+
+    # Feature flags
+    enable_triage: bool = Field(default=False)

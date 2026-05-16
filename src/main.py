@@ -11,6 +11,7 @@ Próximo:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from src.config import Settings
+from src.models import NormalizedAlert
 from src.normalize import normalize
 from src.security import verify_wazuh_signature
 
@@ -102,8 +104,10 @@ async def wazuh_webhook(
         len(alert.files),
     )
 
-    # TODO próximo: lanzar pipeline en background (asyncio.create_task)
-    # Por ahora solo log + ack para validar end-to-end con el integrator.
+    # Si Triage está habilitado, lanzamos pipeline en background y respondemos 202 ya.
+    # El integrator de Wazuh no debería esperar el análisis completo.
+    if settings.enable_triage:
+        asyncio.create_task(_run_triage_in_background(alert, settings))
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -113,3 +117,25 @@ async def wazuh_webhook(
             "source": alert.source,
         },
     )
+
+
+async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) -> None:
+    """Corre el Triage agent en background y loggea el resultado.
+
+    Errores aquí NO afectan al webhook (ya respondió 202). Solo se loggean.
+    Próximo: según verdict, encolar para Enricher/TI/Narrator o auto-close.
+    """
+    try:
+        # Import diferido para no requerir openai-agents si triage está deshabilitado
+        from src.agents.triage import triage_alert
+
+        decision = await triage_alert(alert, model=settings.openai_model_light)
+        logger.info(
+            "triage | id=%s verdict=%s confidence=%s reason=%r",
+            alert.alert_id,
+            decision.verdict,
+            decision.confidence,
+            decision.reason,
+        )
+    except Exception:
+        logger.exception("triage failed for alert id=%s", alert.alert_id)
