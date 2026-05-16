@@ -134,14 +134,13 @@ async def wazuh_webhook(
 
 
 async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) -> None:
-    """Corre el Triage agent en background y loggea el resultado.
+    """Corre el Triage agent en background y rutea según el verdict.
 
     Errores aquí NO afectan al webhook (ya respondió 202). Solo se loggean.
-    Próximo: según verdict, encolar para Enricher/TI/Narrator o auto-close.
     """
     try:
         # Import diferido para no requerir openai-agents si triage está deshabilitado
-        from src.agents.triage import triage_alert
+        from src.agents.triage import TriageDecision, triage_alert
 
         decision = await triage_alert(alert, model=settings.openai_model_light)
         logger.info(
@@ -151,5 +150,68 @@ async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) 
             decision.confidence,
             decision.reason,
         )
+        await _dispatch_by_verdict(alert, decision, settings)
     except Exception:
         logger.exception("triage failed for alert id=%s", alert.alert_id)
+
+
+async def _dispatch_by_verdict(
+    alert: NormalizedAlert, decision, settings: Settings
+) -> None:
+    """Rutea la alerta al handler correspondiente según el verdict del triage."""
+    if decision.verdict == "auto_close_benign":
+        await _handle_auto_close(alert, decision)
+    elif decision.verdict == "analyze":
+        await _handle_analyze(alert, decision, settings)
+    elif decision.verdict == "fast_track_critical":
+        await _handle_fast_track(alert, decision, settings)
+    else:
+        logger.warning(
+            "unknown verdict | id=%s verdict=%s (treating as analyze)",
+            alert.alert_id,
+            decision.verdict,
+        )
+        await _handle_analyze(alert, decision, settings)
+
+
+async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
+    """Verdict auto_close_benign: log audit y termina. No consume más LLM tokens."""
+    logger.info(
+        "AUDIT auto_closed | id=%s wazuh_rule=%s host=%s reason=%r confidence=%s",
+        alert.alert_id,
+        alert.wazuh_rule.id,
+        alert.device.hostname,
+        decision.reason,
+        decision.confidence,
+    )
+    # TODO: persistir a SQLite cuando agreguemos audit table (task #14)
+
+
+async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) -> None:
+    """Verdict analyze: encolá para Enricher → ThreatIntel → Narrator → email approval."""
+    logger.info(
+        "PIPELINE_QUEUED analyze | id=%s host=%s users=%s files=%s "
+        "(Enricher/TI/Narrator agents not yet implemented)",
+        alert.alert_id,
+        alert.device.hostname,
+        len(alert.users_involved),
+        len(alert.files),
+    )
+    # TODO: invocar Enricher agent (task #12 cont.)
+    # TODO: invocar ThreatIntel agent
+    # TODO: invocar Narrator + email approval (task #14)
+
+
+async def _handle_fast_track(
+    alert: NormalizedAlert, decision, settings: Settings
+) -> None:
+    """Verdict fast_track_critical: skip Enricher/TI, va directo al Narrator."""
+    logger.warning(
+        "PIPELINE_QUEUED fast_track | id=%s host=%s severity=%s "
+        "(Narrator agent not yet implemented - fast track will queue directly)",
+        alert.alert_id,
+        alert.device.hostname,
+        alert.severity_source,
+    )
+    # TODO: invocar Narrator directamente con la alerta + decisión
+    # TODO: email approval (task #14)
