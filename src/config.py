@@ -28,3 +28,8 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="")
     openai_model_light: str = Field(default="gpt-4o-mini")
     openai_model_heavy: str = Field(default="gpt-4o")
+
+    # HTTP service
+    service_host: str = Field(default="0.0.0.0")
+    service_port: int = Field(default=8000)
+    log_level: str = Field(default="INFO")

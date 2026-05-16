@@ -123,14 +123,64 @@ git pull
 # (cuando tengamos Dockerfile: docker compose up -d --build)
 ```
 
-## 6. Cuando agreguemos el FastAPI service
+## 6. Correr el servicio (FastAPI)
 
-Vamos a sumar:
-- `Dockerfile` + `docker-compose.yml`
-- Reemplazar el integrator de Wazuh para apuntar a `http://localhost:8000/webhook/wazuh-alert` (en vez del viejo n8n en 5678)
-- Systemd unit o docker compose para que arranque solo
+Ya tenés el webhook listo. Para levantarlo en foreground:
 
-Por ahora solo tenés: normalize + LDAP tools + tests. Suficiente para validar la base.
+```bash
+cd /opt/soc-l1
+source .venv/bin/activate
+uvicorn src.main:app --host 0.0.0.0 --port 8000 --log-level info
+```
+
+Test rápido:
+
+```bash
+# En otra terminal del server
+curl http://localhost:8000/health
+# → {"status":"ok","service":"soc-l1"}
+```
+
+### Test del webhook con HMAC
+
+```bash
+# Generar firma de un payload de prueba
+BODY='{"agent":{"name":"test"},"data":{"srcip":"1.2.3.4"},"rule":{"id":"100","level":5,"description":"test","groups":["test"]},"id":"smoke-001","timestamp":"2026-05-16T12:00:00Z"}'
+SECRET=$(grep '^WAZUH_WEBHOOK_SECRET=' .env | cut -d= -f2-)
+SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')"
+
+curl -X POST http://localhost:8000/webhook/wazuh-alert \
+  -H "Content-Type: application/json" \
+  -H "X-Wazuh-Signature: $SIG" \
+  -d "$BODY"
+# → {"status":"accepted","alert_id":"smoke-001","source":"wazuh_native"}
+```
+
+### Apuntar el integrator Wazuh al nuevo endpoint
+
+En `/var/ossec/etc/ossec.conf`:
+
+```xml
+<integration>
+  <name>custom-n8n</name>  <!-- el script ya está en /var/ossec/integrations/custom-n8n -->
+  <hook_url>http://localhost:8000/webhook/wazuh-alert</hook_url>
+  <api_key>EL_VALOR_DE_WAZUH_WEBHOOK_SECRET</api_key>
+  <level>5</level>
+  <alert_format>json</alert_format>
+</integration>
+```
+
+Reiniciar: `sudo systemctl restart wazuh-manager`
+
+> El integrator `custom-n8n` que armaste antes sigue funcionando idéntico — solo cambia la URL del hook.
+
+### Próximo: levantarlo persistente
+
+Cuando esté validado con curl + alerta real, vamos a agregar:
+- `Dockerfile` + `docker-compose.yml` (para que el servicio sea un container al lado del Wazuh)
+- Systemd unit alternativo si preferís no usar Docker
+
+Por ahora con uvicorn en foreground (o un `nohup`) alcanza para validar.
 
 ## Checklist post-deploy
 
