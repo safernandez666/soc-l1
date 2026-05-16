@@ -1,12 +1,18 @@
 """Config tipada vía pydantic-settings.
 
-LdapConfig sigue el patrón de sync_ad.py: lee credenciales de un archivo
-con formato `AD_USER=...\\nAD_PASSWORD=...` (default: /root/.ad_wazuh_credentials).
+LdapConfig soporta 3 fuentes de credenciales (en orden de precedencia):
+  1. Env vars LDAP_BIND_DN / LDAP_BIND_PASSWORD (literal, ojo con escaping)
+  2. Env var LDAP_BIND_PASSWORD_B64 (base64-encoded, safe para chars como $, ', ")
+  3. credentials_file (AD_USER=... AD_PASSWORD=..., default /root/.ad_wazuh_credentials)
 
-Override possible vía env vars LDAP_BIND_DN / LDAP_BIND_PASSWORD.
+Recomendación: usar opción 2 (b64) para evitar el .env parsing issue cuando el
+password tiene chars especiales. La opción 3 es útil si ya tenés sync_ad.py
+con esa estructura y querés reusar.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 
 from pydantic import Field, model_validator
@@ -59,16 +65,27 @@ class LdapConfig(BaseSettings):
     credentials_file: str = Field(default="/root/.ad_wazuh_credentials")
     bind_dn: str = Field(default="")
     bind_password: str = Field(default="")
+    bind_password_b64: str = Field(default="")
 
     use_starttls: bool = Field(default=True)
     timeout: int = Field(default=10)
 
     @model_validator(mode="after")
-    def _load_from_credentials_file(self) -> LdapConfig:
-        """Si faltan bind_dn / bind_password, intentar cargarlos del archivo."""
+    def _resolve_credentials(self) -> LdapConfig:
+        """Resuelve bind_dn y bind_password desde múltiples fuentes en orden de precedencia."""
+        # 1. Si vino LDAP_BIND_PASSWORD_B64 y no hay bind_password directo, decodear
+        if self.bind_password_b64 and not self.bind_password:
+            try:
+                decoded = base64.b64decode(self.bind_password_b64, validate=True)
+                self.bind_password = decoded.decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError) as e:
+                raise ValueError(
+                    f"LDAP_BIND_PASSWORD_B64 inválido (no es base64 válido o no decodea a UTF-8): {e}"
+                ) from e
+
+        # 2. Si todavía faltan, intentar credentials_file
         need_dn = not self.bind_dn
         need_pwd = not self.bind_password
-
         if (need_dn or need_pwd) and self.credentials_file:
             if os.path.exists(self.credentials_file):
                 try:
@@ -80,17 +97,19 @@ class LdapConfig(BaseSettings):
                 except PermissionError as e:
                     raise ValueError(
                         f"No permission to read {self.credentials_file}. "
-                        f"Corré con sudo, o seteá LDAP_BIND_DN/LDAP_BIND_PASSWORD en .env. "
+                        f"Corré con sudo, o seteá LDAP_BIND_DN/LDAP_BIND_PASSWORD_B64 en .env. "
                         f"Detalle: {e}"
                     ) from e
 
+        # 3. Validación final
         if not self.bind_dn:
             raise ValueError(
-                "bind_dn vacío. Seteá LDAP_BIND_DN en .env o agregá AD_USER al credentials_file."
+                "bind_dn vacío. Seteá LDAP_BIND_DN en .env o asegurate que el credentials_file existe."
             )
         if not self.bind_password:
             raise ValueError(
-                "bind_password vacío. Seteá LDAP_BIND_PASSWORD en .env o agregá AD_PASSWORD al credentials_file."
+                "bind_password vacío. Opciones: "
+                "LDAP_BIND_PASSWORD_B64 (recomendado), LDAP_BIND_PASSWORD, o credentials_file."
             )
         return self
 
