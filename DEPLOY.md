@@ -72,13 +72,36 @@ nano .env
 ```
 
 Llená al menos:
-- `LDAP_BIND_PASSWORD` ← copiá de `sudo cat /root/.ad_wazuh_credentials` (extraído limpio con SCP+TextEdit en el flujo previo)
+- `LDAP_BIND_DN`: UPN del service account (ej. `svc-soar@example.com`) o DN completo
+- `WAZUH_WEBHOOK_SECRET`: lo generás con `openssl rand -hex 32`
 - El resto se completa cuando vayamos agregando agents/FastAPI/SMTP
+
+**NO pongas `LDAP_BIND_PASSWORD` en el .env** — usá el `secrets_dir` (ver sección 2.1). Especialmente si tu password tiene chars como `$`, `'`, `"` que rompen el parser de python-dotenv.
 
 Permisos:
 ```bash
 chmod 600 .env
 ```
+
+### 2.1 Secret del LDAP en archivo separado (recomendado)
+
+```bash
+# Crear el directorio de secrets (modo 700)
+sudo mkdir -p /opt/soc-l1/secrets
+sudo chmod 700 /opt/soc-l1/secrets
+sudo chown $USER:$USER /opt/soc-l1/secrets
+
+# Escribir el password sin newline ni quoting (raw bytes)
+printf '%s' 'TU_PASSWORD_AQUI' > /opt/soc-l1/secrets/bind_password
+chmod 600 /opt/soc-l1/secrets/bind_password
+
+# O si está en /root/.ad_wazuh_credentials:
+sudo bash -c 'grep "^AD_PASSWORD=" /root/.ad_wazuh_credentials | cut -d= -f2- | tr -d "\n" > /opt/soc-l1/secrets/bind_password'
+sudo chmod 600 /opt/soc-l1/secrets/bind_password
+sudo chown $USER:$USER /opt/soc-l1/secrets/bind_password
+```
+
+Pydantic-settings detecta automáticamente el archivo `bind_password` en `/opt/soc-l1/secrets/` y lo usa como valor del field `bind_password` de LdapConfig. **Sin escaping issues — el file contiene bytes raw exactos.**
 
 ## 3. Crear venv e instalar
 
