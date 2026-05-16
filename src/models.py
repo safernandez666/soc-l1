@@ -1,0 +1,124 @@
+"""Pydantic models for normalized SOC alerts.
+
+The normalizer turns raw Wazuh alerts (native or Defender-via-Wazuh) into
+this common schema. Agents always work against NormalizedAlert, never raw.
+"""
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+UserRole = Literal["logged_on", "file_path_owner", "event_user"]
+AlertSource = Literal["defender_via_wazuh", "wazuh_native"]
+Severity = Literal["low", "medium", "high", "critical"]
+
+
+class User(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sam: str
+    domain: str | None = None
+    role: UserRole
+
+
+class Device(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hostname: str | None = None
+    fqdn: str | None = None
+    internal_ip: str | None = None
+    external_ip: str | None = None
+    os: str | None = None
+    mde_id: str | None = None
+    entra_id: str | None = None
+    domain: str | None = None
+    risk_score: str | None = None
+    health: str | None = None
+
+
+class FileEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    sha256: str | None = None
+    sha1: str | None = None
+    md5: str | None = None
+    path: str | None = None
+    size: int | None = None
+    verdict: str | None = None
+    remediation: str | None = None
+
+
+class Network(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    src_ip_internal: str | None = None
+    src_ip_external: str | None = None
+    dst_ip: str | None = None
+
+
+class Threat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str
+    family: str | None = None
+    display_name: str | None = None
+    provider_actions: str | None = None
+    incident_id: str | None = None
+    incident_url: str | None = None
+    alert_url: str | None = None
+
+
+class WazuhRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str | None = None
+    level: int = 0
+    description: str = "Unknown"
+    groups: list[str] = Field(default_factory=list)
+
+
+class NormalizedAlert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: AlertSource
+    alert_id: str
+    timestamp: str
+    wazuh_rule: WazuhRule
+    severity_source: Severity
+    title: str
+    category: str
+    device: Device
+    users_involved: list[User] = Field(default_factory=list)
+    files: list[FileEvidence] = Field(default_factory=list)
+    network: Network
+    threat: Threat
+    raw: dict[str, Any]
+
+
+# ===== Active Directory =====
+
+
+class ADUser(BaseModel):
+    """Snapshot de un usuario en AD post-search."""
+
+    model_config = ConfigDict(extra="forbid")
+    dn: str
+    sam: str
+    display_name: str | None = None
+    mail: str | None = None
+    department: str | None = None
+    title: str | None = None
+    manager: str | None = None
+    member_of: list[str] = Field(default_factory=list)
+    account_enabled: bool
+    locked_out: bool
+    last_logon: str | None = None
+    bad_pwd_count: int = 0
+    pwd_last_set: str | None = None
+    user_account_control: int
+
+
+class LdapActionResult(BaseModel):
+    """Resultado de una operación de modificación en AD."""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: bool
+    action: str
+    target_sam: str
+    target_dn: str | None = None
+    message: str | None = None
