@@ -96,7 +96,12 @@ async def ldap_search_user(
         sam_account_name: El sam (sin dominio). Ejemplo: "jdoe", no "jdoe@example.com".
     """
     cfg = ctx.context.ldap_cfg
+    logger.info("🔎 TOOL ldap_search_user(sam=%r) [agent=Enricher]", sam_account_name)
+
     if cfg is None:
+        logger.warning(
+            "↳ ldap_search_user(sam=%r) → SKIP: LDAP no configurado", sam_account_name
+        )
         return {
             "found": False,
             "sam": sam_account_name,
@@ -106,12 +111,29 @@ async def ldap_search_user(
     try:
         user: ADUser | None = ldap_tools.search_user(cfg, sam_account_name)
     except Exception as e:  # noqa: BLE001 - el LLM necesita un string, no un raise
-        logger.warning("ldap_search_user failed for %s: %s", sam_account_name, e)
+        logger.warning(
+            "↳ ldap_search_user(sam=%r) → ERROR: %s", sam_account_name, e
+        )
         return {"found": False, "sam": sam_account_name, "error": str(e)}
 
     if user is None:
+        logger.info("↳ ldap_search_user(sam=%r) → NOT FOUND in AD", sam_account_name)
         return {"found": False, "sam": sam_account_name}
 
+    # Visibilidad: la línea más importante del Enricher. Acá ves QUÉ aprendió el agent.
+    logger.info(
+        "↳ ldap_search_user(sam=%r) → FOUND: enabled=%s locked=%s "
+        "dept=%r title=%r mgr=%s groups=%d bad_pwd=%d last_logon=%s",
+        sam_account_name,
+        user.account_enabled,
+        user.locked_out,
+        user.department,
+        user.title,
+        (user.manager.split(",")[0] if user.manager else None),
+        len(user.member_of),
+        user.bad_pwd_count,
+        user.last_logon,
+    )
     return {
         "found": True,
         "sam": user.sam,
@@ -142,19 +164,33 @@ async def wazuh_get_rule(
         rule_id: ID numérico de la rule. Ejemplo: "60106".
     """
     settings = ctx.context.settings
+    logger.info("🔎 TOOL wazuh_get_rule(rule_id=%r) [agent=Enricher]", rule_id)
+
     if not settings.wazuh_api_password:
+        logger.warning(
+            "↳ wazuh_get_rule(rule_id=%r) → SKIP: Wazuh API no configurado", rule_id
+        )
         return {"found": False, "rule_id": rule_id, "error": "Wazuh API no configurado"}
 
     try:
         async with WazuhApiClient(settings) as client:
             rule = await client.get_rule(rule_id)
     except WazuhApiError as e:
-        logger.warning("wazuh_get_rule failed for %s: %s", rule_id, e)
+        logger.warning("↳ wazuh_get_rule(rule_id=%r) → ERROR: %s", rule_id, e)
         return {"found": False, "rule_id": rule_id, "error": str(e)}
 
     if rule is None:
+        logger.info("↳ wazuh_get_rule(rule_id=%r) → NOT FOUND", rule_id)
         return {"found": False, "rule_id": rule_id}
 
+    logger.info(
+        "↳ wazuh_get_rule(rule_id=%r) → FOUND: level=%d desc=%r groups=%s mitre=%s",
+        rule_id,
+        rule.level,
+        rule.description[:80],
+        rule.groups,
+        rule.mitre_ids,
+    )
     return {
         "found": True,
         "rule_id": rule.rule_id,

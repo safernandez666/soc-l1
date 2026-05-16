@@ -46,6 +46,12 @@ async def lifespan(app: FastAPI):
         level=settings.log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Silenciar el ruido de las libs HTTP - nos quedamos con los logs del pipeline.
+    # Cada llamada a OpenAI / Wazuh API se loggea explícitamente en nuestros tools.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
     logger.info("SOC L1 service starting up - log level=%s", settings.log_level)
 
     if settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
@@ -145,9 +151,16 @@ async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) 
     try:
         from src.agents.triage import triage_alert
 
+        logger.info(
+            "🤖 AGENT Triage.run | id=%s model=%s host=%s severity=%s",
+            alert.alert_id,
+            settings.openai_model_light,
+            alert.device.hostname,
+            alert.severity_source,
+        )
         decision = await triage_alert(alert, model=settings.openai_model_light)
         logger.info(
-            "triage | id=%s verdict=%s confidence=%s reason=%r",
+            "✅ TRIAGE | id=%s verdict=%s confidence=%s\n  reason: %s",
             alert.alert_id,
             decision.verdict,
             decision.confidence,
@@ -206,16 +219,46 @@ async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) 
         from src.agents.enricher import EnrichmentResult, enrich_alert
 
         ldap_cfg = _build_ldap_cfg_safely()
+        logger.info(
+            "🤖 AGENT Enricher.run | id=%s users_to_lookup=%d rule_id=%s",
+            alert.alert_id,
+            len(alert.users_involved),
+            alert.wazuh_rule.id,
+        )
         enrichment = await enrich_alert(
             alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_light
         )
+
+        # Resumen estructurado del enrichment (qué encontró el agente, por user y rule)
+        user_lines = []
+        for u in enrichment.users:
+            if u.found_in_ad:
+                user_lines.append(
+                    f"  - {u.sam}: enabled={u.enabled} locked={u.locked_out} "
+                    f"dept={u.department!r} bad_pwd={u.bad_pwd_count}"
+                )
+            else:
+                err = f" ({u.lookup_error})" if u.lookup_error else ""
+                user_lines.append(f"  - {u.sam}: NOT FOUND in AD{err}")
+
+        rule_line = "rule=NOT_FETCHED"
+        if enrichment.rule:
+            rule_line = (
+                f"rule={enrichment.rule.rule_id} level={enrichment.rule.level} "
+                f"mitre={enrichment.rule.mitre_ids} groups={enrichment.rule.groups}"
+            )
+
         logger.info(
-            "ENRICHED | id=%s users=%d rule_found=%s flags=%s | %s",
+            "✅ ENRICHED | id=%s users=%d rule_found=%s flags=[%s]\n"
+            "  summary: %s\n"
+            "%s\n  %s",
             alert.alert_id,
             len(enrichment.users),
             enrichment.rule is not None,
-            ",".join(enrichment.flags) if enrichment.flags else "none",
+            ", ".join(enrichment.flags) if enrichment.flags else "none",
             enrichment.summary,
+            "\n".join(user_lines) if user_lines else "  (no users en enrichment)",
+            rule_line,
         )
     except Exception:
         logger.exception("enricher failed for alert id=%s", alert.alert_id)
@@ -258,15 +301,31 @@ async def _run_narrator_and_request_approval(
         from src.mailer import send_approval_email
         from src.state import create_pending_approval
 
+        logger.info(
+            "🤖 AGENT Narrator.run | id=%s model=%s triage_verdict=%s enrichment_flags=%d",
+            alert.alert_id,
+            settings.openai_model_heavy,
+            decision.verdict,
+            len(enrichment.flags),
+        )
         plan = await narrate_incident(
             alert, triage=decision, enrichment=enrichment, model=settings.openai_model_heavy
         )
+
+        # Detalle de cada acción propuesta (lo que va a aprobar/rechazar el humano)
+        action_lines = []
+        for a in plan.actions:
+            action_lines.append(f"  - {a.type} → {a.target}: {a.justification}")
+
         logger.info(
-            "NARRATED | id=%s risk=%s actions=%d | %s",
+            "✅ NARRATED | id=%s risk=%s actions=%d\n"
+            "  summary: %s\n"
+            "%s",
             alert.alert_id,
             plan.risk_level,
             len(plan.actions),
             plan.executive_summary,
+            "\n".join(action_lines) if action_lines else "  (no actions - monitor only)",
         )
 
         token = await create_pending_approval(
@@ -275,7 +334,14 @@ async def _run_narrator_and_request_approval(
             plan_json=plan.model_dump_json(),
             alert_json=alert.model_dump_json(),
         )
-        logger.info("APPROVAL_PENDING | id=%s token=%s", alert.alert_id, token[:12] + "…")
+        approve_url = f"{settings.approval_base_url.rstrip('/')}/approve/{token}"
+        logger.info(
+            "📬 APPROVAL_PENDING | id=%s risk=%s actions=%d\n  approve: %s",
+            alert.alert_id,
+            plan.risk_level,
+            len(plan.actions),
+            approve_url,
+        )
 
         await send_approval_email(settings, alert, plan, token)
     except Exception:
