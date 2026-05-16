@@ -105,12 +105,12 @@ python3 -c "
 from src.config import LdapConfig
 from src.tools.ldap import search_user
 cfg = LdapConfig()  # lee del .env
-user = search_user(cfg, 'wazuhseg')
+user = search_user(cfg, 'svc-soar')
 print(user.model_dump_json(indent=2))
 "
 ```
 
-Debería imprimir el JSON del user `wazuhseg` con `account_enabled: true`. Si funciona, el LDAP module está validado end-to-end contra producción.
+Debería imprimir el JSON del user `svc-soar` con `account_enabled: true`. Si funciona, el LDAP module está validado end-to-end contra producción.
 
 ## 5. Actualizaciones futuras
 
@@ -188,5 +188,5 @@ Por ahora con uvicorn en foreground (o un `nohup`) alcanza para validar.
 - [ ] `.env` creado con `LDAP_BIND_PASSWORD` correcta y permisos `600`
 - [ ] `uv venv && uv pip install -e ".[dev]"` sin errores
 - [ ] `pytest -q` → 14 passed
-- [ ] Test de integración LDAP imprime el user `wazuhseg`
+- [ ] Test de integración LDAP imprime el user `svc-soar`
 - [ ] Antes de operar productivo: rotar el `LDAP_BIND_PASSWORD` a algo automation-friendly (sin chars problemáticos) y actualizar tanto en AD como en `/opt/soc-l1/.env`

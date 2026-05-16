@@ -14,8 +14,8 @@ Próximo: agentes (triage, enricher, threat intel, narrator, operator), FastAPI 
 brew install uv
 
 # Crear venv e instalar dependencias
-cd ~/Proyects/ExampleCorp/soc-l1
-uv venv
+cd /path/to/soc-l1
+uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 

@@ -10,9 +10,9 @@ class LdapConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LDAP_", env_file=".env", extra="ignore")
 
-    host: str = Field(default="192.168.32.29")
+    host: str = Field(default="192.0.2.10")  # RFC 5737 documentation IP
     port: int = Field(default=389)
-    base_dn: str = Field(default="DC=example,DC=dns")
+    base_dn: str = Field(default="DC=example,DC=local")
     bind_dn: str
     bind_password: str
     use_starttls: bool = Field(default=True)

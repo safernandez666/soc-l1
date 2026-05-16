@@ -10,8 +10,8 @@ from src import tools
 from src.config import LdapConfig
 from src.tools import ldap as ldap_tools
 
-BASE_DN = "DC=example,DC=dns"
-ADMIN_DN = "CN=admin,DC=example,DC=dns"
+BASE_DN = "DC=example,DC=local"
+ADMIN_DN = "CN=admin,DC=example,DC=local"
 ADMIN_PASSWORD = "test-password-OK"
 
 
@@ -30,7 +30,7 @@ def cfg() -> LdapConfig:
 @pytest.fixture
 def mock_conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[Connection]:
     """Reemplaza el context manager _connection() con una mock connection
-    que tiene 1 admin (para bind) + 1 user de prueba (wazuhseg)."""
+    que tiene 1 admin (para bind) + 1 user de prueba (svc-soar)."""
     server = Server("fake-server", get_info=OFFLINE_AD_2012_R2)
     conn = Connection(server, user=ADMIN_DN, password=ADMIN_PASSWORD, client_strategy=MOCK_SYNC)
 
@@ -45,19 +45,19 @@ def mock_conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[Connection]:
         },
     )
     # Usuario target
-    test_user_dn = "CN=wazuhseg,OU=Servicios,OU=Sistemas,OU=Example Corp,DC=example,DC=dns"
+    test_user_dn = "CN=svc-soar,OU=Services,OU=Tech,OU=Example Corp,DC=example,DC=local"
     conn.strategy.add_entry(
         test_user_dn,
         {
             "objectClass": ["top", "person", "user"],
-            "sAMAccountName": "wazuhseg",
+            "sAMAccountName": "svc-soar",
             "displayName": "Wazuh Service Account",
-            "mail": "wazuhseg@example.com",
+            "mail": "svc-soar@example.com",
             "department": "IT Security",
             "title": "Service Account",
             "memberOf": [
-                "CN=Domain Users,CN=Users,DC=example,DC=dns",
-                "CN=Servicios,OU=Grupos,DC=example,DC=dns",
+                "CN=Domain Users,CN=Users,DC=example,DC=local",
+                "CN=Servicios,OU=Groups,DC=example,DC=local",
             ],
             "userAccountControl": 512,  # NORMAL_ACCOUNT (enabled)
             "badPwdCount": 0,
@@ -81,11 +81,11 @@ def mock_conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[Connection]:
 
 
 def test_search_user_found(cfg: LdapConfig, mock_conn: Connection) -> None:
-    user = ldap_tools.search_user(cfg, "wazuhseg")
+    user = ldap_tools.search_user(cfg, "svc-soar")
     assert user is not None
-    assert user.sam == "wazuhseg"
+    assert user.sam == "svc-soar"
     assert user.display_name == "Wazuh Service Account"
-    assert user.mail == "wazuhseg@example.com"
+    assert user.mail == "svc-soar@example.com"
     assert user.department == "IT Security"
     assert user.account_enabled is True
     assert user.locked_out is False
@@ -99,14 +99,14 @@ def test_search_user_not_found(cfg: LdapConfig, mock_conn: Connection) -> None:
 
 
 def test_disable_user_sets_uac_bit(cfg: LdapConfig, mock_conn: Connection) -> None:
-    result = ldap_tools.disable_user(cfg, "wazuhseg")
+    result = ldap_tools.disable_user(cfg, "svc-soar")
     assert result.ok is True
     assert result.action == "disable_user"
-    assert result.target_sam == "wazuhseg"
-    assert result.target_dn is not None and "wazuhseg" in result.target_dn
+    assert result.target_sam == "svc-soar"
+    assert result.target_dn is not None and "svc-soar" in result.target_dn
 
     # Verificá el estado post-disable
-    user = ldap_tools.search_user(cfg, "wazuhseg")
+    user = ldap_tools.search_user(cfg, "svc-soar")
     assert user is not None
     assert user.account_enabled is False
     assert user.user_account_control & 0x2  # ACCOUNT_DISABLE bit
@@ -122,18 +122,18 @@ def test_force_password_change_sets_pwdlastset_zero(
     cfg: LdapConfig, mock_conn: Connection
 ) -> None:
     # Verificá estado previo
-    user_before = ldap_tools.search_user(cfg, "wazuhseg")
+    user_before = ldap_tools.search_user(cfg, "svc-soar")
     assert user_before is not None
     assert user_before.pwd_last_set is not None  # tenía un valor
 
     # Ejecutar acción
-    result = ldap_tools.force_password_change(cfg, "wazuhseg")
+    result = ldap_tools.force_password_change(cfg, "svc-soar")
     assert result.ok is True
     assert result.action == "force_password_change"
     assert result.target_dn is not None
 
     # Verificá post: pwdLastSet=0 → ldap3 lo devuelve como None en nuestro mapper
-    user_after = ldap_tools.search_user(cfg, "wazuhseg")
+    user_after = ldap_tools.search_user(cfg, "svc-soar")
     assert user_after is not None
     assert user_after.pwd_last_set is None
 
