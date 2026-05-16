@@ -202,7 +202,7 @@ async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
 
 
 async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) -> None:
-    """analyze: Enricher → (si enable_narrator) Narrator + email approval."""
+    """analyze: Enricher → Narrator → email approval."""
     logger.info(
         "PIPELINE_QUEUED analyze | id=%s host=%s users=%s files=%s",
         alert.alert_id,
@@ -210,24 +210,58 @@ async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) 
         len(alert.users_involved),
         len(alert.files),
     )
+    await _enrich_and_request_approval(alert, decision, settings, priority="normal")
 
+
+async def _handle_fast_track(alert: NormalizedAlert, decision, settings: Settings) -> None:
+    """fast_track_critical: misma pipeline que analyze pero con priority=critical.
+
+    El Enricher SÍ se ejecuta (a diferencia del diseño v1) - para incidentes críticos
+    queremos MÁS contexto, no menos. La diferencia entre analyze/fast_track queda
+    como hint para el Narrator vía priority + el triage.verdict que ya recibe.
+    """
+    logger.warning(
+        "PIPELINE_QUEUED fast_track | id=%s host=%s severity=%s (running full enrichment)",
+        alert.alert_id,
+        alert.device.hostname,
+        alert.severity_source,
+    )
+    await _enrich_and_request_approval(alert, decision, settings, priority="critical")
+
+
+async def _enrich_and_request_approval(
+    alert: NormalizedAlert,
+    decision,
+    settings: Settings,
+    priority: str = "normal",
+) -> None:
+    """Pipeline compartido: Enricher → Narrator → SQLite → email.
+
+    priority: "normal" (de analyze) o "critical" (de fast_track). Se traduce en
+    un flag extra en el enrichment para que el Narrator lo considere.
+    """
     if not settings.enable_enricher:
         logger.info("enricher_skipped | id=%s ENABLE_ENRICHER=false", alert.alert_id)
         return
 
     try:
-        from src.agents.enricher import EnrichmentResult, enrich_alert
+        from src.agents.enricher import enrich_alert
 
         ldap_cfg = _build_ldap_cfg_safely()
         logger.info(
-            "🤖 AGENT Enricher.run | id=%s users_to_lookup=%d rule_id=%s",
+            "🤖 AGENT Enricher.run | id=%s priority=%s users_to_lookup=%d rule_id=%s",
             alert.alert_id,
+            priority,
             len(alert.users_involved),
             alert.wazuh_rule.id,
         )
         enrichment = await enrich_alert(
             alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_light
         )
+
+        # Inyectamos flag de priority si viene crítico (el Narrator lo va a ver)
+        if priority == "critical" and "fast_track_priority" not in enrichment.flags:
+            enrichment.flags.append("fast_track_priority")
 
         # Resumen estructurado del enrichment (qué encontró el agente, por user y rule)
         user_lines = []
@@ -265,27 +299,6 @@ async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) 
         return
 
     await _run_narrator_and_request_approval(alert, decision, settings, enrichment)
-
-
-async def _handle_fast_track(alert: NormalizedAlert, decision, settings: Settings) -> None:
-    """fast_track_critical: skip Enricher, va directo a Narrator con enrichment vacío."""
-    logger.warning(
-        "PIPELINE_QUEUED fast_track | id=%s host=%s severity=%s",
-        alert.alert_id,
-        alert.device.hostname,
-        alert.severity_source,
-    )
-    from src.agents.enricher import EnrichmentResult
-
-    empty_enrichment = EnrichmentResult(
-        users=[],
-        rule=None,
-        summary="(fast_track: enrichment skipped por criticidad)",
-        flags=["fast_track_skip_enrichment"],
-    )
-    await _run_narrator_and_request_approval(
-        alert, decision, settings, empty_enrichment
-    )
 
 
 async def _run_narrator_and_request_approval(

@@ -115,10 +115,16 @@ Generá `notify_only` cuando:
   - El user no existe en AD (no podemos accionar; solo registrar)
 
 REGLAS PARA `risk_level`:
-  - critical: triage=fast_track_critical Y verdict_malicious Y user_enabled_en_AD
+  - critical: triage=fast_track_critical Y/O flag "fast_track_priority" presente \
+    en enrichment.flags Y archivo verdict=malicious
   - high: múltiples flags de attack chain (credential_access + lateral_movement / persistence)
   - medium: alerta legítima con evidencia limitada o un solo flag relevante
   - low: ruido residual que el triage marcó analyze por conservadurismo
+
+CONSIDERACIÓN ESPECIAL para flag "fast_track_priority":
+  - El Triage marcó este incidente como fast_track_critical. Asumí mayor urgencia.
+  - Si hay users encontrados en AD, sé MÁS proactivo con disable_user/force_password_change.
+  - Si no hay users en AD, considerá fuertemente escalate_l2.
 
 PROHIBICIONES:
   - NO inventes acciones sobre usuarios que no aparecen en enrichment.users
