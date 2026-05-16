@@ -1,0 +1,20 @@
+#!/bin/sh
+# Wazuh integrator wrapper para soc-l1.
+# Wazuh invoca este archivo y le pasa: $1 alert_file $2 api_key $3 hook_url $4 options_file
+WPYTHON_BIN="framework/python/bin/python3"
+SCRIPT_PATH_NAME="$0"
+DIR_NAME="$(cd "$(dirname "$SCRIPT_PATH_NAME")" >/dev/null 2>&1 && pwd -P)"
+SCRIPT_NAME="$(basename "$SCRIPT_PATH_NAME")"
+PYTHON_SCRIPT="${DIR_NAME}/${SCRIPT_NAME}.py"
+WAZUH_PATH="$(cd "${DIR_NAME}/.." >/dev/null 2>&1 && pwd -P)"
+
+if [ -x "${WAZUH_PATH}/${WPYTHON_BIN}" ]; then
+  PY="${WAZUH_PATH}/${WPYTHON_BIN}"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="$(command -v python3)"
+else
+  echo "python3 not found" >&2
+  exit 1
+fi
+
+exec "${PY}" "${PYTHON_SCRIPT}" "$@"
