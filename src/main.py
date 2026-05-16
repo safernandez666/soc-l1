@@ -296,17 +296,66 @@ def _build_ldap_cfg_safely():
 # ===== Approval endpoints =====
 
 
-def _render_decision_page(title: str, body_html: str, ok: bool) -> HTMLResponse:
-    color = "#28a745" if ok else "#dc3545"
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{title}</title></head>
-<body style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 80px auto; text-align: center;">
-  <h1 style="color: {color};">{title}</h1>
-  <div style="font-size: 16px; color: #333;">{body_html}</div>
-  <p style="color: #888; font-size: 12px; margin-top: 40px;">SOC L1 — Example Corp</p>
-</body></html>
+# Design tokens alineados con src/mailer.py (mismo system del integrator Wazuh).
+# Cada estado tiene icono + color banner + color de acento.
+_PAGE_STATES = {
+    "approved":    {"banner": "#15803d", "accent": "#16a34a", "icon": "✅", "title": "Aprobado"},
+    "rejected":    {"banner": "#9a3412", "accent": "#ea580c", "icon": "❌", "title": "Rechazado"},
+    "already":     {"banner": "#475569", "accent": "#64748b", "icon": "ℹ️",  "title": "Ya decidido"},
+    "expired":     {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "⏱️",  "title": "Expirado"},
+    "not_found":   {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "🚫", "title": "Token inválido"},
+    "error":       {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "⚠️",  "title": "Error"},
+}
+
+
+def _render_decision_page(state_key: str, body_html: str) -> HTMLResponse:
+    """Render página de decisión con el design system de soc-l1.
+
+    state_key: approved | rejected | already | expired | not_found | error
+    body_html: contenido del cuerpo (puede contener <code>, <strong>, etc.)
+    """
+    s = _PAGE_STATES.get(state_key, _PAGE_STATES["error"])
+    page = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SOC L1 · {s["title"]}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f8fafc; margin: 0; padding: 40px 20px; color: #0f172a; }}
+    .container {{ max-width: 560px; margin: 0 auto; background: white;
+                  border-radius: 12px; overflow: hidden;
+                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+    .banner {{ background: {s["banner"]}; color: white; padding: 32px 24px; text-align: center; }}
+    .icon {{ font-size: 48px; line-height: 1; margin-bottom: 12px; }}
+    .heading {{ font-size: 22px; font-weight: bold; margin: 0; }}
+    .body {{ padding: 28px 24px; font-size: 14px; line-height: 1.6; color: #334155;
+             text-align: center; border-left: 4px solid {s["accent"]}; margin: 0 24px;
+             background: #f9fafb; border-radius: 6px; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center;
+               font-size: 12px; color: #64748b; }}
+    code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 3px;
+            font-family: 'SF Mono', Monaco, monospace; font-size: 12px; color: #0f172a; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="banner">
+      <div class="icon">{s["icon"]}</div>
+      <h1 class="heading">{s["title"]}</h1>
+    </div>
+    <div style="padding: 28px 24px 16px;">
+      <div class="body">{body_html}</div>
+    </div>
+    <div class="footer">
+      <strong>SOC L1 · Wazuh + Defender</strong><br>
+      Example Corp — pipeline multi-agente
+    </div>
+  </div>
+</body>
+</html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=page)
 
 
 async def _handle_decision(
@@ -330,9 +379,9 @@ async def _handle_decision(
     if result == "not_found":
         logger.warning("APPROVAL_NOT_FOUND | token=%s ip=%s", token[:12], ip)
         return _render_decision_page(
-            "Token inválido",
-            "Este link no corresponde a ningún approval pendiente.",
-            ok=False,
+            "not_found",
+            "Este link no corresponde a ningún approval pendiente. "
+            "Puede haber sido manipulado o pertenecer a otro entorno.",
         )
 
     if result == "expired":
@@ -343,9 +392,10 @@ async def _handle_decision(
             ip,
         )
         return _render_decision_page(
-            "Expirado",
-            f"Este approval excedió el TTL de {settings.approval_ttl_hours}h y no puede ser decidido.",
-            ok=False,
+            "expired",
+            f"Este approval excedió el TTL de <strong>{settings.approval_ttl_hours}h</strong> "
+            "y no puede ser decidido. Si la alerta sigue siendo relevante, esperá la próxima "
+            "iteración del pipeline.",
         )
 
     if result == "already_decided":
@@ -358,9 +408,9 @@ async def _handle_decision(
             ip,
         )
         return _render_decision_page(
-            "Ya decidido",
-            f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>).",
-            ok=False,
+            "already",
+            f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>). "
+            "Cada link es single-use y no admite cambios.",
         )
 
     # result == "ok"
@@ -376,9 +426,10 @@ async def _handle_decision(
 
     if decision == "rejected":
         return _render_decision_page(
-            "Rechazado",
-            f"El plan de acción fue rechazado. No se ejecutará ninguna acción para la alerta <code>{alert_id}</code>.",
-            ok=True,
+            "rejected",
+            f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
+            f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
+            "y timestamp para audit.",
         )
 
     # approved → ejecutar plan
@@ -389,9 +440,9 @@ async def _handle_decision(
     except Exception:
         logger.exception("APPROVAL_PLAN_PARSE_FAILED | alert=%s", alert_id)
         return _render_decision_page(
-            "Error",
-            "Aprobaste, pero el plan guardado no pudo deserializarse. Revisar logs.",
-            ok=False,
+            "error",
+            "Aprobaste, pero el plan guardado no pudo deserializarse. "
+            "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
         )
 
     # Lanzamos el executor en background para responder rápido al humano que clickeó
@@ -399,12 +450,13 @@ async def _handle_decision(
         _execute_approved_plan_in_background(settings, token, alert_id, plan)
     )
 
+    n = len(plan.actions)
     return _render_decision_page(
-        "Aprobado",
-        f"Plan aprobado para la alerta <code>{alert_id}</code>. "
-        f"Se están ejecutando {len(plan.actions)} acción(es) en background. "
-        "Revisá los logs del servicio para ver el resultado.",
-        ok=True,
+        "approved",
+        f"Plan aprobado para la alerta <code>{alert_id}</code>.<br><br>"
+        f"Se {'está' if n == 1 else 'están'} ejecutando <strong>{n} "
+        f"acción{'' if n == 1 else 'es'}</strong> en background. "
+        "El resultado queda en los logs del servicio y en SQLite.",
     )
 
 
