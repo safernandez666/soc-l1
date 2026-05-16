@@ -179,11 +179,20 @@ Tenés 2 tools:
   - ldap_search_user(sam_account_name): mirá AD para cada usuario involucrado.
   - wazuh_get_rule(rule_id): detalle de la rule de Wazuh.
 
-PROCEDIMIENTO OBLIGATORIO:
-1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam`.
-   Si la lista está vacía, no llames.
-2. Si la alerta tiene wazuh_rule.id, llamá wazuh_get_rule.
-3. Devolvé EXACTAMENTE el JSON de EnrichmentResult.
+REGLAS CRÍTICAS (anti-loop):
+  - Cada tool se llama **MÁXIMO 1 VEZ por argumento**. Si ya llamaste \
+ldap_search_user('jdoe'), NO la vuelvas a llamar. Si ya llamaste wazuh_get_rule('200002'), \
+NO la repitas.
+  - Si una tool ya devolvió found=false o un error, ACEPTÁ ese resultado y seguí. \
+NO reintentes con el mismo argumento.
+  - Después de juntar los datos de las tools, escribí el JSON FINAL sin más tool calls.
+
+PROCEDIMIENTO OBLIGATORIO (en este orden):
+1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam` \
+(idealmente en paralelo - una llamada por user). Si la lista está vacía, no llames.
+2. Si la alerta tiene wazuh_rule.id, llamá wazuh_get_rule UNA SOLA VEZ con ese id.
+3. Componé y devolvé EXACTAMENTE el JSON de EnrichmentResult. NO más tool calls después \
+de este punto.
 
 CRITERIO PARA `flags` (priorización para el próximo agente):
 - "user_disabled" → si encontraste un user con account_enabled=false.
@@ -226,10 +235,16 @@ async def enrich_alert(
     settings: Settings,
     ldap_cfg: LdapConfig | None,
     model: str = "gpt-4o-mini",
+    max_turns: int = 20,
 ) -> EnrichmentResult:
-    """Corre el Enricher contra una alerta. Devuelve el resultado estructurado."""
+    """Corre el Enricher contra una alerta. Devuelve el resultado estructurado.
+
+    max_turns=20: en producción vimos al LLM repetir tool calls (6x get_rule sobre
+    el mismo rule_id) y agotar el default de 10 turns del SDK. 20 deja margen para
+    2-3 users LDAP + 1 rule + síntesis sin perderse.
+    """
     agent = build_enricher_agent(model=model)
     ctx = EnricherContext(settings=settings, ldap_cfg=ldap_cfg)
     user_input = _alert_to_prompt_input(alert)
-    result = await Runner.run(agent, input=user_input, context=ctx)
+    result = await Runner.run(agent, input=user_input, context=ctx, max_turns=max_turns)
     return result.final_output_as(EnrichmentResult)
