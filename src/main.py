@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
@@ -43,6 +44,19 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     logger.info("SOC L1 service starting up - log level=%s", settings.log_level)
+
+    # Exportar OPENAI_API_KEY al env (la librería openai la lee de os.environ).
+    # pydantic-settings carga al field, no al env. Hay que puentearlo.
+    if settings.openai_api_key and not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+        logger.info("OPENAI_API_KEY exported to environment (from .env)")
+
+    if settings.enable_triage and not settings.openai_api_key:
+        logger.warning(
+            "ENABLE_TRIAGE=true pero OPENAI_API_KEY no está seteada. "
+            "El triage va a fallar. Agregá OPENAI_API_KEY=sk-... al .env"
+        )
+
     yield
     logger.info("SOC L1 service shutting down")
 
