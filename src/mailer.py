@@ -114,7 +114,7 @@ def _build_text_body(
     lines.append(f"  APROBAR:  {approve_url}")
     lines.append(f"  RECHAZAR: {reject_url}")
     lines.append("")
-    lines.append("Soc L1 - Example Corp")
+    lines.append("SOC L1")
     return "\n".join(lines)
 
 

@@ -550,7 +550,7 @@ def _render_decision_page(state_key: str, body_html: str) -> HTMLResponse:
     </div>
     <div class="footer">
       <strong>SOC L1 · Wazuh + Defender</strong><br>
-      Example Corp — pipeline multi-agente
+      pipeline multi-agente
     </div>
   </div>
 </body>

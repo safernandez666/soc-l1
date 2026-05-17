@@ -7,7 +7,7 @@ Endpoints relevantes:
 
 Notas:
   - El JWT del manager expira en 15min. Cacheamos por 14 para tener buffer.
-  - En el server de Example Corp el cert es self-signed → verify=False.
+  - En deploys típicos on-prem el cert es self-signed → verify=False.
   - Cliente es async (httpx.AsyncClient) y se usa como context manager.
 """
 from __future__ import annotations
