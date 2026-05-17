@@ -285,8 +285,10 @@ async def _run_enricher_safely(
             len(alert.users_involved),
             alert.wazuh_rule.id,
         )
+        # Usamos modelo HEAVY (gpt-4o) - en pruebas con gpt-4o-mini el LLM ignoraba
+        # las instrucciones anti-loop y machacaba la misma tool decenas de veces.
         enrichment = await enrich_alert(
-            alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_light
+            alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_heavy
         )
         if priority == "critical" and "fast_track_priority" not in enrichment.flags:
             enrichment.flags.append("fast_track_priority")
@@ -348,8 +350,9 @@ async def _run_threatintel_safely(alert: NormalizedAlert, settings: Settings):
             alert.network.src_ip_external,
             alert.network.dst_ip,
         )
+        # Mismo razonamiento que en Enricher: gpt-4o sigue las instrucciones anti-loop
         ti = await threat_intel_alert(
-            alert, settings=settings, model=settings.openai_model_light
+            alert, settings=settings, model=settings.openai_model_heavy
         )
 
         # Resumen estructurado: qué encontró por hash y por IP
