@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.config import Settings
@@ -469,13 +469,13 @@ async def _run_narrator_and_request_approval(
             plan_json=plan.model_dump_json(),
             alert_json=alert.model_dump_json(),
         )
-        approve_url = f"{settings.approval_base_url.rstrip('/')}/approve/{token}"
+        review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
         logger.info(
-            "📬 APPROVAL_PENDING | id=%s risk=%s actions=%d\n  approve: %s",
+            "📬 APPROVAL_PENDING | id=%s risk=%s actions=%d\n  review: %s",
             alert.alert_id,
             plan.risk_level,
             len(plan.actions),
-            approve_url,
+            review_url,
         )
 
         await send_approval_email(settings, alert, plan, token)
@@ -560,9 +560,17 @@ def _render_decision_page(state_key: str, body_html: str) -> HTMLResponse:
 
 
 async def _handle_decision(
-    request: Request, settings: Settings, token: str, decision: str
+    request: Request,
+    settings: Settings,
+    token: str,
+    decision: str,
+    selected_action_indices: list[int] | None = None,
 ) -> HTMLResponse:
-    """Lógica común para /approve y /reject."""
+    """Lógica común para /approve, /reject y /decide.
+
+    selected_action_indices: si viene (desde /decide), solo esas acciones se ejecutan.
+    Si None y decision='approved', se ejecutan TODAS (compat con /approve clásico).
+    """
     from src.state import decide_approval, mark_executed
 
     ip = request.client.host if request.client else None
@@ -575,6 +583,7 @@ async def _handle_decision(
         ip=ip,
         user_agent=ua,
         ttl_hours=settings.approval_ttl_hours,
+        selected_action_indices=selected_action_indices,
     )
 
     if result == "not_found":
@@ -646,30 +655,61 @@ async def _handle_decision(
             "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
         )
 
+    # Filtrar por acciones seleccionadas (si vinieron de /decide).
+    # Si selected_action_indices es None, se ejecutan todas (modo /approve clásico).
+    total_actions = len(plan.actions)
+    if selected_action_indices is not None:
+        valid_indices = set(selected_action_indices) & set(range(total_actions))
+        actions_to_run = [plan.actions[i] for i in sorted(valid_indices)]
+        skipped = total_actions - len(actions_to_run)
+    else:
+        actions_to_run = plan.actions
+        skipped = 0
+
     # Lanzamos el executor en background para responder rápido al humano que clickeó
     asyncio.create_task(
-        _execute_approved_plan_in_background(settings, token, alert_id, plan)
+        _execute_approved_plan_in_background(
+            settings, token, alert_id, plan, actions_to_run
+        )
     )
 
-    n = len(plan.actions)
-    return _render_decision_page(
-        "approved",
-        f"Plan aprobado para la alerta <code>{alert_id}</code>.<br><br>"
-        f"Se {'está' if n == 1 else 'están'} ejecutando <strong>{n} "
-        f"acción{'' if n == 1 else 'es'}</strong> en background. "
-        "El resultado queda en los logs del servicio y en SQLite.",
-    )
+    n = len(actions_to_run)
+    if n == 0:
+        body = (
+            f"Approval registrado para la alerta <code>{alert_id}</code>, "
+            f"pero <strong>ninguna acción fue seleccionada</strong>. "
+            f"No se ejecutó nada. Quedó registrado en SQLite para audit."
+        )
+    else:
+        body = (
+            f"Plan aprobado para la alerta <code>{alert_id}</code>.<br><br>"
+            f"Se {'está' if n == 1 else 'están'} ejecutando <strong>{n} "
+            f"acción{'' if n == 1 else 'es'}</strong> en background"
+        )
+        if skipped > 0:
+            body += (
+                f" ({skipped} acción{'es' if skipped > 1 else ''} "
+                f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
+            )
+        body += ". El resultado queda en logs y SQLite."
+    return _render_decision_page("approved", body)
 
 
 async def _execute_approved_plan_in_background(
-    settings: Settings, token: str, alert_id: str, plan
+    settings: Settings, token: str, alert_id: str, plan, actions_to_run
 ) -> None:
+    """actions_to_run puede ser un subset del plan original (filtrado en /decide)."""
     from src.executor import execute_plan
     from src.state import mark_executed
 
+    if not actions_to_run:
+        await mark_executed(settings.state_db_path, token, [])
+        logger.info("EXECUTED | alert=%s actions=0 (nothing selected)", alert_id)
+        return
+
     try:
         ldap_cfg = _build_ldap_cfg_safely()
-        results = await execute_plan(plan.actions, ldap_cfg=ldap_cfg, settings=settings)
+        results = await execute_plan(actions_to_run, ldap_cfg=ldap_cfg, settings=settings)
         await mark_executed(settings.state_db_path, token, results)
         ok_count = sum(1 for r in results if r.get("ok"))
         logger.info(
@@ -685,9 +725,209 @@ async def _execute_approved_plan_in_background(
 
 @app.get("/approve/{token}")
 async def approve_plan(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
+    """Backwards compat: aprueba TODAS las acciones del plan (legacy email links)."""
     return await _handle_decision(request, settings, token, "approved")
 
 
 @app.get("/reject/{token}")
 async def reject_plan(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
     return await _handle_decision(request, settings, token, "rejected")
+
+
+# ===== Review (granular approval) =====
+
+
+def _render_review_page(
+    token: str,
+    plan,
+    alert_id: str,
+    risk_color: str,
+    risk_label: str,
+) -> HTMLResponse:
+    """Página HTML con form: 1 checkbox por acción + 2 botones (Aprobar selección, Rechazar todo)."""
+    import html as _h
+
+    if not plan.actions:
+        # Plan vacío: solo botón rechazar (no hay nada que aprobar)
+        actions_html = (
+            "<p style='color:#64748b;font-style:italic;'>El plan no incluye acciones "
+            "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
+        )
+    else:
+        rows_html = []
+        for i, a in enumerate(plan.actions):
+            action_color = {
+                "disable_user": "#dc2626",
+                "force_password_change": "#ea580c",
+                "block_ip": "#7f1d1d",
+                "notify_only": "#0284c7",
+                "escalate_l2": "#a16207",
+            }.get(a.type, "#475569")
+            rows_html.append(
+                f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
+                                  background:#f9fafb;border-radius:6px;border-left:4px solid {action_color};
+                                  cursor:pointer;">
+                  <input type="checkbox" name="action_idx" value="{i}" checked
+                         style="margin-right:10px;transform:scale(1.3);vertical-align:middle;">
+                  <strong style="font-family:monospace;color:{action_color};">{_h.escape(a.type)}</strong>
+                  → <code style="background:#e0f2fe;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 30px;font-size:12px;color:#475569;line-height:1.5;">
+                    {_h.escape(a.justification)}
+                  </div>
+                </label>"""
+            )
+        actions_html = "\n".join(rows_html)
+
+    page = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SOC L1 · Revisar plan {alert_id}</title>
+  <style>
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }}
+    .container {{ max-width: 760px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;
+                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+    .header {{ padding: 24px; border-left: 8px solid {risk_color}; background: #f8fafc; }}
+    h1 {{ font-size: 20px; margin: 0 0 8px 0; }}
+    .meta {{ font-size: 13px; color: #64748b; }}
+    .badge {{ display: inline-block; padding: 4px 12px; border-radius: 16px;
+              background: {risk_color}; color: white; font: bold 11px sans-serif;
+              text-transform: uppercase; margin-top: 8px; }}
+    .summary {{ padding: 16px 24px; font-size: 14px; line-height: 1.6; color: #334155;
+                background: #fef3c7; margin: 20px; border-radius: 8px;
+                border-left: 4px solid #f59e0b; }}
+    .form-section {{ padding: 0 24px 16px; }}
+    .form-section h2 {{ font-size: 16px; margin: 16px 0 12px; }}
+    .buttons {{ padding: 16px 24px 24px; display: flex; gap: 12px; flex-wrap: wrap; }}
+    .btn {{ padding: 14px 28px; border: none; border-radius: 6px; font-weight: bold;
+            font-size: 14px; cursor: pointer; }}
+    .btn-approve {{ background: #16a34a; color: white; }}
+    .btn-approve:hover {{ background: #15803d; }}
+    .btn-reject {{ background: #dc2626; color: white; }}
+    .btn-reject:hover {{ background: #b91c1c; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📋 Revisar plan de acción</h1>
+      <div class="meta">Alerta <code>{_h.escape(alert_id)}</code></div>
+      <span class="badge">RISK: {_h.escape(risk_label)}</span>
+    </div>
+
+    <div class="summary">
+      <strong style="color:#92400e;">📝 Resumen ejecutivo:</strong><br>
+      {_h.escape(plan.executive_summary)}
+    </div>
+
+    <form method="post" action="/decide/{token}">
+      <div class="form-section">
+        <h2>Acciones propuestas ({len(plan.actions)})</h2>
+        <p style="font-size:12px;color:#64748b;margin:0 0 12px;">
+          Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
+          O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
+        </p>
+        {actions_html}
+      </div>
+
+      <div class="buttons">
+        <button type="submit" name="decision" value="approve" class="btn btn-approve">
+          ✅ Aprobar selección
+        </button>
+        <button type="submit" name="decision" value="reject" class="btn btn-reject">
+          ❌ Rechazar todo
+        </button>
+      </div>
+    </form>
+
+    <div class="footer">
+      <strong>SOC L1 · Wazuh + Defender</strong><br>
+      Link single-use, válido por 24h. Primer click decide.
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(content=page)
+
+
+@app.get("/review/{token}")
+async def review_plan(
+    request: Request, settings: SettingsDep, token: str
+) -> HTMLResponse:
+    """Página intermedia con form de checkboxes per-action.
+    Si el token ya fue decidido / expiró / no existe → renderiza la misma página de error
+    que /approve y /reject (consistencia visual).
+    """
+    from src.state import get_pending_approval
+
+    row = await get_pending_approval(settings.state_db_path, token)
+    if row is None:
+        return _render_decision_page(
+            "not_found",
+            "Este link no corresponde a ningún approval pendiente.",
+        )
+    if row["status"] != "pending":
+        return _render_decision_page(
+            "already",
+            f"Este approval ya fue resuelto previamente (estado: <strong>{row['status']}</strong>).",
+        )
+
+    # Render del form
+    from src.agents.narrator import NarratorPlan
+
+    try:
+        plan = NarratorPlan.model_validate_json(row["plan_json"])
+    except Exception:
+        logger.exception("review: plan corrupto | alert=%s", row["alert_id"])
+        return _render_decision_page(
+            "error",
+            "El plan guardado no pudo deserializarse. Revisar logs del servicio.",
+        )
+
+    # Color del banner por risk_level (mismo system que el email)
+    risk_color_map = {
+        "critical": "#7f1d1d",
+        "high":     "#991b1b",
+        "medium":   "#b45309",
+        "low":      "#a16207",
+    }
+    risk_color = risk_color_map.get(plan.risk_level, "#475569")
+
+    return _render_review_page(
+        token=token,
+        plan=plan,
+        alert_id=row["alert_id"],
+        risk_color=risk_color,
+        risk_label=plan.risk_level,
+    )
+
+
+@app.post("/decide/{token}")
+async def decide_plan(
+    request: Request,
+    settings: SettingsDep,
+    token: str,
+    decision: Annotated[str, Form()],
+    action_idx: Annotated[list[int] | None, Form()] = None,
+) -> HTMLResponse:
+    """Procesa el form del /review.
+
+    decision: "approve" o "reject" (vino del button name=decision)
+    action_idx: lista de índices checkeados (0-based). Si vacío y approve → ejecuta 0 acciones.
+    """
+    if decision == "reject":
+        # Rechazo total - ignoramos action_idx
+        return await _handle_decision(request, settings, token, "rejected")
+
+    if decision == "approve":
+        indices = action_idx or []
+        return await _handle_decision(
+            request, settings, token, "approved", selected_action_indices=indices
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"decision inválida: {decision!r} (debe ser 'approve' o 'reject')",
+    )

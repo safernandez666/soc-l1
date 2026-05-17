@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     decided_at TEXT,
     decided_by_ip TEXT,
     decided_by_ua TEXT,
+    selected_actions TEXT,
     executed_at TEXT,
     execution_result TEXT
 );
@@ -51,6 +52,12 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_alert_id ON pending_approvals(alert_id);
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
 """
+
+# Migration: en DBs existentes que no tienen selected_actions, agregar la columna
+# (ALTER TABLE silencia el error si ya existe vía try/except en _init_db_sync).
+_MIGRATIONS = [
+    "ALTER TABLE pending_approvals ADD COLUMN selected_actions TEXT",
+]
 
 ApprovalStatus = str  # 'pending' | 'approved' | 'rejected' | 'expired' | 'executed'
 
@@ -79,6 +86,12 @@ def _now() -> str:
 def _init_db_sync(db_path: str) -> None:
     with _connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Migraciones idempotentes: ignorar si la columna ya existe
+        for stmt in _MIGRATIONS:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # columna ya existe
 
 
 def _create_pending_sync(
@@ -110,8 +123,12 @@ def _decide_sync(
     ip: str | None,
     user_agent: str | None,
     ttl_hours: int,
+    selected_action_indices: list[int] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Aplica decisión si el token está pending y no expiró.
+
+    selected_action_indices: lista de índices (0-based) de plan.actions que el humano
+    aprobó individualmente. Si None y decision='approved', se interpreta como "approve all".
 
     Retorna (result_status, row):
       - 'ok'              → row con la fila actualizada (post-update)
@@ -121,6 +138,10 @@ def _decide_sync(
     """
     assert decision in ("approved", "rejected"), f"decision inválida: {decision}"
     cutoff = (datetime.now(tz=timezone.utc) - timedelta(hours=ttl_hours)).isoformat()
+
+    selected_json: str | None = None
+    if selected_action_indices is not None:
+        selected_json = json.dumps(sorted(set(selected_action_indices)))
 
     with _connect(db_path) as conn:
         row = conn.execute(
@@ -143,9 +164,10 @@ def _decide_sync(
         # CAS-style: solo update si sigue pending (race-safe)
         cur = conn.execute(
             "UPDATE pending_approvals "
-            "SET status=?, decided_at=?, decided_by_ip=?, decided_by_ua=? "
+            "SET status=?, decided_at=?, decided_by_ip=?, decided_by_ua=?, "
+            "    selected_actions=? "
             "WHERE token=? AND status='pending'",
-            (decision, _now(), ip, user_agent, token),
+            (decision, _now(), ip, user_agent, selected_json, token),
         )
         if cur.rowcount == 0:
             # Race: alguien decidió en el mientras tanto
@@ -200,10 +222,16 @@ async def decide_approval(
     ip: str | None = None,
     user_agent: str | None = None,
     ttl_hours: int = 24,
+    selected_action_indices: list[int] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
-    """Aplica una decisión. Idempotente: segunda llamada retorna 'already_decided'."""
+    """Aplica una decisión. Idempotente: segunda llamada retorna 'already_decided'.
+
+    selected_action_indices: si viene, guarda qué índices de plan.actions se aprobaron.
+    Si es None y decision='approved', se interpreta como "approved all" (backwards compat).
+    """
     return await asyncio.to_thread(
-        _decide_sync, db_path, token, decision, ip, user_agent, ttl_hours
+        _decide_sync, db_path, token, decision, ip, user_agent, ttl_hours,
+        selected_action_indices,
     )
 
 

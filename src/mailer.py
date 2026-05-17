@@ -197,6 +197,7 @@ def _build_html_body(
     approve_url: str,
     reject_url: str,
     ttl_hours: int = 24,
+    review_url: str | None = None,
 ) -> str:
     """Renderiza el email HTML matcheando el design system del integrator Wazuh unified v4.9.
 
@@ -235,18 +236,29 @@ def _build_html_body(
         sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
         pivot_value += f" → usuarios: {sams}"
 
-    cta_buttons = (
-        f"<a href='{html.escape(approve_url)}' "
-        f"style='display:inline-block;background:#16a34a;color:white;"
-        f"padding:12px 28px;text-decoration:none;border-radius:6px;"
-        f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
-        f"✅ APROBAR Y EJECUTAR</a>"
-        f"<a href='{html.escape(reject_url)}' "
-        f"style='display:inline-block;background:#dc2626;color:white;"
-        f"padding:12px 28px;text-decoration:none;border-radius:6px;"
-        f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
-        f"❌ RECHAZAR</a>"
-    )
+    # Si tenemos review_url, mandamos UN solo botón "Revisar y decidir" que abre la
+    # página con checkboxes per-action. Si no, fallback al patrón viejo (2 botones).
+    if review_url:
+        cta_buttons = (
+            f"<a href='{html.escape(review_url)}' "
+            f"style='display:inline-block;background:{color};color:white;"
+            f"padding:14px 32px;text-decoration:none;border-radius:6px;"
+            f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
+            f"📋 REVISAR Y DECIDIR</a>"
+        )
+    else:
+        cta_buttons = (
+            f"<a href='{html.escape(approve_url)}' "
+            f"style='display:inline-block;background:#16a34a;color:white;"
+            f"padding:12px 28px;text-decoration:none;border-radius:6px;"
+            f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
+            f"✅ APROBAR Y EJECUTAR</a>"
+            f"<a href='{html.escape(reject_url)}' "
+            f"style='display:inline-block;background:#dc2626;color:white;"
+            f"padding:12px 28px;text-decoration:none;border-radius:6px;"
+            f"font-weight:bold;font-size:14px;margin:4px 8px;'>"
+            f"❌ RECHAZAR</a>"
+        )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -373,10 +385,12 @@ def _build_message(
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
     msg.set_content(_build_text_body(alert, plan, approve_url, reject_url))
+    review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
     msg.add_alternative(
         _build_html_body(
             alert, plan, approve_url, reject_url,
             ttl_hours=settings.approval_ttl_hours,
+            review_url=review_url,
         ),
         subtype="html",
     )
