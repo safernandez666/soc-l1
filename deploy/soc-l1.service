@@ -1,0 +1,52 @@
+[Unit]
+Description=SOC L1 - Multi-agent SOAR for Wazuh alerts
+Documentation=https://github.com/safernandez666/soc-l1
+After=network-online.target wazuh-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Variables que el script de install reemplaza por valores reales del host
+User=__SOC_USER__
+Group=__SOC_GROUP__
+WorkingDirectory=/opt/soc-l1
+
+# El servicio lee /opt/soc-l1/.env vía pydantic-settings (SettingsConfigDict).
+# NO usamos EnvironmentFile= porque systemd parsea distinto (no soporta valores con
+# espacios, quotes, ni multilínea de la misma manera que python-dotenv).
+
+ExecStart=/opt/soc-l1/.venv/bin/uvicorn src.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --log-level info
+
+# Restart automático ante crash, con backoff exponencial
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging a journald (ver con: journalctl -u soc-l1 -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soc-l1
+
+# Seguridad: el servicio NO necesita permisos elevados.
+# - NoNewPrivileges: no puede escalar privilegios via setuid
+# - ProtectSystem=strict: /usr, /boot, /etc read-only para el proceso
+# - ProtectHome: no ve /home (excepto el suyo si User es de /home/)
+# - PrivateTmp: tiene su propio /tmp privado (no pisa nada)
+# - ReadWritePaths: única locación writable explícita = el state.db
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/soc-l1
+
+# Límites de recursos (defensa anti-runaway)
+LimitNOFILE=4096
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

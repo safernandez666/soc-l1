@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
 #
-# Stop + restart del servicio soc-l1 (uvicorn en foreground con nohup).
+# Manejo del servicio soc-l1. Auto-detecta si está instalado como systemd unit
+# (soc-l1.service) y usa systemctl/journalctl; si no, cae al modo manual con
+# nohup + /tmp/uvicorn.log.
 #
 # Uso:
-#   ./scripts/restart.sh                 # restart + tail -f (default)
-#   ./scripts/restart.sh restart         # mismo que default
-#   ./scripts/restart.sh restart --no-follow   # restart sin tail después
-#   ./scripts/restart.sh start           # solo start + tail -f
-#   ./scripts/restart.sh start --no-follow     # solo start, no tail
+#   ./scripts/restart.sh                 # restart + tail logs (default)
+#   ./scripts/restart.sh restart         # mismo
+#   ./scripts/restart.sh restart --no-follow   # sin tail después
+#   ./scripts/restart.sh start           # solo start + tail
 #   ./scripts/restart.sh stop            # solo stop
 #   ./scripts/restart.sh status          # ver estado actual
-#   ./scripts/restart.sh logs            # tail -f del log
+#   ./scripts/restart.sh logs            # logs en vivo (Ctrl-C sale)
 #   ./scripts/restart.sh logs -n 100     # last 100 lines (no follow)
 #
-# Asume SOC_DIR=/opt/soc-l1 (override con env var).
-# Logs van a /tmp/uvicorn.log.
-#
-# Cuando armemos el systemd unit, este script queda obsoleto y se reemplaza
-# por `sudo systemctl restart soc-l1`.
+# Para instalar como servicio systemd (sobrevive reboots):
+#   sudo ./scripts/install-systemd.sh
 
 set -euo pipefail
 
@@ -42,6 +40,93 @@ log()  { echo -e "${BLUE}[$(date +%H:%M:%S)]${NC} $*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
 err()  { echo -e "${RED}✗${NC} $*" >&2; }
+
+# === Detect systemd ===
+
+UNIT_NAME="soc-l1.service"
+SYSTEMD_INSTALLED=false
+if command -v systemctl &>/dev/null && systemctl list-unit-files "$UNIT_NAME" --no-legend 2>/dev/null | grep -q "$UNIT_NAME"; then
+    SYSTEMD_INSTALLED=true
+fi
+
+# Helper para correr systemctl con sudo solo si hace falta
+_sctl() {
+    if [[ $EUID -eq 0 ]]; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
+# === systemd mode ===
+
+cmd_status_systemd() {
+    _sctl status "$UNIT_NAME" --no-pager
+}
+
+cmd_stop_systemd() {
+    log "systemctl stop ${UNIT_NAME}..."
+    _sctl stop "$UNIT_NAME"
+    ok "Servicio detenido"
+}
+
+cmd_start_systemd() {
+    log "systemctl start ${UNIT_NAME}..."
+    _sctl start "$UNIT_NAME"
+    sleep 2
+    if _sctl is-active --quiet "$UNIT_NAME"; then
+        ok "Servicio activo"
+        if command -v curl &>/dev/null; then
+            local health
+            health=$(curl -fsS "http://localhost:${PORT}/health" 2>/dev/null || echo "")
+            [[ -n "$health" ]] && ok "Health: ${health}"
+        fi
+    else
+        err "El servicio no quedó activo. Ver logs:"
+        journalctl -u "$UNIT_NAME" -n 20 --no-pager >&2
+        return 1
+    fi
+}
+
+cmd_restart_systemd() {
+    log "systemctl restart ${UNIT_NAME}..."
+    _sctl restart "$UNIT_NAME"
+    sleep 2
+    if _sctl is-active --quiet "$UNIT_NAME"; then
+        ok "Servicio reiniciado y activo"
+        if command -v curl &>/dev/null; then
+            local health
+            health=$(curl -fsS "http://localhost:${PORT}/health" 2>/dev/null || echo "")
+            [[ -n "$health" ]] && ok "Health: ${health}"
+        fi
+    else
+        err "Restart no quedó activo. Ver logs:"
+        journalctl -u "$UNIT_NAME" -n 20 --no-pager >&2
+        return 1
+    fi
+}
+
+cmd_logs_systemd() {
+    local follow=true
+    local n_lines=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n) n_lines="$2"; follow=false; shift 2 ;;
+            -f|--follow) follow=true; shift ;;
+            --no-follow) follow=false; shift ;;
+            *) shift ;;
+        esac
+    done
+    if [[ "$follow" == true ]]; then
+        log "journalctl -u ${UNIT_NAME} -f (Ctrl-C para salir, servicio sigue corriendo)"
+        echo
+        exec journalctl -u "$UNIT_NAME" -f
+    else
+        journalctl -u "$UNIT_NAME" -n "${n_lines:-50}" --no-pager
+    fi
+}
+
+# === Manual mode (nohup) ===
 
 find_pid() {
     # Solo el proceso uvicorn de soc-l1 (no el tail -f, no otros uvicorn)
@@ -250,37 +335,63 @@ for arg in "$@"; do
     esac
 done
 
-case "$SUBCMD" in
-    start)
-        cmd_start
-        if [[ "$FOLLOW_AFTER_START" == true ]]; then
-            echo
-            log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
-            echo
-            exec tail -f "$LOG_FILE"
-        fi
-        ;;
-    stop)
-        cmd_stop
-        ;;
-    restart)
-        cmd_restart
-        if [[ "$FOLLOW_AFTER_START" == true ]]; then
-            echo
-            log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
-            echo
-            exec tail -f "$LOG_FILE"
-        fi
-        ;;
-    status)
-        cmd_status
-        ;;
-    logs)
-        cmd_logs "${REMAINING_ARGS[@]}"
-        ;;
-    *)
-        err "Uso: $0 {start|stop|restart|status|logs} [--no-follow]"
-        err "     $0 logs [-n N | -f]"
-        exit 1
-        ;;
-esac
+if [[ "$SYSTEMD_INSTALLED" == true ]]; then
+    log "Modo systemd (unit ${UNIT_NAME})"
+    case "$SUBCMD" in
+        start)
+            cmd_start_systemd
+            if [[ "$FOLLOW_AFTER_START" == true ]]; then
+                echo
+                log "journalctl -u ${UNIT_NAME} -f (Ctrl-C sale, servicio sigue)"
+                echo
+                exec journalctl -u "$UNIT_NAME" -f
+            fi
+            ;;
+        stop)    cmd_stop_systemd ;;
+        restart)
+            cmd_restart_systemd
+            if [[ "$FOLLOW_AFTER_START" == true ]]; then
+                echo
+                log "journalctl -u ${UNIT_NAME} -f (Ctrl-C sale, servicio sigue)"
+                echo
+                exec journalctl -u "$UNIT_NAME" -f
+            fi
+            ;;
+        status)  cmd_status_systemd ;;
+        logs)    cmd_logs_systemd "${REMAINING_ARGS[@]}" ;;
+        *)
+            err "Uso: $0 {start|stop|restart|status|logs} [--no-follow]"
+            exit 1
+            ;;
+    esac
+else
+    log "Modo manual (nohup) - tip: sudo ./scripts/install-systemd.sh para usar systemd"
+    case "$SUBCMD" in
+        start)
+            cmd_start
+            if [[ "$FOLLOW_AFTER_START" == true ]]; then
+                echo
+                log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
+                echo
+                exec tail -f "$LOG_FILE"
+            fi
+            ;;
+        stop)    cmd_stop ;;
+        restart)
+            cmd_restart
+            if [[ "$FOLLOW_AFTER_START" == true ]]; then
+                echo
+                log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
+                echo
+                exec tail -f "$LOG_FILE"
+            fi
+            ;;
+        status)  cmd_status ;;
+        logs)    cmd_logs "${REMAINING_ARGS[@]}" ;;
+        *)
+            err "Uso: $0 {start|stop|restart|status|logs} [--no-follow]"
+            err "     $0 logs [-n N | -f]"
+            exit 1
+            ;;
+    esac
+fi

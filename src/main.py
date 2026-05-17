@@ -51,6 +51,17 @@ async def lifespan(app: FastAPI):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
+    # openai.agents emite ERROR 429 cada vez que el tracing endpoint nos limita
+    # (telemetría interna del SDK, no afecta el pipeline). Lo silenciamos por
+    # completo deshabilitando el tracing - no usamos esos traces para nada.
+    logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
+    try:
+        from agents import set_tracing_disabled
+
+        set_tracing_disabled(True)
+    except ImportError:
+        # SDK viejo sin esta API - el setLevel ya es suficiente
+        pass
 
     logger.info("SOC L1 service starting up - log level=%s", settings.log_level)
 
