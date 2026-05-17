@@ -64,12 +64,12 @@ def test_threatintel_result_rejects_unknown_field() -> None:
 # ===== Build / config =====
 
 
-def test_build_threatintel_agent_has_both_tools() -> None:
+def test_build_threatintel_agent_has_all_tools() -> None:
     agent = build_threatintel_agent()
     assert agent.name == "ThreatIntel"
     assert agent.output_type is ThreatIntelResult
     tool_names = {t.name for t in agent.tools}
-    assert tool_names == {"vt_lookup_hash", "abuseipdb_check"}
+    assert tool_names == {"vt_lookup_hash", "abuseipdb_check", "fortigate_check_ip"}
 
 
 def test_system_prompt_orienta_uso_correcto() -> None:

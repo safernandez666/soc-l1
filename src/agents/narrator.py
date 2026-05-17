@@ -25,6 +25,7 @@ from src.models import NormalizedAlert
 ActionType = Literal[
     "disable_user",  # Setea bit ACCOUNTDISABLE en AD
     "force_password_change",  # Setea pwdLastSet=0
+    "block_ip",  # Quarantine en FortiGate (target = IP)
     "notify_only",  # No tomar acción, solo registrar
     "escalate_l2",  # Requiere análisis humano más profundo
 ]
@@ -110,6 +111,16 @@ Generá `force_password_change` cuando:
   - Credential dumping detectado pero el user puede seguir operando
   - Hay sospecha pero no certeza → opción menos agresiva que disable_user
   - SOLO si found_in_ad=true para ese target
+
+Generá `block_ip` cuando:
+  - threat_intel.ip_reports tiene una IP con abuse_confidence_score >= 75 (high confidence)
+  - O threat_intel.fortigate_contexts indica que la IP tiene active_sessions > 0 \
+(tráfico vivo - bloquear corta sesiones reales del atacante)
+  - O VT marcó una IP relacionada como malicious
+  - El target es la IP exacta (string), no un CIDR ni hostname
+  - NO recomendar block_ip si already_quarantined=true (la IP ya está bloqueada en Forti)
+  - NO recomendar block_ip si is_whitelisted=true (probable FP)
+  - NO recomendar block_ip si la IP es RFC1918 (10.*, 172.16-31.*, 192.168.*) o tu propia infra
 
 Generá `escalate_l2` cuando:
   - Mitre techniques de Initial Access / Lateral Movement / Persistence presentes

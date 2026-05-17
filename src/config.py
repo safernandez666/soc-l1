@@ -146,6 +146,17 @@ class Settings(BaseSettings):
     virustotal_api_key: str = Field(default="")
     abuseipdb_api_key: str = Field(default="")
 
+    # FortiGate (acciones de red: check de sessions + block_ip post-aprobación)
+    # Host típicamente "fortigate.example.local:4443" o IP:puerto.
+    fortigate_host: str = Field(default="")
+    fortigate_token: str = Field(default="")
+    fortigate_verify_ssl: bool = Field(default=False)
+    # CIDRs que JAMÁS deben bloquearse aunque el Narrator lo recomiende y se apruebe.
+    # Comma-separated. Default: redes privadas RFC1918 + loopback (defensa anti-pie en pala).
+    protected_networks: str = Field(
+        default="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
+    )
+
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
     smtp_port: int = Field(default=25)
@@ -194,3 +205,9 @@ class Settings(BaseSettings):
     def webhook_allowed_ips_set(self) -> set[str]:
         """Parsea webhook_allowed_ips a un set para lookup O(1)."""
         return {ip.strip() for ip in self.webhook_allowed_ips.split(",") if ip.strip()}
+
+    def protected_networks_list(self) -> list[str]:
+        """Lista de CIDRs (o IPs) protegidos contra block_ip. Se usa con ipaddress."""
+        return [
+            cidr.strip() for cidr in self.protected_networks.split(",") if cidr.strip()
+        ]

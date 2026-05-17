@@ -1,7 +1,7 @@
 """Tests del executor - dispatch correcto + manejo de errores sin LLM."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -244,3 +244,90 @@ async def test_empty_protected_users_means_no_protection() -> None:
             use_starttls=False, credentials_file="/nope",
         ), settings=settings)
     mock_fn.assert_called_once()
+
+
+# ===== block_ip + PROTECTED_NETWORKS =====
+
+
+@pytest.mark.asyncio
+async def test_block_ip_refused_for_protected_network() -> None:
+    """RFC1918 (10.0.0.0/8) está en default PROTECTED_NETWORKS → refused."""
+    settings = Settings(
+        openai_api_key="x",
+        fortigate_host="fg.test", fortigate_token="t",
+        # protected_networks usa default que incluye 10.0.0.0/8
+    )
+    actions = [ProposedAction(type="block_ip", target="10.99.0.42", justification="x")]
+    with patch("src.executor._exec_block_ip") as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_not_called()
+    assert results[0]["ok"] is False
+    assert "PROTECTED_NETWORKS" in results[0]["message"]
+    assert "10.0.0.0/8" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_block_ip_refused_for_invalid_ip() -> None:
+    settings = Settings(
+        openai_api_key="x", fortigate_host="fg.test", fortigate_token="t",
+    )
+    actions = [ProposedAction(type="block_ip", target="not-an-ip", justification="x")]
+    results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    assert results[0]["ok"] is False
+    assert "no es una IP válida" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_block_ip_dry_run_no_op() -> None:
+    """Con DRY_RUN_MODE=true, block_ip no toca FortiGate."""
+    settings = Settings(
+        openai_api_key="x",
+        fortigate_host="fg.test", fortigate_token="t",
+        dry_run_mode=True,
+        protected_networks="",  # vacío para que la IP pase el guardrail
+    )
+    actions = [ProposedAction(type="block_ip", target="1.2.3.4", justification="x")]
+    with patch("src.executor._exec_block_ip") as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_not_called()
+    assert results[0]["ok"] is True
+    assert "DRY_RUN" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_block_ip_executes_on_public_ip_when_not_dry_run() -> None:
+    """IP pública (no RFC1918), no dry_run, FortiGate configurado → ejecuta."""
+    from src.models import FortigateActionResult
+    settings = Settings(
+        openai_api_key="x",
+        fortigate_host="fg.test", fortigate_token="t",
+        dry_run_mode=False,
+        protected_networks="",
+    )
+    actions = [ProposedAction(type="block_ip", target="203.0.113.45", justification="x")]
+    fake_result = FortigateActionResult(
+        ok=True, ip="203.0.113.45", action="quarantine_ip",
+        expires_at="2026-05-17T11:00:00+00:00", message="banned for 3600s",
+    )
+    with patch("src.executor._exec_block_ip", new_callable=AsyncMock) as mock_fn:
+        from src.executor import ExecutionResult
+        mock_fn.return_value = ExecutionResult(
+            action_type="block_ip", target="203.0.113.45", ok=True,
+            message="banned for 3600s",
+        )
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_called_once()
+    assert results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_block_ip_without_fortigate_config_fails() -> None:
+    """Sin FORTIGATE_HOST/TOKEN, block_ip retorna ok=False."""
+    settings = Settings(
+        openai_api_key="x", fortigate_host="", fortigate_token="",
+        protected_networks="",
+    )
+    actions = [ProposedAction(type="block_ip", target="1.2.3.4", justification="x")]
+    results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    assert results[0]["ok"] is False
+    assert "FortiGate no configurado" in results[0]["message"]

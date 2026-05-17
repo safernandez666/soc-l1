@@ -27,7 +27,13 @@ from agents import Agent, RunContextWrapper, Runner, function_tool
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import Settings
-from src.models import AbuseipdbReport, NormalizedAlert, VtFileReport
+from src.models import (
+    AbuseipdbReport,
+    FortigateIpContext,
+    NormalizedAlert,
+    VtFileReport,
+)
+from src.tools.fortigate import FortigateClient, FortigateError
 from src.tools.threatintel import (
     AbuseipdbClient,
     ThreatIntelError,
@@ -104,10 +110,11 @@ class ThreatIntelResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     file_reports: list[VtFileReport] = Field(default_factory=list)
     ip_reports: list[AbuseipdbReport] = Field(default_factory=list)
+    fortigate_contexts: list[FortigateIpContext] = Field(default_factory=list)
     summary: str = Field(
         description=(
             "Resumen ejecutivo 2-3 líneas. Qué dice cada fuente externa. "
-            "Si VT/AbuseIPDB no encontró un IOC, decirlo explícito."
+            "Si VT/AbuseIPDB/FortiGate no encontró un IOC, decirlo explícito."
         )
     )
     flags: list[str] = Field(
@@ -115,7 +122,9 @@ class ThreatIntelResult(BaseModel):
         description=(
             "Señales para el Narrator. Ejemplos: 'vt_highly_malicious' (>50% engines), "
             "'vt_known_family_<name>', 'abuseipdb_high_confidence' (score >=75), "
-            "'ip_tor_exit', 'ip_whitelisted', 'no_ti_data' (ningún IOC encontrado)."
+            "'ip_tor_exit', 'ip_whitelisted', 'fortigate_active_sessions' (IP con "
+            "tráfico vivo), 'fortigate_already_quarantined' (ya bloqueada), "
+            "'no_ti_data' (ningún IOC encontrado)."
         ),
     )
 
@@ -284,15 +293,86 @@ async def abuseipdb_check(
     return result
 
 
+@function_tool
+async def fortigate_check_ip(
+    ctx: RunContextWrapper[ThreatIntelContext], ip: str
+) -> dict[str, Any]:
+    """Consulta FortiGate por sessions activas + estado de quarantine de una IP.
+
+    Útil para decidir si vale la pena recomendar block_ip:
+      - active_sessions > 0 → IP tiene tráfico vivo, bloquear corta sesiones reales
+      - already_quarantined → ya está bloqueada, no hace falta volver a bloquear
+
+    Args:
+        ip: Dirección IPv4 (FortiGate API). No CIDR, no hostname.
+    """
+    cache_key = f"fortigate:{ip}"
+    cached = _cache_get(ctx.context, cache_key)
+    if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL fortigate_check_ip(ip=%r) → HARD STOP (hit #%d)", ip, hit_count
+            )
+            return _hard_stop_reply("fortigate_check_ip", f"'{ip}'", hit_count)
+        logger.warning(
+            "⚠️  TOOL fortigate_check_ip(ip=%r) → CACHED (hit #%d)", ip, hit_count
+        )
+        return _cached_reply(cached, "fortigate_check_ip", f"'{ip}'", hit_count)
+
+    settings = ctx.context.settings
+    logger.info("🔎 TOOL fortigate_check_ip(ip=%r) [agent=ThreatIntel]", ip)
+
+    if not settings.fortigate_host or not settings.fortigate_token:
+        logger.warning("↳ fortigate_check_ip → SKIP: FortiGate no configurado")
+        result = {"found": False, "ip": ip, "error": "FortiGate no configurado"}
+        _cache_set(ctx.context, cache_key, result)
+        return result
+
+    try:
+        async with FortigateClient(settings) as fg:
+            fg_ctx = await fg.get_ip_context(ip)
+    except FortigateError as e:
+        logger.warning("↳ fortigate_check_ip(ip=%r) → ERROR: %s", ip, e)
+        result = {"found": False, "ip": ip, "error": str(e)}
+        _cache_set(ctx.context, cache_key, result)
+        return result
+
+    logger.info(
+        "↳ fortigate_check_ip(ip=%r) → FOUND: sessions=%d (src=%d,dst=%d) "
+        "quarantined=%s expires=%s",
+        ip,
+        fg_ctx.active_sessions,
+        fg_ctx.sessions_as_source,
+        fg_ctx.sessions_as_destination,
+        fg_ctx.already_quarantined,
+        fg_ctx.quarantine_expires,
+    )
+    result = {
+        "found": True,
+        "ip": fg_ctx.ip,
+        "active_sessions": fg_ctx.active_sessions,
+        "sessions_as_source": fg_ctx.sessions_as_source,
+        "sessions_as_destination": fg_ctx.sessions_as_destination,
+        "already_quarantined": fg_ctx.already_quarantined,
+        "quarantine_expires": fg_ctx.quarantine_expires,
+    }
+    _cache_set(ctx.context, cache_key, result)
+    return result
+
+
 # ===== System prompt =====
 
 SYSTEM_PROMPT = """Sos el agente THREAT_INTEL de un SOC L1. Tu trabajo es enriquecer una \
-alerta normalizada con datos de fuentes externas de threat intelligence: VirusTotal \
-(reputation de archivos por hash) y AbuseIPDB (reputation de IPs).
+alerta normalizada con datos de fuentes externas de threat intelligence:
+  - VirusTotal: reputation de archivos por hash
+  - AbuseIPDB: reputation de IPs públicas (score crowdsourced)
+  - FortiGate: sessions activas + estado de quarantine de IPs (contexto LOCAL de red)
 
-Tenés 2 tools:
+Tenés 3 tools:
   - vt_lookup_hash(sha256): VT v3 file report
-  - abuseipdb_check(ip): IP reputation crowdsourced
+  - abuseipdb_check(ip): IP reputation external
+  - fortigate_check_ip(ip): contexto local en el firewall (sessions, quarantine)
 
 REGLAS CRÍTICAS (anti-loop):
   - Cada tool se llama MÁXIMO 1 VEZ por argumento. NO repitas con los mismos args.
@@ -301,10 +381,9 @@ REGLAS CRÍTICAS (anti-loop):
 
 PROCEDIMIENTO OBLIGATORIO:
 1. Por cada file en alert.files que tenga sha256 (no None, no vacío) → vt_lookup_hash.
-   Si la lista está vacía o ningún file tiene SHA256, no llames.
-2. Por cada IP en alert.network (src_ip_internal, src_ip_external, dst_ip) que NO sea \
-None ni RFC1918 (10.*, 172.16-31.*, 192.168.*) → abuseipdb_check.
-   IPs privadas no tiene sentido consultarlas (AbuseIPDB es para IPs públicas).
+2. Por cada IP en alert.network que NO sea None ni RFC1918 (10.*, 172.16-31.*, 192.168.*):
+   - llamá abuseipdb_check(ip)
+   - llamá fortigate_check_ip(ip)  ← solo si tenés FortiGate configurado
 3. Componé y devolvé EXACTAMENTE el JSON de ThreatIntelResult.
 
 CRITERIO PARA `flags`:
@@ -335,7 +414,7 @@ def build_threatintel_agent(model: str = "gpt-4o-mini") -> Agent[ThreatIntelCont
         name="ThreatIntel",
         instructions=SYSTEM_PROMPT,
         model=model,
-        tools=[vt_lookup_hash, abuseipdb_check],
+        tools=[vt_lookup_hash, abuseipdb_check, fortigate_check_ip],
         output_type=ThreatIntelResult,
     )
 

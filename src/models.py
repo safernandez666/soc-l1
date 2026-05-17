@@ -190,3 +190,30 @@ class AbuseipdbReport(BaseModel):
     is_whitelisted: bool = False
     is_tor: bool = False
     usage_type: str | None = None
+
+
+# ===== FortiGate =====
+
+
+class FortigateIpContext(BaseModel):
+    """Snapshot de una IP en FortiGate: sessions activas + si está ya quarantined."""
+
+    model_config = ConfigDict(extra="forbid")
+    ip: str
+    active_sessions: int = 0
+    already_quarantined: bool = False
+    quarantine_expires: str | None = None
+    # Cantidad por dirección (útil para distinguir "viene de afuera" vs "sale de adentro")
+    sessions_as_source: int = 0
+    sessions_as_destination: int = 0
+
+
+class FortigateActionResult(BaseModel):
+    """Resultado de quarantine_ip (o futuras acciones de FortiGate)."""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: bool
+    ip: str
+    action: str  # "quarantine_ip" hoy
+    expires_at: str | None = None
+    message: str | None = None
