@@ -263,3 +263,79 @@ async def test_wazuh_get_rule_handles_api_error(settings) -> None:
     payload = json.loads(result) if isinstance(result, str) else result
     assert payload["found"] is False
     assert "auth failed" in payload["error"]
+
+
+# ===== Cache anti-loop =====
+
+
+@pytest.mark.asyncio
+async def test_ldap_search_user_caches_result_across_calls(settings, ldap_cfg) -> None:
+    """Si el LLM llama 2 veces con mismo sam, segunda call NO toca LDAP - cacheado."""
+    fake_user = ADUser(
+        dn="CN=jdoe,DC=test", sam="jdoe", account_enabled=True,
+        locked_out=False, user_account_control=512,
+    )
+    ctx = _ctx(settings, ldap_cfg)  # mismo ctx en ambos calls
+
+    with patch("src.agents.enricher.ldap_tools.search_user", return_value=fake_user) as mock_fn:
+        r1 = await ldap_search_user.on_invoke_tool(
+            ctx, json.dumps({"sam_account_name": "jdoe"})
+        )
+        r2 = await ldap_search_user.on_invoke_tool(
+            ctx, json.dumps({"sam_account_name": "jdoe"})
+        )
+
+    # LDAP solo se llamó una vez
+    mock_fn.assert_called_once()
+
+    p1 = json.loads(r1) if isinstance(r1, str) else r1
+    p2 = json.loads(r2) if isinstance(r2, str) else r2
+
+    # Primera call: respuesta normal sin _cache_hit
+    assert p1["found"] is True
+    assert "_cache_hit" not in p1
+
+    # Segunda call: misma data + marca de cache + warning para el LLM
+    assert p2["found"] is True
+    assert p2["_cache_hit"] is True
+    assert "Ya llamaste" in p2["_warning"]
+    assert "NO vuelvas a llamar" in p2["_warning"]
+
+
+@pytest.mark.asyncio
+async def test_wazuh_get_rule_caches_result_across_calls(settings) -> None:
+    """Loop del LLM: 3 calls a get_rule(200002) → solo 1 hit al manager."""
+    ctx = _ctx(settings, None)
+
+    with respx.mock(base_url="https://wazuh.test:55000") as mock:
+        auth_route = mock.post("/security/user/authenticate").mock(return_value=_auth_response())
+        rule_route = mock.get("/rules", params={"rule_ids": "200002"}).mock(
+            return_value=_rule_response()
+        )
+
+        # 3 calls consecutivos con mismo rule_id
+        for _ in range(3):
+            await wazuh_get_rule.on_invoke_tool(
+                ctx, json.dumps({"rule_id": "200002"})
+            )
+
+    # Solo 1 auth + 1 GET /rules - los otros 2 vinieron del cache
+    assert auth_route.call_count == 1
+    assert rule_route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_is_per_context_not_global(settings) -> None:
+    """Dos runs distintos (contextos distintos) NO comparten cache."""
+    ctx1 = _ctx(settings, None)
+    ctx2 = _ctx(settings, None)
+
+    with respx.mock(base_url="https://wazuh.test:55000") as mock:
+        mock.post("/security/user/authenticate").mock(return_value=_auth_response())
+        rule_route = mock.get("/rules").mock(return_value=_rule_response())
+
+        await wazuh_get_rule.on_invoke_tool(ctx1, json.dumps({"rule_id": "200002"}))
+        await wazuh_get_rule.on_invoke_tool(ctx2, json.dumps({"rule_id": "200002"}))
+
+    # 2 calls reales al manager - uno por contexto
+    assert rule_route.call_count == 2

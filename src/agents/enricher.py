@@ -15,7 +15,7 @@ o Narrator) trabaje sobre un JSON limpio sin tener que re-leer la alerta cruda.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agents import Agent, RunContextWrapper, Runner, function_tool
@@ -35,10 +35,40 @@ class EnricherContext:
 
     Las tools no pueden recibir el LdapConfig directo desde el LLM (no es serializable
     y no queremos exponerlo en el schema). Lo pasamos vía contexto.
+
+    `_call_cache` evita que el LLM gaste turns repitiendo la misma tool con los mismos
+    args. En producción vimos al LLM llamar wazuh_get_rule(200002) 4+ veces seguidas
+    aunque el system prompt prohibía repetir. Con cache, el segundo+ call retorna el
+    resultado de la primera vez + un mensaje fuerte para que el LLM se detenga.
     """
 
     settings: Settings
     ldap_cfg: LdapConfig | None  # None si LDAP no está configurado (skip search_user)
+    _call_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def _cache_get(ctx: EnricherContext, key: str) -> dict[str, Any] | None:
+    return ctx._call_cache.get(key)
+
+
+def _cache_set(ctx: EnricherContext, key: str, value: dict[str, Any]) -> None:
+    ctx._call_cache[key] = value
+
+
+def _cached_reply(prev: dict[str, Any], tool_name: str, key: str) -> dict[str, Any]:
+    """Devuelve el resultado cacheado pero con un campo extra que avisa al LLM
+    que YA llamó esta tool. Idea: que el LLM no gaste otro turn intentando de nuevo.
+    """
+    # Copia defensiva para no mutar el cache
+    out = dict(prev)
+    out["_cache_hit"] = True
+    out["_warning"] = (
+        f"Ya llamaste {tool_name}({key}) antes en esta corrida. "
+        f"Este es el resultado de la primera llamada. "
+        f"NO vuelvas a llamar a esta tool con los mismos argumentos. "
+        f"Usá los datos que ya tenés y producí el JSON final ahora."
+    )
+    return out
 
 
 class EnrichedUser(BaseModel):
@@ -95,6 +125,15 @@ async def ldap_search_user(
     Args:
         sam_account_name: El sam (sin dominio). Ejemplo: "jdoe", no "jdoe@example.com".
     """
+    cache_key = f"ldap:{sam_account_name}"
+    cached = _cache_get(ctx.context, cache_key)
+    if cached is not None:
+        logger.warning(
+            "⚠️  TOOL ldap_search_user(sam=%r) → CACHED (LLM repitió la llamada)",
+            sam_account_name,
+        )
+        return _cached_reply(cached, "ldap_search_user", f"'{sam_account_name}'")
+
     cfg = ctx.context.ldap_cfg
     logger.info("🔎 TOOL ldap_search_user(sam=%r) [agent=Enricher]", sam_account_name)
 
@@ -102,11 +141,13 @@ async def ldap_search_user(
         logger.warning(
             "↳ ldap_search_user(sam=%r) → SKIP: LDAP no configurado", sam_account_name
         )
-        return {
+        result = {
             "found": False,
             "sam": sam_account_name,
             "error": "LDAP no configurado en este entorno",
         }
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     try:
         user: ADUser | None = ldap_tools.search_user(cfg, sam_account_name)
@@ -114,11 +155,15 @@ async def ldap_search_user(
         logger.warning(
             "↳ ldap_search_user(sam=%r) → ERROR: %s", sam_account_name, e
         )
-        return {"found": False, "sam": sam_account_name, "error": str(e)}
+        result = {"found": False, "sam": sam_account_name, "error": str(e)}
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     if user is None:
         logger.info("↳ ldap_search_user(sam=%r) → NOT FOUND in AD", sam_account_name)
-        return {"found": False, "sam": sam_account_name}
+        result = {"found": False, "sam": sam_account_name}
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     # Visibilidad: la línea más importante del Enricher. Acá ves QUÉ aprendió el agent.
     logger.info(
@@ -134,7 +179,7 @@ async def ldap_search_user(
         user.bad_pwd_count,
         user.last_logon,
     )
-    return {
+    result = {
         "found": True,
         "sam": user.sam,
         "dn": user.dn,
@@ -150,6 +195,8 @@ async def ldap_search_user(
         "pwd_last_set": user.pwd_last_set,
         "member_of_count": len(user.member_of),
     }
+    _cache_set(ctx.context, cache_key, result)
+    return result
 
 
 @function_tool
@@ -163,6 +210,15 @@ async def wazuh_get_rule(
     Args:
         rule_id: ID numérico de la rule. Ejemplo: "60106".
     """
+    cache_key = f"rule:{rule_id}"
+    cached = _cache_get(ctx.context, cache_key)
+    if cached is not None:
+        logger.warning(
+            "⚠️  TOOL wazuh_get_rule(rule_id=%r) → CACHED (LLM repitió la llamada)",
+            rule_id,
+        )
+        return _cached_reply(cached, "wazuh_get_rule", f"'{rule_id}'")
+
     settings = ctx.context.settings
     logger.info("🔎 TOOL wazuh_get_rule(rule_id=%r) [agent=Enricher]", rule_id)
 
@@ -170,18 +226,24 @@ async def wazuh_get_rule(
         logger.warning(
             "↳ wazuh_get_rule(rule_id=%r) → SKIP: Wazuh API no configurado", rule_id
         )
-        return {"found": False, "rule_id": rule_id, "error": "Wazuh API no configurado"}
+        result = {"found": False, "rule_id": rule_id, "error": "Wazuh API no configurado"}
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     try:
         async with WazuhApiClient(settings) as client:
             rule = await client.get_rule(rule_id)
     except WazuhApiError as e:
         logger.warning("↳ wazuh_get_rule(rule_id=%r) → ERROR: %s", rule_id, e)
-        return {"found": False, "rule_id": rule_id, "error": str(e)}
+        result = {"found": False, "rule_id": rule_id, "error": str(e)}
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     if rule is None:
         logger.info("↳ wazuh_get_rule(rule_id=%r) → NOT FOUND", rule_id)
-        return {"found": False, "rule_id": rule_id}
+        result = {"found": False, "rule_id": rule_id}
+        _cache_set(ctx.context, cache_key, result)
+        return result
 
     logger.info(
         "↳ wazuh_get_rule(rule_id=%r) → FOUND: level=%d desc=%r groups=%s mitre=%s",
@@ -191,7 +253,7 @@ async def wazuh_get_rule(
         rule.groups,
         rule.mitre_ids,
     )
-    return {
+    result = {
         "found": True,
         "rule_id": rule.rule_id,
         "level": rule.level,
@@ -203,6 +265,8 @@ async def wazuh_get_rule(
         "gdpr": rule.gdpr,
         "pci_dss": rule.pci_dss,
     }
+    _cache_set(ctx.context, cache_key, result)
+    return result
 
 
 # ===== System prompt =====
