@@ -128,6 +128,12 @@ class Settings(BaseSettings):
     service_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
 
+    # Allowlist de IPs que pueden POSTear al webhook. Default = localhost only.
+    # En deploy típico el integrator de Wazuh corre en el mismo host, así que con localhost
+    # alcanza. Si Wazuh está en otro server, agregar la IP de ese server.
+    # Comma-separated. Soporta IPs exactas (no CIDR todavía).
+    webhook_allowed_ips: str = Field(default="127.0.0.1,::1")
+
     # Wazuh manager API (usado por el Enricher para get_rule, recent alerts).
     # En el server productivo el manager corre local con cert self-signed → verify_ssl=False.
     wazuh_api_host: str = Field(default="127.0.0.1")
@@ -184,3 +190,7 @@ class Settings(BaseSettings):
             for sam in self.protected_users.split(",")
             if sam.strip()
         }
+
+    def webhook_allowed_ips_set(self) -> set[str]:
+        """Parsea webhook_allowed_ips a un set para lookup O(1)."""
+        return {ip.strip() for ip in self.webhook_allowed_ips.split(",") if ip.strip()}

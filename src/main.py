@@ -110,7 +110,22 @@ async def wazuh_webhook(
     settings: SettingsDep,
     x_wazuh_signature: Annotated[str | None, Header(alias="X-Wazuh-Signature")] = None,
 ) -> JSONResponse:
-    """Recibe alerta Wazuh. Verifica HMAC, normaliza, lanza pipeline en background."""
+    """Recibe alerta Wazuh. Verifica IP source + HMAC, normaliza, lanza pipeline."""
+    # Guardrail #1: source IP allowlist (default: localhost only).
+    # Reduce surface attack - aunque alguien tenga el HMAC secret, solo puede
+    # mandar desde IPs autorizadas.
+    client_ip = request.client.host if request.client else None
+    allowed_ips = settings.webhook_allowed_ips_set()
+    if client_ip not in allowed_ips:
+        logger.warning(
+            "Wazuh webhook: source IP %s NOT in allowlist %s - rejecting",
+            client_ip, sorted(allowed_ips),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"webhook source IP not allowed",
+        )
+
     body = await request.body()
 
     if not verify_wazuh_signature(settings.wazuh_webhook_secret, body, x_wazuh_signature):

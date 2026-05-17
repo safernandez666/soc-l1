@@ -22,13 +22,38 @@ def _sign(body: bytes, secret: str = TEST_SECRET) -> str:
 
 @pytest.fixture
 def client() -> TestClient:
-    """TestClient con settings overrideado a un secret de test."""
+    """TestClient con settings overrideado a un secret de test.
+
+    Por default el webhook solo acepta de 127.0.0.1 - el TestClient envía como
+    'testclient' como host, así que agregamos 'testclient' al allowlist.
+    """
 
     def _settings_override() -> Settings:
-        return Settings(wazuh_webhook_secret=TEST_SECRET)
+        return Settings(
+            wazuh_webhook_secret=TEST_SECRET,
+            webhook_allowed_ips="127.0.0.1,testclient",
+        )
 
     app.dependency_overrides[get_settings] = _settings_override
-    # Limpiar el cache del lru_cache
+    get_settings.cache_clear()
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def client_localhost_only() -> TestClient:
+    """TestClient con allowlist = solo 127.0.0.1 (no testclient).
+    Útil para verificar que un POST desde 'testclient' es bloqueado."""
+
+    def _settings_override() -> Settings:
+        return Settings(
+            wazuh_webhook_secret=TEST_SECRET,
+            webhook_allowed_ips="127.0.0.1",
+        )
+
+    app.dependency_overrides[get_settings] = _settings_override
     get_settings.cache_clear()
     with TestClient(app) as c:
         yield c
@@ -100,6 +125,21 @@ def test_webhook_rejects_invalid_json(client: TestClient) -> None:
         headers={"X-Wazuh-Signature": _sign(body), "Content-Type": "application/json"},
     )
     assert r.status_code == 400
+
+
+def test_webhook_rejects_source_ip_not_in_allowlist(
+    client_localhost_only: TestClient, defender_body: bytes
+) -> None:
+    """Aunque el HMAC sea válido, si la IP source no está en allowlist → 403."""
+    headers = {
+        "X-Wazuh-Signature": _sign(defender_body),
+        "Content-Type": "application/json",
+    }
+    r = client_localhost_only.post(
+        "/webhook/wazuh-alert", content=defender_body, headers=headers
+    )
+    assert r.status_code == 403
+    assert "not allowed" in r.json()["detail"]
 
 
 def test_webhook_accepts_native_wazuh_alert(client: TestClient) -> None:
