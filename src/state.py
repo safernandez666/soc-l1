@@ -243,3 +243,61 @@ async def mark_executed(db_path: str, token: str, execution_result: list[dict]) 
         token,
         json.dumps(execution_result, default=str),
     )
+
+
+# ===== List / query for dashboard =====
+
+
+def _list_approvals_sync(
+    db_path: str,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Lista approvals con filtro opcional por status. Retorna (rows, total_count)."""
+    # Sanity en limit/offset (defensa contra DoS por queries enormes)
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+
+    with _connect(db_path) as conn:
+        if status:
+            count_row = conn.execute(
+                "SELECT COUNT(*) FROM pending_approvals WHERE status = ?", (status,)
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT token, alert_id, status, created_at, decided_at, "
+                "       decided_by_ip, decided_by_ua, selected_actions, "
+                "       executed_at, plan_json "
+                "FROM pending_approvals WHERE status = ? "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
+            ).fetchall()
+        else:
+            count_row = conn.execute("SELECT COUNT(*) FROM pending_approvals").fetchone()
+            rows = conn.execute(
+                "SELECT token, alert_id, status, created_at, decided_at, "
+                "       decided_by_ip, decided_by_ua, selected_actions, "
+                "       executed_at, plan_json "
+                "FROM pending_approvals "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+    total = int(count_row[0] if count_row else 0)
+    return ([dict(r) for r in rows], total)
+
+
+async def list_approvals(
+    db_path: str,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Lista approvals (más nuevos primero). status opcional filtra por estado.
+
+    Retorna (rows, total_count). El total cuenta TODOS los matches (no solo la página).
+    Cada row tiene los campos básicos + plan_json (no parseado, lo parsea el caller si necesita).
+    """
+    return await asyncio.to_thread(
+        _list_approvals_sync, db_path, status, limit, offset
+    )

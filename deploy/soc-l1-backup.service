@@ -1,0 +1,26 @@
+[Unit]
+Description=SOC L1 - Daily backup of state.db
+Documentation=https://github.com/safernandez666/soc-l1
+
+[Service]
+Type=oneshot
+# Reusa el user dueño de /opt/soc-l1 (mismo que el servicio principal)
+User=__SOC_USER__
+Group=__SOC_GROUP__
+
+# Vars para el script. Override editando este unit + daemon-reload.
+Environment=DB=/opt/soc-l1/state.db
+Environment=BACKUP_DIR=/var/backups/soc-l1
+Environment=RETAIN_DAYS=30
+
+ExecStart=/opt/soc-l1/scripts/backup-state.sh
+
+# Logs van a journald (ver con: journalctl -u soc-l1-backup.service)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soc-l1-backup
+
+# El backup-dir necesita ser writable por el user del servicio.
+# Si User=jdoe, /var/backups/soc-l1 debe ser chown'd previamente
+# (lo hace el install script).
+ReadWritePaths=/opt/soc-l1 /var/backups/soc-l1

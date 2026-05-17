@@ -931,3 +931,243 @@ async def decide_plan(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=f"decision inválida: {decision!r} (debe ser 'approve' o 'reject')",
     )
+
+
+# ===== Dashboard: cola de approvals =====
+
+
+_STATUS_BADGES = {
+    "pending":  {"bg": "#fef3c7", "fg": "#92400e"},  # amarillo
+    "approved": {"bg": "#dcfce7", "fg": "#166534"},  # verde
+    "rejected": {"bg": "#fee2e2", "fg": "#7f1d1d"},  # rojo
+    "expired":  {"bg": "#f1f5f9", "fg": "#334155"},  # gris
+    "executed": {"bg": "#dbeafe", "fg": "#1e40af"},  # azul
+}
+
+
+def _render_approvals_page(
+    rows: list[dict], total: int, status_filter: str | None, limit: int, offset: int
+) -> HTMLResponse:
+    """Renderiza la cola de approvals como HTML table con paginación + filtros."""
+    import html as _h
+    import json as _json
+
+    if not rows:
+        empty_msg = (
+            "<p style='color:#64748b;font-style:italic;text-align:center;padding:40px;'>"
+            "No hay approvals que mostrar"
+            + (f" con status='{_h.escape(status_filter)}'" if status_filter else "")
+            + ".</p>"
+        )
+        rows_html = empty_msg
+    else:
+        row_lines = []
+        for row in rows:
+            # Parsear plan_json para extraer risk + action types (resumen visual)
+            risk = "?"
+            action_types: list[str] = []
+            try:
+                plan = _json.loads(row.get("plan_json", "{}"))
+                risk = plan.get("risk_level", "?")
+                action_types = [a.get("type", "?") for a in plan.get("actions", [])]
+            except (TypeError, ValueError):
+                pass
+
+            risk_color = {
+                "critical": "#7f1d1d",
+                "high":     "#991b1b",
+                "medium":   "#b45309",
+                "low":      "#a16207",
+            }.get(risk, "#475569")
+
+            status = row.get("status", "?")
+            badge = _STATUS_BADGES.get(status, {"bg": "#f1f5f9", "fg": "#334155"})
+
+            decided = row.get("decided_at") or "—"
+            decided_by = row.get("decided_by_ip") or "—"
+
+            actions_summary = ", ".join(action_types[:4])
+            if len(action_types) > 4:
+                actions_summary += f" +{len(action_types) - 4}"
+            if not actions_summary:
+                actions_summary = "—"
+
+            # Link a /review solo si pending; si no, sin link (decided ya)
+            alert_id = _h.escape(row.get("alert_id", "?"))
+            token = _h.escape(row.get("token", ""))
+            if status == "pending":
+                alert_cell = (
+                    f"<a href='/review/{token}' "
+                    f"style='color:#0284c7;text-decoration:none;'>{alert_id}</a>"
+                )
+            else:
+                alert_cell = alert_id
+
+            row_lines.append(
+                f"""<tr>
+                  <td><code style='font-size:12px;'>{alert_cell}</code></td>
+                  <td><span style='background:{risk_color};color:white;padding:3px 10px;
+                                    border-radius:12px;font:bold 10px sans-serif;
+                                    text-transform:uppercase;'>{_h.escape(risk)}</span></td>
+                  <td><span style='background:{badge["bg"]};color:{badge["fg"]};
+                                    padding:3px 10px;border-radius:12px;
+                                    font:bold 10px sans-serif;text-transform:uppercase;'>{_h.escape(status)}</span></td>
+                  <td style='font-size:12px;color:#475569;'>{_h.escape(actions_summary)}</td>
+                  <td style='font-size:11px;color:#64748b;'>{_h.escape(row.get("created_at", "")[:19])}</td>
+                  <td style='font-size:11px;color:#64748b;'>{_h.escape(decided[:19] if decided != "—" else "—")}</td>
+                  <td style='font-size:11px;color:#64748b;'>{_h.escape(decided_by)}</td>
+                </tr>"""
+            )
+        rows_html = (
+            "<table style='width:100%;border-collapse:collapse;'>"
+            "<thead><tr style='background:#f8fafc;text-align:left;'>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Alert ID</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Risk</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Status</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Acciones</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Creado</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Decidido</th>"
+            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Por IP</th>"
+            "</tr></thead>"
+            "<tbody>"
+            + "\n".join(
+                f"<tr style='border-bottom:1px solid #f1f5f9;'>{r[4:]}"
+                for r in row_lines
+            )
+            + "</tbody></table>"
+        )
+        # Hack visual: agregar padding a cada td
+        rows_html = rows_html.replace(
+            "<td>", "<td style='padding:10px;'>"
+        ).replace("<td style='padding:10px;'><td", "<td")
+
+    # Filtros (links arriba)
+    def _filter_link(label: str, st: str | None) -> str:
+        url = "/approvals" if st is None else f"/approvals?status={st}"
+        active = (st == status_filter) or (st is None and not status_filter)
+        bg = "#0284c7" if active else "#f1f5f9"
+        fg = "white" if active else "#475569"
+        return (
+            f"<a href='{url}' style='display:inline-block;padding:6px 14px;"
+            f"background:{bg};color:{fg};border-radius:4px;text-decoration:none;"
+            f"font:bold 12px sans-serif;text-transform:uppercase;margin-right:6px;'>"
+            f"{label}</a>"
+        )
+
+    filters_html = (
+        _filter_link("Todos", None)
+        + _filter_link("Pending", "pending")
+        + _filter_link("Approved", "approved")
+        + _filter_link("Rejected", "rejected")
+        + _filter_link("Executed", "executed")
+        + _filter_link("Expired", "expired")
+    )
+
+    # Paginación
+    showing_from = offset + 1 if rows else 0
+    showing_to = offset + len(rows)
+    pag_parts = []
+    if offset > 0:
+        prev_offset = max(0, offset - limit)
+        url = f"/approvals?limit={limit}&offset={prev_offset}"
+        if status_filter:
+            url += f"&status={status_filter}"
+        pag_parts.append(
+            f"<a href='{url}' style='padding:6px 14px;background:#f1f5f9;"
+            f"color:#475569;border-radius:4px;text-decoration:none;font-size:12px;'>"
+            f"← Anteriores</a>"
+        )
+    if showing_to < total:
+        next_offset = offset + limit
+        url = f"/approvals?limit={limit}&offset={next_offset}"
+        if status_filter:
+            url += f"&status={status_filter}"
+        pag_parts.append(
+            f"<a href='{url}' style='padding:6px 14px;background:#f1f5f9;"
+            f"color:#475569;border-radius:4px;text-decoration:none;font-size:12px;margin-left:6px;'>"
+            f"Siguientes →</a>"
+        )
+    pag_html = " ".join(pag_parts)
+
+    page = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SOC L1 · Approvals</title>
+  <style>
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }}
+    .container {{ max-width: 1280px; margin: 0 auto; background: white; border-radius: 12px;
+                  overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+    .header {{ padding: 20px 24px; border-left: 8px solid #0284c7; background: #f8fafc; }}
+    .header h1 {{ font-size: 20px; margin: 0 0 4px 0; }}
+    .meta {{ font-size: 13px; color: #64748b; }}
+    .filters {{ padding: 16px 24px; border-bottom: 1px solid #e5e7eb; }}
+    .table-wrap {{ padding: 16px 24px; overflow-x: auto; }}
+    .pagination {{ padding: 16px 24px; text-align: center; border-top: 1px solid #f1f5f9; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+    code {{ font-family: 'SF Mono', Monaco, monospace; }}
+    a:hover {{ opacity: 0.85; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📋 Cola de approvals</h1>
+      <div class="meta">
+        Mostrando <strong>{showing_from}-{showing_to}</strong> de <strong>{total}</strong>
+        {f"(filtro: {_h.escape(status_filter)})" if status_filter else "(sin filtro)"}
+      </div>
+    </div>
+    <div class="filters">{filters_html}</div>
+    <div class="table-wrap">{rows_html}</div>
+    <div class="pagination">{pag_html or '&nbsp;'}</div>
+    <div class="footer">
+      <strong>SOC L1 · Wazuh + Defender</strong> · pipeline multi-agente<br>
+      Para datos en JSON: <code>/approvals?format=json</code>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(content=page)
+
+
+@app.get("/approvals")
+async def list_approvals_endpoint(
+    settings: SettingsDep,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    format: str = "html",
+):
+    """Cola de approvals (last N, paginada, filtrable por status).
+
+    Query params:
+      - status: pending | approved | rejected | expired | executed (opcional)
+      - limit: 1-500 (default 50)
+      - offset: 0+ (default 0)
+      - format: html (default) | json
+    """
+    from src.state import list_approvals
+
+    rows, total = await list_approvals(
+        settings.state_db_path, status=status, limit=limit, offset=offset
+    )
+
+    if format == "json":
+        # JSON: stripeamos plan_json para no devolver objetos masivos en el array
+        # (el caller puede pedir un approval individual si necesita el plan completo)
+        clean_rows = []
+        for r in rows:
+            r = dict(r)
+            r.pop("plan_json", None)
+            clean_rows.append(r)
+        return JSONResponse(content={
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "status_filter": status,
+            "rows": clean_rows,
+        })
+
+    return _render_approvals_page(rows, total, status, limit, offset)

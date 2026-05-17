@@ -1,0 +1,14 @@
+[Unit]
+Description=SOC L1 - Trigger daily backup of state.db
+Documentation=https://github.com/safernandez666/soc-l1
+
+[Timer]
+# Disparar a las 02:00 cada día
+OnCalendar=*-*-* 02:00:00
+# Si el sistema estaba apagado a las 02:00, disparar al boot siguiente
+Persistent=true
+# Variar ±5min para evitar thundering herd si hay muchos servers
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
