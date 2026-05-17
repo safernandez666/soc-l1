@@ -54,17 +54,22 @@ humana, nunca el LLM. Defensa contra prompt injection con efecto side-effect.
 |---|---|---|
 | Normalizer | ✅ | Convierte alerta Wazuh nativa o Defender-via-Wazuh a `NormalizedAlert` |
 | Webhook HMAC | ✅ | `POST /webhook/wazuh-alert` con verificación HMAC-SHA256 |
+| **Webhook IP allowlist** | ✅ | `WEBHOOK_ALLOWED_IPS` defensa en profundidad al HMAC (default: localhost only) |
 | Triage agent | ✅ | gpt-4o-mini; decide `auto_close_benign` / `analyze` / `fast_track_critical` |
 | Enricher agent | ✅ | gpt-4o; consulta AD (LDAP STARTTLS) + Wazuh manager API |
-| ThreatIntel agent | ✅ | gpt-4o; consulta VirusTotal + AbuseIPDB |
-| Narrator agent | ✅ | gpt-4o; produce plan estructurado con `ProposedAction[]` |
+| ThreatIntel agent | ✅ | gpt-4o; consulta VirusTotal + AbuseIPDB + **FortiGate** (sessions + quarantine status) |
+| **FortiGate integration** | ✅ | Tool `fortigate_check_ip` + acción `block_ip` (quarantine via REST API) |
+| Narrator agent | ✅ | gpt-4o; produce plan estructurado con `ProposedAction[]` (incluye `block_ip`) |
 | Email approval | ✅ | SMTP (Exchange 2016 STARTTLS), branded HTML matching Wazuh look |
-| Approval endpoints | ✅ | `/approve/{token}` y `/reject/{token}`, single-use, TTL 24h |
-| Executor | ✅ | Dispatcher determinístico con guardrails (PROTECTED_USERS, DRY_RUN_MODE) |
-| State (SQLite) | ✅ | Pending approvals con audit trail (IP, UA, timestamps) |
+| Approval endpoints | ✅ | `/approve/{token}` y `/reject/{token}`, single-use, TTL 24h (backwards compat) |
+| **Granular approval** | ✅ | `/review/{token}` con checkboxes per-action + `/decide/{token}` POST handler |
+| Executor | ✅ | Dispatcher determinístico con guardrails (PROTECTED_USERS, **PROTECTED_NETWORKS**, DRY_RUN_MODE) |
+| State (SQLite) | ✅ | Pending approvals con audit trail (IP, UA, timestamps, **selected_actions**) |
+| **Dashboard `/approvals`** | ✅ | HTML table + JSON API con filtros por status + paginación |
 | systemd service | ✅ | `deploy/soc-l1.service` + `scripts/install-systemd.sh` |
+| **Backup automático** | ✅ | systemd timer diario (02:00) con SQLite online backup + retención 30 días |
 | Observability | ✅ | Logs estructurados por agente y por tool call |
-| Tests | ✅ | 138 tests (respx para HTTP, mock LDAP, e2e approval flow) |
+| Tests | ✅ | 166 tests (respx para HTTP, mock LDAP, FortiGate, e2e approval flow) |
 
 ---
 
@@ -88,25 +93,33 @@ humana, nunca el LLM. Defensa contra prompt injection con efecto side-effect.
    └─ ThreatIntel (gpt-4o):
         - vt_lookup_hash(sha256) por cada file con SHA256
         - abuseipdb_check(ip) por cada IP pública (skip RFC1918)
-        → ThreatIntelResult con file_reports + ip_reports + flags
+        - fortigate_check_ip(ip) por cada IP pública (sessions + quarantine status)
+        → ThreatIntelResult con file_reports + ip_reports + fortigate_contexts + flags
        ↓
 5. Narrator (gpt-4o, ~3s) recibe: alert + triage + enrichment + threat_intel
        → NarratorPlan con executive_summary + risk_level + actions[] + rationale
        ↓
 6. Persistir plan en SQLite (token único single-use, TTL 24h)
        ↓
-7. Enviar email HTML al approver con dos links:
-       /approve/{token}  → ejecuta plan
-       /reject/{token}   → cierra incidente sin acción
+7. Enviar email HTML al approver con UN solo botón "Revisar y decidir":
+       /review/{token}  → página con checkboxes per-action + 2 botones de submit
        ↓
-8. Click humano → Executor (deterministic, NO LLM):
+8. Humano elige acciones + click → POST /decide/{token}:
+       decision=approve + action_idx=[N,M,...] → solo esas acciones
+       decision=reject                          → ninguna acción
+       ↓
+9. Executor (deterministic, NO LLM) corre las acciones seleccionadas:
    ├─ Guardrail PROTECTED_USERS: refuse si target en whitelist
+   ├─ Guardrail PROTECTED_NETWORKS: refuse block_ip si IP en CIDR protegido
    ├─ Guardrail DRY_RUN_MODE: si true, log pero no ejecuta
    ├─ disable_user → tools/ldap.py.disable_user (UAC bit ACCOUNTDISABLE)
    ├─ force_password_change → pwdLastSet=0
+   ├─ block_ip → tools/fortigate.py.quarantine_ip (POST /monitor/user/banned/add_users)
    ├─ escalate_l2 → log only (futuro: ticket/Slack)
    └─ notify_only → noop
    → mark_executed en SQLite con resultados
+       ↓
+10. Audit trail visible en GET /approvals (HTML dashboard) o GET /approvals?format=json
 ```
 
 **Tiempo total típico end-to-end**: ~10-20 segundos desde webhook hasta email enviado.
@@ -136,7 +149,7 @@ uv sync
 cp .env.example .env  # editá con tus values
 
 # Tests
-uv run pytest                                  # 138 tests
+uv run pytest                                  # 166 tests
 uv run python3 scripts/test_ti_apis.py         # smoke test de VT + AbuseIPDB
 ```
 
@@ -158,14 +171,21 @@ vim .env
 # 3. Instalar como systemd unit (sobrevive reboots, restart on-failure)
 sudo /opt/soc-l1/scripts/install-systemd.sh
 
-# 4. Verificar
+# 4. Instalar backup automático de state.db (diario 02:00, retención 30 días)
+sudo /opt/soc-l1/scripts/install-backup.sh
+
+# 5. Verificar
 sudo systemctl status soc-l1
+sudo systemctl list-timers soc-l1-backup.timer
 curl http://localhost:8000/health
 
-# 5. Configurar el integrator de Wazuh
+# 6. Configurar el integrator de Wazuh
 sudo cp examples/wazuh-integrator/custom-soc-l1.py /var/ossec/integrations/
 sudo chmod +x /var/ossec/integrations/custom-soc-l1.py
 # Editar /var/ossec/etc/ossec.conf para apuntar al webhook, restart wazuh-manager
+
+# 7. Dashboard de approvals (abrir en browser de la red corporativa)
+# http://<host>:8000/approvals
 ```
 
 ### Testear el pipeline (alerta sintética)
@@ -235,6 +255,24 @@ VIRUSTOTAL_API_KEY=...                  # signup en virustotal.com (500/día fre
 ABUSEIPDB_API_KEY=...                   # signup en abuseipdb.com (1000/día free)
 ```
 
+### FortiGate (opcional - habilita acción `block_ip`)
+
+```bash
+# Host típicamente "fortigate.example.local:4443" o IP:puerto. Si no traés scheme,
+# asumimos https. Token desde System → Administrators → REST API Admin en FortiOS.
+FORTIGATE_HOST=
+FORTIGATE_TOKEN=
+FORTIGATE_VERIFY_SSL=false
+
+# CIDRs/IPs que JAMÁS deben bloquearse en FortiGate aunque se aprueben.
+# Default: RFC1918 + loopback (no bloquear redes propias).
+PROTECTED_NETWORKS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8
+```
+
+> Scopes que necesita el FortiGate API token (FortiOS Admin → REST API Admin):
+> `monitor.firewall.session` (lectura, para conteo de sessions activas) +
+> `monitor.user.banned` (lectura+escritura, para quarantine).
+
 ### Email approval
 
 ```bash
@@ -259,9 +297,17 @@ STATE_DB_PATH=/opt/soc-l1/state.db
 # Comma-separated, case-insensitive.
 PROTECTED_USERS=admin,svc-soar,jdoe,wazuhseg
 
-# Si true, las acciones AD no se ejecutan - solo se loggean.
+# Si true, las acciones AD/FortiGate no se ejecutan - solo se loggean.
 # Recomendado true mientras se valida que el Narrator hace recomendaciones sensatas.
 DRY_RUN_MODE=true
+```
+
+### Webhook security (defensa en profundidad al HMAC)
+
+```bash
+# IPs autorizadas a POSTear al webhook (además de la verificación HMAC).
+# Default: solo localhost. Si Wazuh manager corre en otro server, agregá su IP.
+WEBHOOK_ALLOWED_IPS=127.0.0.1,::1
 ```
 
 ### Feature flags
@@ -311,21 +357,22 @@ python3 scripts/send_test_alert.py tests/fixtures/defender_keygen_real_user.json
 src/
 ├── main.py              # FastAPI service + endpoints + pipeline orchestration
 ├── config.py            # Settings (pydantic-settings, lee .env)
-├── models.py            # NormalizedAlert, ADUser, VtFileReport, etc. (Pydantic)
+├── models.py            # NormalizedAlert, ADUser, VtFileReport, FortigateIpContext, etc.
 ├── normalize.py         # Wazuh native + Defender-via-Wazuh → NormalizedAlert
 ├── security.py          # verify_wazuh_signature (HMAC-SHA256 constant-time)
-├── state.py             # SQLite pending_approvals (CAS-safe updates)
+├── state.py             # SQLite pending_approvals + list_approvals (paginated)
 ├── mailer.py            # smtplib + STARTTLS, HTML branded matching Wazuh
-├── executor.py          # Dispatcher post-approval (PROTECTED_USERS + DRY_RUN)
+├── executor.py          # Dispatcher post-approval (PROTECTED_USERS + PROTECTED_NETWORKS + DRY_RUN)
 ├── tools/
 │   ├── ldap.py          # search_user, disable_user, force_password_change (ldap3)
 │   ├── wazuh_api.py     # JWT-cached client (httpx async)
-│   └── threatintel.py   # VirusTotalClient + AbuseipdbClient (httpx async)
+│   ├── threatintel.py   # VirusTotalClient + AbuseipdbClient (httpx async)
+│   └── fortigate.py     # FortigateClient (sessions + quarantine_ip)
 └── agents/
     ├── triage.py        # Decisión rápida sin tools
     ├── enricher.py      # AD + Wazuh rule lookup (cache anti-loop)
-    ├── threatintel.py   # VT + AbuseIPDB lookup (cache anti-loop)
-    └── narrator.py      # Síntesis final + ProposedAction[]
+    ├── threatintel.py   # VT + AbuseIPDB + FortiGate lookup (cache anti-loop)
+    └── narrator.py      # Síntesis final + ProposedAction[] (incluye block_ip)
 ```
 
 ### Convenciones de diseño
@@ -342,10 +389,14 @@ src/
 
 - `NormalizedAlert` — schema interno común. Los agents nunca ven raw Wazuh.
 - `EnrichmentResult` — `{users[], rule, summary, flags[]}` con users encontrados en AD
-- `ThreatIntelResult` — `{file_reports[], ip_reports[], summary, flags[]}` con TI externa
+- `ThreatIntelResult` — `{file_reports[], ip_reports[], fortigate_contexts[], summary, flags[]}`
 - `NarratorPlan` — `{executive_summary, risk_level, actions[], rationale}` que el humano aprueba
 - `ProposedAction` — `{type, target, justification}`. Types soportados:
-  `disable_user`, `force_password_change`, `notify_only`, `escalate_l2`
+  - `disable_user` → setea ACCOUNT_DISABLE bit en AD via LDAP
+  - `force_password_change` → setea `pwdLastSet=0` (force change at next logon)
+  - `block_ip` → quarantine en FortiGate via REST API (TTL 1h por default)
+  - `escalate_l2` → log only (futuro: ticket/Slack)
+  - `notify_only` → noop, solo audit
 
 ---
 
@@ -393,7 +444,7 @@ git clone https://github.com/safernandez666/soc-l1.git
 cd soc-l1
 uv venv --python 3.12 && source .venv/bin/activate && uv sync
 cp .env.example .env  # editá values mínimos: OPENAI_API_KEY
-uv run pytest          # 138 tests passing
+uv run pytest          # 166 tests passing
 ```
 
 ### Estructura de tests
@@ -406,18 +457,19 @@ tests/
 ├── test_config.py                        # 3-tier credential resolution
 ├── test_normalize.py                     # Wazuh native + Defender-via-Wazuh
 ├── test_security.py                      # HMAC verify
-├── test_webhook.py                       # FastAPI endpoint
+├── test_webhook.py                       # FastAPI endpoint + IP allowlist
 ├── test_routing.py                       # Triage verdict → handler dispatch
 ├── test_triage.py                        # Triage agent (build, schema, no LLM)
 ├── test_enricher.py                      # Enricher agent + tools + cache + hard-stop
 ├── test_threatintel.py                   # VT + AbuseIPDB clients (respx)
-├── test_threatintel_agent.py             # ThreatIntel agent + tools + cache
+├── test_threatintel_agent.py             # ThreatIntel agent + tools (VT/AbuseIPDB/FortiGate)
+├── test_fortigate.py                     # FortiGate client (sessions + quarantine)
 ├── test_narrator.py                      # Narrator agent (build, schema, bundle)
 ├── test_ldap_tools.py                    # LDAP operations (ldap3 MOCK_SYNC)
-├── test_state.py                         # SQLite CRUD + idempotent decide
+├── test_state.py                         # SQLite CRUD + idempotent decide + selected_actions
 ├── test_mailer.py                        # SMTP message build + HTML escape
-├── test_executor.py                      # Dispatcher + PROTECTED_USERS + DRY_RUN
-└── test_approval_endpoints.py            # E2E approve/reject flow
+├── test_executor.py                      # Dispatcher + PROTECTED_USERS + PROTECTED_NETWORKS + DRY_RUN + block_ip
+└── test_approval_endpoints.py            # E2E approve/reject + /review + /decide + /approvals
 ```
 
 ### Convenciones de código
@@ -443,70 +495,60 @@ tests/
 
 ## Roadmap
 
-### Cortó plazo (next iterations)
+### ✅ Completado en versiones recientes
 
-#### Defensa del webhook público en internet
+- **Webhook IP allowlist** (`WEBHOOK_ALLOWED_IPS`) — defensa adicional al HMAC, default localhost
+- **FortiGate integration** — tool `fortigate_check_ip` en ThreatIntel + acción `block_ip` en executor con guardrail `PROTECTED_NETWORKS`
+- **Approval granular** — `/review/{token}` con checkboxes per-action + `POST /decide/{token}` que filtra acciones a ejecutar
+- **`GET /approvals` dashboard** — HTML + JSON con filtros por status y paginación
+- **Backup automático** de `state.db` — systemd timer diario con retención 30 días
 
-Hoy `/webhook/wazuh-alert` está bindeado a `0.0.0.0:8000` pero **debería**:
-- Bindearse a `127.0.0.1:8000` si Wazuh manager corre en el mismo host
-- O detrás de iptables / firewall que solo permite traffic del IP del manager
+### 🟡 Corto plazo (pendientes)
 
-Los endpoints `/approve` y `/reject` SÍ necesitan ser alcanzables desde el browser del
-analista. Propuesta:
+#### Reverse proxy + HTTPS
 
-1. **Reverse proxy con TLS** (nginx/caddy) en frente del puerto 8000
-2. **Rate limit por IP** (max N approvals por minuto)
-3. **IP allowlist** (solo IPs corporativas / VPN)
+Hoy los endpoints `/review`, `/decide`, `/approve`, `/reject` y `/approvals` van por HTTP
+plano. En LAN corporativa es OK pero los tokens viajan sin cifrar. Propuesta:
+
+1. **nginx o caddy** en frente del puerto 8000 con TLS (self-signed o Let's Encrypt)
+2. **Rate limit por IP** (max N requests/min) en `/decide`
+3. **IP allowlist** opcional en `/approvals` (solo IPs corporativas / VPN)
 4. **Opcional: SSO challenge** antes de mostrar la página de aprobación
 
-#### FortiGate integration
+#### Daily digest email
 
-Agregar un nuevo tool y una nueva action type:
+Background task que arma cada mañana un email-resumen con:
+- Cuántas alertas se recibieron ayer (por verdict de triage)
+- Cuántos planes se aprobaron / rechazaron
+- Costo OpenAI estimado
+- Top 5 tipos de incidentes más frecuentes
 
-- **`tools/fortigate.py`**: cliente async con httpx
-  - `get_sessions_for_ip(ip)` → sessions activas
-  - `add_to_block_list(ip, ttl_hours)` → agregar a address group de deny policy
-  - Auth: header `Authorization: Bearer <FORTIGATE_TOKEN>`
-- **ThreatIntel agent** suma `fortigate_check_ip` para más contexto en lookup
-- **Nueva action type `block_ip`** en `ProposedAction`
-- **Executor** dispatchea `block_ip` → `fortigate.add_to_block_list`
-- **Narrator prompt** actualizado: si IP score alto + sesiones activas → considerar `block_ip`
-- **PROTECTED_NETWORKS** análogo a PROTECTED_USERS para evitar bloquear redes propias
+#### Re-send si approval pending > N horas
 
-#### Approval granular con checkboxes
+Background task que re-envía el email a las 4h si sigue `pending`. Útil para alertas
+nocturnas que se pierden.
 
-Hoy `/approve/{token}` aprueba TODAS las acciones del plan. Mejor UX:
+#### Monitoring de uptime
 
-1. Email link va a `/review/{token}` (página intermedia, no aprueba aún)
-2. Esa página renderiza el plan con checkboxes por acción
-3. Submit: `POST /approve/{token}` con body `{selected_action_ids: [1, 3]}`
-4. Executor corre solo las seleccionadas
-5. SQLite guarda qué actions se aprobaron vs no
+systemd `OnFailure=` apuntando a un script que mande email/Slack cuando el servicio crashea.
+Hoy si soc-l1 muere por algo no-recuperable (DB corrupta, OOM), nadie se entera.
 
-Email clients no soportan POST forms confiable, por eso la página intermedia.
+### 🔵 Mediano plazo
 
-#### GreyNoise (cuando tengan tier paid disponible)
+- **Pylint/ruff CI** en GitHub Actions
+- **Métricas Prometheus** — `/metrics` con counters por agent, latencias, error rate por tool
+- **OTX + URLhaus** como TI sources adicionales (cuando los falsos positivos lo justifiquen)
+- **GreyNoise** cuando salga un tier free decente (hoy solo enterprise pago)
 
-`tools/threatintel.py` + tool `greynoise_check_ip` — reduce falsos positivos al diferenciar
-scanners masivos benignos (Google bot, Shodan) de actividad targeted.
-
-### Mediano plazo
-
-- **`GET /approvals`** endpoint con paginación — lista de pending/approved/rejected/expired
-  para que el SOC vea cola desde browser sin tocar SQLite.
-- **Re-send email si pending > N horas** — background task para alertas nocturnas.
-- **Pylint/ruff CI** en GitHub Actions.
-- **Métricas Prometheus** — `/metrics` con counters por agent, latencias, etc.
-- **OTX + URLhaus** como TI sources adicionales.
-
-### Largo plazo
+### 🟣 Largo plazo
 
 - **Operator agent (LLM)** opcional: post-approval, decide micro-detalles (ej. duración del
   block, mensaje al user via email). Hoy esto está hardcoded.
 - **Playbooks** por categoría de alerta (ransomware vs phishing vs lateral movement) con
-  prompts específicos del Narrator.
+  prompts específicos del Narrator
 - **Conversational mode**: si el Narrator no está seguro, mandar email con preguntas al
-  analista en vez de un plan binario.
+  analista en vez de un plan binario
+- **Multi-tenant**: que un soc-l1 pueda servir a varios clientes con configs aisladas
 
 ---
 
