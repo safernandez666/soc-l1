@@ -32,17 +32,12 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=soc-l1
 
-# Seguridad: el servicio NO necesita permisos elevados.
-# - NoNewPrivileges: no puede escalar privilegios via setuid
-# - ProtectSystem=strict: /usr, /boot, /etc read-only para el proceso
-# - ProtectHome: no ve /home (excepto el suyo si User es de /home/)
-# - PrivateTmp: tiene su propio /tmp privado (no pisa nada)
-# - ReadWritePaths: única locación writable explícita = el state.db
+# Seguridad: el servicio corre como user no-root (User=__SOC_USER__ arriba).
+# Eso ya da defensa razonable. Las restricciones más agresivas (ProtectSystem,
+# ProtectHome, PrivateTmp) las dejamos OFF porque rompen execve cuando el binario
+# está en /opt + el user de AD/LDAP tiene su home en /home (probable Permission
+# denied al spawnear). Si querés endurecer más, hay que testear caso por caso.
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/opt/soc-l1
 
 # Límites de recursos (defensa anti-runaway)
 LimitNOFILE=4096
