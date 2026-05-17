@@ -32,14 +32,43 @@ def find_env(start: Path) -> Path | None:
     return None
 
 
-def load_secret() -> str:
-    env_file = find_env(Path.cwd()) or find_env(Path(__file__).parent)
-    if not env_file:
-        sys.exit("No encontré .env (buscado desde cwd y desde el script)")
-    for line in env_file.read_text().splitlines():
+def _read_secret_from(path: Path) -> str | None:
+    """Si el .env del path tiene WAZUH_WEBHOOK_SECRET, lo devuelve. Si no, None."""
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
         if line.startswith("WAZUH_WEBHOOK_SECRET="):
-            return line.split("=", 1)[1].strip().strip("\"'")
-    sys.exit(f"WAZUH_WEBHOOK_SECRET no encontrado en {env_file}")
+            value = line.split("=", 1)[1].strip().strip("\"'")
+            if value:
+                return value
+    return None
+
+
+def load_secret() -> str:
+    """Busca WAZUH_WEBHOOK_SECRET en orden:
+      1. .env del directorio del script (soc-l1 root) - el más confiable
+      2. .env caminando hacia arriba desde cwd
+
+    Esto evita el bug de tomar ~/.env del usuario (que puede existir por otras
+    razones y no tener el secret de soc-l1).
+    """
+    # 1. Prioridad: .env junto al código de soc-l1
+    script_env = Path(__file__).resolve().parent.parent / ".env"
+    secret = _read_secret_from(script_env)
+    if secret:
+        return secret
+
+    # 2. Fallback: walk desde cwd
+    cwd_env = find_env(Path.cwd())
+    if cwd_env:
+        secret = _read_secret_from(cwd_env)
+        if secret:
+            return secret
+        sys.exit(f"WAZUH_WEBHOOK_SECRET no encontrado en {cwd_env}")
+
+    sys.exit(
+        f"No encontré .env (probé {script_env} y subiendo desde {Path.cwd()})"
+    )
 
 
 def default_fixture() -> Path:
