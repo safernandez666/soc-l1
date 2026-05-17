@@ -33,18 +33,21 @@ logger = logging.getLogger("soc-l1")
 class EnricherContext:
     """Inyectado vía RunContextWrapper a las tool functions.
 
-    Las tools no pueden recibir el LdapConfig directo desde el LLM (no es serializable
-    y no queremos exponerlo en el schema). Lo pasamos vía contexto.
-
-    `_call_cache` evita que el LLM gaste turns repitiendo la misma tool con los mismos
-    args. En producción vimos al LLM llamar wazuh_get_rule(200002) 4+ veces seguidas
-    aunque el system prompt prohibía repetir. Con cache, el segundo+ call retorna el
-    resultado de la primera vez + un mensaje fuerte para que el LLM se detenga.
+    Cache + hit counter por (tool, args). Después de N hits sobre la misma key,
+    devolvemos un error estructurado en lugar del payload normal - empíricamente
+    gpt-4o-mini sigue llamando a las tools aunque el response diga "stop". El error
+    estructurado fuerza el cambio de estado mental del LLM.
     """
 
     settings: Settings
     ldap_cfg: LdapConfig | None  # None si LDAP no está configurado (skip search_user)
     _call_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _call_hits: dict[str, int] = field(default_factory=dict)
+
+
+# Después de cuántos cache hits devolvemos hard error en vez del payload normal.
+# 0 = primer call (real), 1+ = cached. A partir del 2do hit (3 calls totales) devolvemos error.
+_MAX_REPEAT_HITS = 2
 
 
 def _cache_get(ctx: EnricherContext, key: str) -> dict[str, Any] | None:
@@ -55,20 +58,47 @@ def _cache_set(ctx: EnricherContext, key: str, value: dict[str, Any]) -> None:
     ctx._call_cache[key] = value
 
 
-def _cached_reply(prev: dict[str, Any], tool_name: str, key: str) -> dict[str, Any]:
-    """Devuelve el resultado cacheado pero con un campo extra que avisa al LLM
-    que YA llamó esta tool. Idea: que el LLM no gaste otro turn intentando de nuevo.
-    """
-    # Copia defensiva para no mutar el cache
+def _track_hit(ctx: EnricherContext, key: str) -> int:
+    """Incrementa el contador de hits para una key y devuelve el nuevo valor."""
+    ctx._call_hits[key] = ctx._call_hits.get(key, 0) + 1
+    return ctx._call_hits[key]
+
+
+def _cached_reply(
+    prev: dict[str, Any], tool_name: str, key: str, hit_count: int
+) -> dict[str, Any]:
+    """Devuelve la respuesta cacheada con marca + warning."""
     out = dict(prev)
     out["_cache_hit"] = True
+    out["_hit_count"] = hit_count
     out["_warning"] = (
-        f"Ya llamaste {tool_name}({key}) antes en esta corrida. "
-        f"Este es el resultado de la primera llamada. "
+        f"Ya llamaste {tool_name}({key}) antes (hit #{hit_count}). "
         f"NO vuelvas a llamar a esta tool con los mismos argumentos. "
-        f"Usá los datos que ya tenés y producí el JSON final ahora."
+        f"Producí el JSON final ahora."
     )
     return out
+
+
+def _hard_stop_reply(tool_name: str, key: str, hit_count: int) -> dict[str, Any]:
+    """Respuesta agresiva tras >=N hits: el LLM tiene que parar de llamar tools.
+
+    Cambiamos el shape de la respuesta a algo que parece error. La idea es romper
+    el patrón mental del LLM que cree que llamando otra vez va a obtener data nueva.
+    """
+    return {
+        "_error": "MAX_RETRIES_EXCEEDED",
+        "_tool": tool_name,
+        "_key": key,
+        "_hit_count": hit_count + 1,
+        "_critical_instruction": (
+            f"STOP. Llamaste {tool_name}({key}) {hit_count + 1} veces seguidas. "
+            f"Esta es la ÚLTIMA RESPUESTA que vas a recibir de tools. "
+            f"Componé el JSON EnrichmentResult AHORA con la data que ya tenés. "
+            f"Si no tenés data suficiente, devolvé un EnrichmentResult con "
+            f"flags=['enricher_loop_aborted'] y summary explicando que el agent "
+            f"se atascó. NO llames más tools."
+        ),
+    }
 
 
 class EnrichedUser(BaseModel):
@@ -128,11 +158,18 @@ async def ldap_search_user(
     cache_key = f"ldap:{sam_account_name}"
     cached = _cache_get(ctx.context, cache_key)
     if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL ldap_search_user(sam=%r) → HARD STOP (hit #%d, forzando salida)",
+                sam_account_name, hit_count,
+            )
+            return _hard_stop_reply("ldap_search_user", f"'{sam_account_name}'", hit_count)
         logger.warning(
-            "⚠️  TOOL ldap_search_user(sam=%r) → CACHED (LLM repitió la llamada)",
-            sam_account_name,
+            "⚠️  TOOL ldap_search_user(sam=%r) → CACHED (hit #%d)",
+            sam_account_name, hit_count,
         )
-        return _cached_reply(cached, "ldap_search_user", f"'{sam_account_name}'")
+        return _cached_reply(cached, "ldap_search_user", f"'{sam_account_name}'", hit_count)
 
     cfg = ctx.context.ldap_cfg
     logger.info("🔎 TOOL ldap_search_user(sam=%r) [agent=Enricher]", sam_account_name)
@@ -213,11 +250,18 @@ async def wazuh_get_rule(
     cache_key = f"rule:{rule_id}"
     cached = _cache_get(ctx.context, cache_key)
     if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL wazuh_get_rule(rule_id=%r) → HARD STOP (hit #%d, forzando salida)",
+                rule_id, hit_count,
+            )
+            return _hard_stop_reply("wazuh_get_rule", f"'{rule_id}'", hit_count)
         logger.warning(
-            "⚠️  TOOL wazuh_get_rule(rule_id=%r) → CACHED (LLM repitió la llamada)",
-            rule_id,
+            "⚠️  TOOL wazuh_get_rule(rule_id=%r) → CACHED (hit #%d)",
+            rule_id, hit_count,
         )
-        return _cached_reply(cached, "wazuh_get_rule", f"'{rule_id}'")
+        return _cached_reply(cached, "wazuh_get_rule", f"'{rule_id}'", hit_count)
 
     settings = ctx.context.settings
     logger.info("🔎 TOOL wazuh_get_rule(rule_id=%r) [agent=Enricher]", rule_id)
@@ -286,6 +330,20 @@ NO la repitas.
   - Si una tool ya devolvió found=false o un error, ACEPTÁ ese resultado y seguí. \
 NO reintentes con el mismo argumento.
   - Después de juntar los datos de las tools, escribí el JSON FINAL sin más tool calls.
+
+RESULTADOS VÁLIDOS QUE NO REQUIEREN REINTENTAR:
+  - **found=false en ldap_search_user**: el user no existe en AD. Es un dato útil \
+(flag "no_ad_match"). NO sigas buscando ese sam, no existe.
+  - **rule.description con placeholders** como '$(title)' o '${var}': es así por como \
+Wazuh devuelve el template (no se resuelve hasta que la alerta dispara). Usá lo que \
+TENÉS (level, groups, mitre) y componé el JSON. NO sigas llamando tools para "resolver" el template.
+  - **mitre=[] (vacío)**: la rule no tiene mapping MITRE asociado. NO es un error, \
+seguí con esa info.
+
+SI RECIBÍS `{"_error": "MAX_RETRIES_EXCEEDED", ...}` en una tool response:
+  - Es la señal de que YA llamaste esa tool varias veces. PARÁ COMPLETAMENTE de llamar tools.
+  - Componé el JSON EnrichmentResult con la data que TENGAS, aunque sea parcial.
+  - Si te falta info, devolvé flags=['enricher_loop_aborted'] y describí en summary qué pasó.
 
 PROCEDIMIENTO OBLIGATORIO (en este orden):
 1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam` \

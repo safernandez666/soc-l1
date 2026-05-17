@@ -39,14 +39,18 @@ logger = logging.getLogger("soc-l1")
 
 @dataclass
 class ThreatIntelContext:
-    """Inyectado vía RunContextWrapper. Cache anti-loop por (tool, args).
+    """Inyectado vía RunContextWrapper. Cache + hit counter anti-loop.
 
-    Mismo patrón que EnricherContext - el LLM a veces repite tool calls aunque
-    el prompt lo prohíbe; el cache devuelve el resultado anterior + warning.
+    Mismo patrón que EnricherContext: cache devuelve resultado anterior; tras
+    _MAX_REPEAT_HITS hits, hard-stop con error structure que fuerza al LLM a parar.
     """
 
     settings: Settings
     _call_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _call_hits: dict[str, int] = field(default_factory=dict)
+
+
+_MAX_REPEAT_HITS = 2
 
 
 def _cache_get(ctx: ThreatIntelContext, key: str) -> dict[str, Any] | None:
@@ -57,15 +61,38 @@ def _cache_set(ctx: ThreatIntelContext, key: str, value: dict[str, Any]) -> None
     ctx._call_cache[key] = value
 
 
-def _cached_reply(prev: dict[str, Any], tool_name: str, key: str) -> dict[str, Any]:
+def _track_hit(ctx: ThreatIntelContext, key: str) -> int:
+    ctx._call_hits[key] = ctx._call_hits.get(key, 0) + 1
+    return ctx._call_hits[key]
+
+
+def _cached_reply(
+    prev: dict[str, Any], tool_name: str, key: str, hit_count: int
+) -> dict[str, Any]:
     out = dict(prev)
     out["_cache_hit"] = True
+    out["_hit_count"] = hit_count
     out["_warning"] = (
-        f"Ya llamaste {tool_name}({key}) antes. Este es el resultado cacheado. "
+        f"Ya llamaste {tool_name}({key}) antes (hit #{hit_count}). "
         f"NO vuelvas a llamar a esta tool con los mismos argumentos. "
-        f"Usá los datos que ya tenés y producí el JSON final ahora."
+        f"Producí el JSON final ahora."
     )
     return out
+
+
+def _hard_stop_reply(tool_name: str, key: str, hit_count: int) -> dict[str, Any]:
+    return {
+        "_error": "MAX_RETRIES_EXCEEDED",
+        "_tool": tool_name,
+        "_key": key,
+        "_hit_count": hit_count + 1,
+        "_critical_instruction": (
+            f"STOP. Llamaste {tool_name}({key}) {hit_count + 1} veces seguidas. "
+            f"Esta es la ÚLTIMA RESPUESTA. Componé el JSON ThreatIntelResult AHORA "
+            f"con la data que ya tenés. Si te falta, devolvé flags=['threatintel_loop_aborted'] "
+            f"y explicalo en summary. NO llames más tools."
+        ),
+    }
 
 
 # ===== Output schema =====
@@ -113,11 +140,17 @@ async def vt_lookup_hash(
     cache_key = f"vt:{sha256}"
     cached = _cache_get(ctx.context, cache_key)
     if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL vt_lookup_hash(sha256=%r) → HARD STOP (hit #%d)",
+                sha256, hit_count,
+            )
+            return _hard_stop_reply("vt_lookup_hash", f"'{sha256}'", hit_count)
         logger.warning(
-            "⚠️  TOOL vt_lookup_hash(sha256=%r) → CACHED (LLM repitió la llamada)",
-            sha256,
+            "⚠️  TOOL vt_lookup_hash(sha256=%r) → CACHED (hit #%d)", sha256, hit_count,
         )
-        return _cached_reply(cached, "vt_lookup_hash", f"'{sha256}'")
+        return _cached_reply(cached, "vt_lookup_hash", f"'{sha256}'", hit_count)
 
     settings = ctx.context.settings
     logger.info("🔎 TOOL vt_lookup_hash(sha256=%r) [agent=ThreatIntel]", sha256)
@@ -187,10 +220,16 @@ async def abuseipdb_check(
     cache_key = f"abuseipdb:{ip}"
     cached = _cache_get(ctx.context, cache_key)
     if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL abuseipdb_check(ip=%r) → HARD STOP (hit #%d)", ip, hit_count,
+            )
+            return _hard_stop_reply("abuseipdb_check", f"'{ip}'", hit_count)
         logger.warning(
-            "⚠️  TOOL abuseipdb_check(ip=%r) → CACHED (LLM repitió la llamada)", ip
+            "⚠️  TOOL abuseipdb_check(ip=%r) → CACHED (hit #%d)", ip, hit_count,
         )
-        return _cached_reply(cached, "abuseipdb_check", f"'{ip}'")
+        return _cached_reply(cached, "abuseipdb_check", f"'{ip}'", hit_count)
 
     settings = ctx.context.settings
     logger.info("🔎 TOOL abuseipdb_check(ip=%r) [agent=ThreatIntel]", ip)

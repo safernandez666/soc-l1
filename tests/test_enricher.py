@@ -339,3 +339,50 @@ async def test_cache_is_per_context_not_global(settings) -> None:
 
     # 2 calls reales al manager - uno por contexto
     assert rule_route.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_calls_trigger_hard_stop(settings, ldap_cfg) -> None:
+    """Después de varios cache hits sobre la misma key, debe devolver error structure
+    en vez del payload cacheado. Esto fuerza al LLM a parar de llamar tools."""
+    fake_user = ADUser(
+        dn="CN=jdoe,DC=test", sam="jdoe", account_enabled=True,
+        locked_out=False, user_account_control=512,
+    )
+    ctx = _ctx(settings, ldap_cfg)
+
+    with patch("src.agents.enricher.ldap_tools.search_user", return_value=fake_user):
+        # Llamada 1: real, payload normal
+        r1 = await ldap_search_user.on_invoke_tool(
+            ctx, json.dumps({"sam_account_name": "jdoe"})
+        )
+        # Llamada 2: cached, payload normal + _cache_hit + _warning
+        r2 = await ldap_search_user.on_invoke_tool(
+            ctx, json.dumps({"sam_account_name": "jdoe"})
+        )
+        # Llamada 3: cached pero hit_count >= MAX → hard stop
+        r3 = await ldap_search_user.on_invoke_tool(
+            ctx, json.dumps({"sam_account_name": "jdoe"})
+        )
+
+    p1 = json.loads(r1) if isinstance(r1, str) else r1
+    p2 = json.loads(r2) if isinstance(r2, str) else r2
+    p3 = json.loads(r3) if isinstance(r3, str) else r3
+
+    # 1ra: payload normal de búsqueda exitosa
+    assert p1["found"] is True
+    assert "_error" not in p1
+
+    # 2da: cached normal con _warning
+    assert p2.get("_cache_hit") is True
+    assert "_warning" in p2
+    assert p2.get("_error") is None or "_error" not in p2
+
+    # 3ra: HARD STOP - shape de error totalmente distinto al payload normal
+    assert p3["_error"] == "MAX_RETRIES_EXCEEDED"
+    assert p3["_tool"] == "ldap_search_user"
+    assert "STOP" in p3["_critical_instruction"]
+    assert "enricher_loop_aborted" in p3["_critical_instruction"]
+    # NO debe tener los campos del payload normal
+    assert "found" not in p3
+    assert "sam" not in p3
