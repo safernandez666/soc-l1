@@ -643,7 +643,7 @@ async def _execute_approved_plan_in_background(
 
     try:
         ldap_cfg = _build_ldap_cfg_safely()
-        results = await execute_plan(plan.actions, ldap_cfg=ldap_cfg)
+        results = await execute_plan(plan.actions, ldap_cfg=ldap_cfg, settings=settings)
         await mark_executed(settings.state_db_path, token, results)
         ok_count = sum(1 for r in results if r.get("ok"))
         logger.info(

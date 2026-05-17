@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from src.agents.narrator import ProposedAction
-from src.config import LdapConfig
+from src.config import LdapConfig, Settings
 from src.executor import execute_plan
 from src.models import LdapActionResult
 
@@ -134,3 +134,113 @@ async def test_multiple_actions_run_sequentially(ldap_cfg) -> None:
 async def test_empty_plan_returns_empty_list() -> None:
     results = await execute_plan([], ldap_cfg=None)
     assert results == []
+
+
+# ===== Guardrails: PROTECTED_USERS + DRY_RUN_MODE =====
+
+
+@pytest.mark.asyncio
+async def test_protected_user_refuses_disable(ldap_cfg) -> None:
+    """Si el target está en PROTECTED_USERS, executor refusa sin tocar AD."""
+    settings = Settings(
+        openai_api_key="x", protected_users="jdoe,admin"
+    )
+    actions = [
+        ProposedAction(type="disable_user", target="jdoe", justification="x"),
+    ]
+    with patch("src.executor.ldap_tools.disable_user") as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=ldap_cfg, settings=settings)
+
+    mock_fn.assert_not_called()  # Critical: LDAP nunca se invocó
+    assert results[0]["ok"] is False
+    assert "PROTECTED_USERS" in results[0]["message"]
+    assert "jdoe" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_protected_user_match_is_case_insensitive(ldap_cfg) -> None:
+    """PROTECTED_USERS=admin debe matchear ADMIN, Admin, etc."""
+    settings = Settings(openai_api_key="x", protected_users="ADMIN")
+    actions = [
+        ProposedAction(type="disable_user", target="admin", justification="x"),
+        ProposedAction(type="force_password_change", target="Admin", justification="x"),
+    ]
+    with patch("src.executor.ldap_tools.disable_user") as mock_disable, patch(
+        "src.executor.ldap_tools.force_password_change"
+    ) as mock_force:
+        results = await execute_plan(actions, ldap_cfg=ldap_cfg, settings=settings)
+
+    mock_disable.assert_not_called()
+    mock_force.assert_not_called()
+    assert all(r["ok"] is False for r in results)
+    assert all("PROTECTED_USERS" in r["message"] for r in results)
+
+
+@pytest.mark.asyncio
+async def test_non_protected_user_proceeds(ldap_cfg) -> None:
+    """Users que no están en PROTECTED_USERS pasan normal."""
+    settings = Settings(openai_api_key="x", protected_users="admin")
+    fake_ok = LdapActionResult(ok=True, action="disable_user", target_sam="jdoe")
+    actions = [
+        ProposedAction(type="disable_user", target="jdoe", justification="x"),
+    ]
+    with patch("src.executor.ldap_tools.disable_user", return_value=fake_ok) as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=ldap_cfg, settings=settings)
+
+    mock_fn.assert_called_once_with(ldap_cfg, "jdoe")
+    assert results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_dry_run_mode_simulates_without_ad_calls(ldap_cfg) -> None:
+    """DRY_RUN=true convierte acciones AD en no-op (logueadas pero no ejecutadas)."""
+    settings = Settings(openai_api_key="x", dry_run_mode=True)
+    actions = [
+        ProposedAction(type="disable_user", target="jdoe", justification="x"),
+        ProposedAction(type="force_password_change", target="asmith", justification="x"),
+    ]
+    with patch("src.executor.ldap_tools.disable_user") as mock_disable, patch(
+        "src.executor.ldap_tools.force_password_change"
+    ) as mock_force:
+        results = await execute_plan(actions, ldap_cfg=ldap_cfg, settings=settings)
+
+    mock_disable.assert_not_called()
+    mock_force.assert_not_called()
+    assert all(r["ok"] is True for r in results)
+    assert all("DRY_RUN" in r["message"] for r in results)
+
+
+@pytest.mark.asyncio
+async def test_notify_and_escalate_unaffected_by_dry_run() -> None:
+    """notify_only y escalate_l2 son siempre no-op, dry_run no las cambia."""
+    settings = Settings(openai_api_key="x", dry_run_mode=True)
+    actions = [
+        ProposedAction(type="notify_only", target="x", justification="x"),
+        ProposedAction(type="escalate_l2", target="incident-1", justification="x"),
+    ]
+    results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    assert results[0]["ok"] is True
+    assert "noted" in results[0]["message"]
+    assert results[1]["ok"] is True
+    assert "escalated" in results[1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_protected_users_set_parsing() -> None:
+    """Settings.protected_users_set() ignora vacíos y normaliza."""
+    s = Settings(openai_api_key="x", protected_users="  Admin , , jdoe, ")
+    assert s.protected_users_set() == {"admin", "jdoe"}
+
+
+@pytest.mark.asyncio
+async def test_empty_protected_users_means_no_protection() -> None:
+    """Sin PROTECTED_USERS configurado, executor opera normal."""
+    settings = Settings(openai_api_key="x", protected_users="")
+    fake_ok = LdapActionResult(ok=True, action="disable_user", target_sam="anyone")
+    actions = [ProposedAction(type="disable_user", target="anyone", justification="x")]
+    with patch("src.executor.ldap_tools.disable_user", return_value=fake_ok) as mock_fn:
+        await execute_plan(actions, ldap_cfg=LdapConfig(
+            host="ad.test", bind_dn="x@y", bind_password="z",
+            use_starttls=False, credentials_file="/nope",
+        ), settings=settings)
+    mock_fn.assert_called_once()

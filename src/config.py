@@ -161,8 +161,26 @@ class Settings(BaseSettings):
     approval_ttl_hours: int = Field(default=24)
     state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
 
+    # Lista de cuentas "intocables" - el executor refusa disable_user/force_password
+    # sobre estos sams sin importar si el approval se clickeó. Defensa en profundidad
+    # para evitar que un Narrator agresivo + click accidental desactive cuentas críticas.
+    # Formato: comma-separated, case-insensitive. Ejemplo: "jdoe,admin,svc-soar"
+    protected_users: str = Field(default="")
+
+    # Si true, el executor logea las acciones pero NO ejecuta nada (todas no-op).
+    # Útil mientras se valida que el Narrator hace recomendaciones sensatas.
+    dry_run_mode: bool = Field(default=False)
+
     # Feature flags
     enable_triage: bool = Field(default=False)
     enable_enricher: bool = Field(default=False)
     enable_threat_intel: bool = Field(default=False)
     enable_narrator: bool = Field(default=False)
+
+    def protected_users_set(self) -> set[str]:
+        """Parsea protected_users a un set lowercase para lookup eficiente."""
+        return {
+            sam.strip().lower()
+            for sam in self.protected_users.split(",")
+            if sam.strip()
+        }
