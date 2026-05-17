@@ -235,15 +235,45 @@ async def _enrich_and_request_approval(
     settings: Settings,
     priority: str = "normal",
 ) -> None:
-    """Pipeline compartido: Enricher → Narrator → SQLite → email.
+    """Pipeline compartido: Enricher + ThreatIntel (paralelo) → Narrator → email.
 
     priority: "normal" (de analyze) o "critical" (de fast_track). Se traduce en
     un flag extra en el enrichment para que el Narrator lo considere.
+
+    Enricher (LDAP + Wazuh API) y ThreatIntel (VT + AbuseIPDB) son INDEPENDIENTES
+    - los corremos en paralelo con asyncio.gather. Ahorra ~5-10s vs secuencial.
     """
     if not settings.enable_enricher:
         logger.info("enricher_skipped | id=%s ENABLE_ENRICHER=false", alert.alert_id)
         return
 
+    # Lanzamos Enricher y ThreatIntel en paralelo
+    enrichment_task = asyncio.create_task(_run_enricher_safely(alert, settings, priority))
+
+    ti_task = None
+    if settings.enable_threat_intel:
+        ti_task = asyncio.create_task(_run_threatintel_safely(alert, settings))
+
+    enrichment = await enrichment_task
+    if enrichment is None:
+        # Si el Enricher falló, abortamos el pipeline (no tenemos contexto suficiente)
+        if ti_task is not None:
+            ti_task.cancel()
+        return
+
+    threat_intel = None
+    if ti_task is not None:
+        threat_intel = await ti_task
+
+    await _run_narrator_and_request_approval(
+        alert, decision, settings, enrichment, threat_intel
+    )
+
+
+async def _run_enricher_safely(
+    alert: NormalizedAlert, settings: Settings, priority: str
+):
+    """Wrapper del Enricher con logging + manejo de errores. Devuelve None si falló."""
     try:
         from src.agents.enricher import enrich_alert
 
@@ -258,12 +288,9 @@ async def _enrich_and_request_approval(
         enrichment = await enrich_alert(
             alert, settings=settings, ldap_cfg=ldap_cfg, model=settings.openai_model_light
         )
-
-        # Inyectamos flag de priority si viene crítico (el Narrator lo va a ver)
         if priority == "critical" and "fast_track_priority" not in enrichment.flags:
             enrichment.flags.append("fast_track_priority")
 
-        # Resumen estructurado del enrichment (qué encontró el agente, por user y rule)
         user_lines = []
         for u in enrichment.users:
             if u.found_in_ad:
@@ -294,17 +321,77 @@ async def _enrich_and_request_approval(
             "\n".join(user_lines) if user_lines else "  (no users en enrichment)",
             rule_line,
         )
+        return enrichment
     except Exception:
         logger.exception("enricher failed for alert id=%s", alert.alert_id)
-        return
+        return None
 
-    await _run_narrator_and_request_approval(alert, decision, settings, enrichment)
+
+async def _run_threatintel_safely(alert: NormalizedAlert, settings: Settings):
+    """Wrapper del ThreatIntel. Si falla, devuelve None (no aborta el pipeline)."""
+    try:
+        from src.agents.threatintel import threat_intel_alert
+
+        # Skip silencioso si no hay keys (no spamea log de WARN cada alerta)
+        if not settings.virustotal_api_key and not settings.abuseipdb_api_key:
+            logger.info(
+                "threatintel_skipped | id=%s VT y AbuseIPDB keys vacías",
+                alert.alert_id,
+            )
+            return None
+
+        logger.info(
+            "🤖 AGENT ThreatIntel.run | id=%s files=%d ips=[src_int=%s, src_ext=%s, dst=%s]",
+            alert.alert_id,
+            len(alert.files),
+            alert.network.src_ip_internal,
+            alert.network.src_ip_external,
+            alert.network.dst_ip,
+        )
+        ti = await threat_intel_alert(
+            alert, settings=settings, model=settings.openai_model_light
+        )
+
+        # Resumen estructurado: qué encontró por hash y por IP
+        file_lines = []
+        for fr in ti.file_reports:
+            file_lines.append(
+                f"  - {fr.sha256[:16]}...: {fr.malicious_count}/{fr.total_engines} "
+                f"malicious family={fr.family!r}"
+            )
+        ip_lines = []
+        for ir in ti.ip_reports:
+            ip_lines.append(
+                f"  - {ir.ip}: score={ir.abuse_confidence_score} country={ir.country_code} "
+                f"reports={ir.total_reports} whitelisted={ir.is_whitelisted}"
+            )
+
+        logger.info(
+            "✅ THREAT_INTEL | id=%s files=%d ips=%d flags=[%s]\n"
+            "  summary: %s\n"
+            "%s\n%s",
+            alert.alert_id,
+            len(ti.file_reports),
+            len(ti.ip_reports),
+            ", ".join(ti.flags) if ti.flags else "none",
+            ti.summary,
+            "\n".join(file_lines) if file_lines else "  (no file reports)",
+            "\n".join(ip_lines) if ip_lines else "  (no ip reports)",
+        )
+        return ti
+    except Exception:
+        logger.exception("threatintel failed for alert id=%s", alert.alert_id)
+        return None
 
 
 async def _run_narrator_and_request_approval(
-    alert: NormalizedAlert, decision, settings: Settings, enrichment
+    alert: NormalizedAlert, decision, settings: Settings, enrichment, threat_intel=None
 ) -> None:
-    """Narrator → guardar plan en SQLite → enviar email de approval."""
+    """Narrator → guardar plan en SQLite → enviar email de approval.
+
+    threat_intel: ThreatIntelResult opcional (puede ser None si ENABLE_THREAT_INTEL=false
+    o si el ThreatIntel agent falló - el Narrator igual produce un plan sin TI).
+    """
     if not settings.enable_narrator:
         logger.info("narrator_skipped | id=%s ENABLE_NARRATOR=false", alert.alert_id)
         return
@@ -315,14 +402,20 @@ async def _run_narrator_and_request_approval(
         from src.state import create_pending_approval
 
         logger.info(
-            "🤖 AGENT Narrator.run | id=%s model=%s triage_verdict=%s enrichment_flags=%d",
+            "🤖 AGENT Narrator.run | id=%s model=%s triage_verdict=%s "
+            "enrichment_flags=%d ti_flags=%d",
             alert.alert_id,
             settings.openai_model_heavy,
             decision.verdict,
             len(enrichment.flags),
+            len(threat_intel.flags) if threat_intel else 0,
         )
         plan = await narrate_incident(
-            alert, triage=decision, enrichment=enrichment, model=settings.openai_model_heavy
+            alert,
+            triage=decision,
+            enrichment=enrichment,
+            threat_intel=threat_intel,
+            model=settings.openai_model_heavy,
         )
 
         # Detalle de cada acción propuesta (lo que va a aprobar/rechazar el humano)

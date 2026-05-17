@@ -18,6 +18,7 @@ from agents import Agent, Runner
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.agents.enricher import EnrichmentResult
+from src.agents.threatintel import ThreatIntelResult
 from src.agents.triage import TriageDecision
 from src.models import NormalizedAlert
 
@@ -83,10 +84,18 @@ class NarratorPlan(BaseModel):
 SYSTEM_PROMPT = """Sos el agente NARRATOR de un SOC L1. Recibís un bundle JSON con:
   - alert: la alerta normalizada (incluye device, files, threat, wazuh_rule, users_involved)
   - triage: la decisión del Triage agent (verdict, reason, confidence)
-  - enrichment: contexto recolectado (users desde AD, rule details, flags)
+  - enrichment: contexto local recolectado (users desde AD, rule details, flags)
+  - threat_intel: (puede ser null) contexto externo de VirusTotal (file hashes) y \
+AbuseIPDB (IP reputation)
 
 Tu trabajo es producir un NarratorPlan que un analista humano va a aprobar por email.
 NO ejecutás acciones - solo proponés. La aprobación humana es obligatoria antes de cualquier escritura.
+
+Si threat_intel está presente, USALO. Cita evidencias específicas en tu rationale:
+  - "VT marca el hash con 55/72 motores como malicious, familia 'Emotet'" → sube confianza
+  - "AbuseIPDB score=92 para la IP destino, reportada 42 veces desde Rusia" → indicio fuerte
+  - "VT no conoce el hash" → puede ser malware nuevo (zero-day), justifica escalate_l2
+  - "IP whitelisted o score=0" → probable falso positivo, podés bajar el risk_level
 
 REGLAS PARA `actions`:
 
@@ -149,13 +158,20 @@ def _bundle_to_prompt(
     alert: NormalizedAlert,
     triage: TriageDecision,
     enrichment: EnrichmentResult,
+    threat_intel: ThreatIntelResult | None = None,
 ) -> str:
-    """Compacta los 3 inputs en un JSON único para el LLM. Excluye raw."""
+    """Compacta los inputs en un JSON único para el LLM. Excluye raw.
+
+    threat_intel es opcional - si es None, se serializa como JSON null para que
+    el LLM vea explícitamente "no había TI disponible".
+    """
+    ti_json = threat_intel.model_dump_json(indent=2) if threat_intel else "null"
     return (
         "{\n"
         f'  "alert": {alert.model_dump_json(exclude={"raw"}, indent=2)},\n'
         f'  "triage": {triage.model_dump_json(indent=2)},\n'
-        f'  "enrichment": {enrichment.model_dump_json(indent=2)}\n'
+        f'  "enrichment": {enrichment.model_dump_json(indent=2)},\n'
+        f'  "threat_intel": {ti_json}\n'
         "}"
     )
 
@@ -164,10 +180,11 @@ async def narrate_incident(
     alert: NormalizedAlert,
     triage: TriageDecision,
     enrichment: EnrichmentResult,
+    threat_intel: ThreatIntelResult | None = None,
     model: str = "gpt-4o",
 ) -> NarratorPlan:
     """Corre el Narrator y devuelve el plan estructurado."""
     agent = build_narrator_agent(model=model)
-    user_input = _bundle_to_prompt(alert, triage, enrichment)
+    user_input = _bundle_to_prompt(alert, triage, enrichment, threat_intel)
     result = await Runner.run(agent, input=user_input)
     return result.final_output_as(NarratorPlan)

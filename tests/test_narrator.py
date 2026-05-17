@@ -66,8 +66,11 @@ def test_system_prompt_demanda_approval_humano() -> None:
     assert "force_password_change" in SYSTEM_PROMPT
 
 
-def test_bundle_to_prompt_contains_all_three_inputs(keygen_alert) -> None:
-    """El prompt enviado al LLM incluye alert + triage + enrichment, sin raw."""
+def test_bundle_to_prompt_contains_all_inputs(keygen_alert) -> None:
+    """El prompt enviado al LLM incluye alert + triage + enrichment + threat_intel."""
+    from src.agents.threatintel import ThreatIntelResult
+    from src.models import VtFileReport
+
     triage = TriageDecision(verdict="analyze", reason="r", confidence="medium")
     enrichment = EnrichmentResult(
         users=[EnrichedUser(sam="jdoe", found_in_ad=True, enabled=True)],
@@ -75,10 +78,26 @@ def test_bundle_to_prompt_contains_all_three_inputs(keygen_alert) -> None:
         summary="s",
         flags=["mitre_T1059"],
     )
-    bundle = _bundle_to_prompt(keygen_alert, triage, enrichment)
+    ti = ThreatIntelResult(
+        file_reports=[VtFileReport(sha256="abc", malicious_count=55, total_engines=72)],
+        ip_reports=[],
+        summary="vt summary",
+        flags=["vt_highly_malicious"],
+    )
+    bundle = _bundle_to_prompt(keygen_alert, triage, enrichment, ti)
     parsed = json.loads(bundle)
-    assert set(parsed.keys()) == {"alert", "triage", "enrichment"}
+    assert set(parsed.keys()) == {"alert", "triage", "enrichment", "threat_intel"}
     assert "raw" not in parsed["alert"]
     assert parsed["triage"]["verdict"] == "analyze"
     assert parsed["enrichment"]["users"][0]["sam"] == "jdoe"
     assert "mitre_T1059" in parsed["enrichment"]["flags"]
+    assert parsed["threat_intel"]["file_reports"][0]["malicious_count"] == 55
+
+
+def test_bundle_to_prompt_handles_no_threat_intel(keygen_alert) -> None:
+    """Si threat_intel es None, se serializa como JSON null para que el LLM lo vea."""
+    triage = TriageDecision(verdict="analyze", reason="r", confidence="medium")
+    enrichment = EnrichmentResult(users=[], rule=None, summary="s", flags=[])
+    bundle = _bundle_to_prompt(keygen_alert, triage, enrichment, None)
+    parsed = json.loads(bundle)
+    assert parsed["threat_intel"] is None

@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     wazuh_api_password: str = Field(default="")
     wazuh_api_verify_ssl: bool = Field(default=False)
 
+    # Threat Intel (Enricher externo: file hashes + IP reputation)
+    virustotal_api_key: str = Field(default="")
+    abuseipdb_api_key: str = Field(default="")
+
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
     smtp_port: int = Field(default=25)
@@ -160,4 +164,5 @@ class Settings(BaseSettings):
     # Feature flags
     enable_triage: bool = Field(default=False)
     enable_enricher: bool = Field(default=False)
+    enable_threat_intel: bool = Field(default=False)
     enable_narrator: bool = Field(default=False)

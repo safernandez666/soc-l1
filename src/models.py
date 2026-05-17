@@ -152,3 +152,41 @@ class WazuhRecentAlert(BaseModel):
     description: str
     agent_name: str | None = None
     agent_id: str | None = None
+
+
+# ===== Threat Intel =====
+
+
+class VtFileReport(BaseModel):
+    """Resumen del file report de VirusTotal v3 para el LLM (subset relevante)."""
+
+    model_config = ConfigDict(extra="forbid")
+    sha256: str
+    malicious_count: int = 0
+    suspicious_count: int = 0
+    undetected_count: int = 0
+    total_engines: int = 0
+    family: str | None = None  # popular_threat_classification.suggested_threat_label
+    categories: list[str] = Field(default_factory=list)
+    first_submission: str | None = None  # ISO de first_submission_date
+    last_analysis: str | None = None
+    names: list[str] = Field(default_factory=list)
+    type_description: str | None = None
+    size: int | None = None
+
+
+class AbuseipdbReport(BaseModel):
+    """Resumen del IP report de AbuseIPDB v2 para el LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+    ip: str
+    abuse_confidence_score: int = 0  # 0-100
+    country_code: str | None = None
+    isp: str | None = None
+    domain: str | None = None
+    total_reports: int = 0
+    distinct_reporters: int = 0
+    last_reported_at: str | None = None
+    is_whitelisted: bool = False
+    is_tor: bool = False
+    usage_type: str | None = None
