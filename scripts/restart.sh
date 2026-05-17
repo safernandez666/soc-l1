@@ -3,12 +3,17 @@
 # Stop + restart del servicio soc-l1 (uvicorn en foreground con nohup).
 #
 # Uso:
-#   ./scripts/restart.sh           # stop + start
-#   ./scripts/restart.sh stop      # solo stop
-#   ./scripts/restart.sh start     # solo start (falla si ya hay uno corriendo)
-#   ./scripts/restart.sh status    # ver estado actual
+#   ./scripts/restart.sh                 # restart + tail -f (default)
+#   ./scripts/restart.sh restart         # mismo que default
+#   ./scripts/restart.sh restart --no-follow   # restart sin tail después
+#   ./scripts/restart.sh start           # solo start + tail -f
+#   ./scripts/restart.sh start --no-follow     # solo start, no tail
+#   ./scripts/restart.sh stop            # solo stop
+#   ./scripts/restart.sh status          # ver estado actual
+#   ./scripts/restart.sh logs            # tail -f del log
+#   ./scripts/restart.sh logs -n 100     # last 100 lines (no follow)
 #
-# Asume cwd = /opt/soc-l1 (o donde esté el .venv y src/).
+# Asume SOC_DIR=/opt/soc-l1 (override con env var).
 # Logs van a /tmp/uvicorn.log.
 #
 # Cuando armemos el systemd unit, este script queda obsoleto y se reemplaza
@@ -186,15 +191,96 @@ cmd_restart() {
     cmd_start
 }
 
+cmd_logs() {
+    if [[ ! -f "$LOG_FILE" ]]; then
+        err "Log file no existe: ${LOG_FILE}"
+        return 1
+    fi
+
+    # Parsear flags adicionales (-n N para últimas N líneas, -f para follow)
+    local n_lines=""
+    local follow=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n)
+                n_lines="$2"
+                follow=false
+                shift 2
+                ;;
+            -f|--follow)
+                follow=true
+                shift
+                ;;
+            --no-follow)
+                follow=false
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [[ "$follow" == true ]]; then
+        log "Tailing ${LOG_FILE} (Ctrl-C para salir)..."
+        echo
+        exec tail -f "$LOG_FILE"
+    else
+        tail -n "${n_lines:-50}" "$LOG_FILE"
+    fi
+}
+
 # === Main ===
 
-case "${1:-restart}" in
-    start)   cmd_start ;;
-    stop)    cmd_stop ;;
-    restart) cmd_restart ;;
-    status)  cmd_status ;;
+# Parse subcommand y flags
+SUBCMD="${1:-restart}"
+shift || true
+
+# Flag global: --no-follow / -nf desactiva el tail post-start/restart
+FOLLOW_AFTER_START=true
+REMAINING_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-follow|-nf)
+            FOLLOW_AFTER_START=false
+            ;;
+        *)
+            REMAINING_ARGS+=("$arg")
+            ;;
+    esac
+done
+
+case "$SUBCMD" in
+    start)
+        cmd_start
+        if [[ "$FOLLOW_AFTER_START" == true ]]; then
+            echo
+            log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
+            echo
+            exec tail -f "$LOG_FILE"
+        fi
+        ;;
+    stop)
+        cmd_stop
+        ;;
+    restart)
+        cmd_restart
+        if [[ "$FOLLOW_AFTER_START" == true ]]; then
+            echo
+            log "Tailing ${LOG_FILE} (Ctrl-C para salir, el servicio sigue corriendo)..."
+            echo
+            exec tail -f "$LOG_FILE"
+        fi
+        ;;
+    status)
+        cmd_status
+        ;;
+    logs)
+        cmd_logs "${REMAINING_ARGS[@]}"
+        ;;
     *)
-        err "Uso: $0 {start|stop|restart|status}"
+        err "Uso: $0 {start|stop|restart|status|logs} [--no-follow]"
+        err "     $0 logs [-n N | -f]"
         exit 1
         ;;
 esac
