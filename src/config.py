@@ -157,6 +157,18 @@ class Settings(BaseSettings):
         default="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
     )
 
+    # InvGate Service Desk (creación de tickets post-Narrator + updates en cada hito).
+    # Las env vars usan sufijo _INVGATE (USER_INVGATE, PASS_INVGATE, HOST_INVGATE,
+    # CREATOR_ID_INVGATE) por convención del admin → mapeamos con validation_alias.
+    # customer_id y category_id son fijos (5 y 59) pero overrideables vía env si hace falta.
+    invgate_host: str = Field(default="", validation_alias="HOST_INVGATE")
+    invgate_user: str = Field(default="", validation_alias="USER_INVGATE")
+    invgate_password: str = Field(default="", validation_alias="PASS_INVGATE")
+    invgate_creator_id: int = Field(default=0, validation_alias="CREATOR_ID_INVGATE")
+    invgate_customer_id: int = Field(default=5, validation_alias="CUSTOMER_ID_INVGATE")
+    invgate_category_id: int = Field(default=59, validation_alias="CATEGORY_ID_INVGATE")
+    invgate_verify_ssl: bool = Field(default=True, validation_alias="INVGATE_VERIFY_SSL")
+
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
     smtp_port: int = Field(default=25)

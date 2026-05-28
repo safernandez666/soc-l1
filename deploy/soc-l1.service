@@ -12,6 +12,11 @@ User=__SOC_USER__
 Group=__SOC_GROUP__
 WorkingDirectory=/opt/soc-l1
 
+# El Enricher (wazuh_recent_alerts) lee /var/ossec/logs/alerts/alerts.json, que
+# solo es legible por el grupo wazuh. Sin esto el servicio arranca sin grupos
+# suplementarios y falla con "Permission denied" al leer ese archivo.
+SupplementaryGroups=wazuh
+
 # El servicio lee /opt/soc-l1/.env vía pydantic-settings (SettingsConfigDict).
 # NO usamos EnvironmentFile= porque systemd parsea distinto (no soporta valores con
 # espacios, quotes, ni multilínea de la misma manera que python-dotenv).

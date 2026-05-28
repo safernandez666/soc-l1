@@ -83,10 +83,12 @@ def _build_text_body(
     plan: NarratorPlan,
     approve_url: str,
     reject_url: str,
+    invgate_request_id: int | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("SOC L1 - APROBACION REQUERIDA")
-    lines.append(f"Risk: {plan.risk_level.upper()}")
+    ticket_tag = f" | InvGate ticket #{invgate_request_id}" if invgate_request_id else ""
+    lines.append(f"Risk: {plan.risk_level.upper()}{ticket_tag}")
     lines.append("=" * 60)
     lines.append("")
     lines.append("RESUMEN EJECUTIVO")
@@ -198,6 +200,7 @@ def _build_html_body(
     reject_url: str,
     ttl_hours: int = 24,
     review_url: str | None = None,
+    invgate_request_id: int | None = None,
 ) -> str:
     """Renderiza el email HTML matcheando el design system del integrator Wazuh unified v4.9.
 
@@ -294,6 +297,7 @@ def _build_html_body(
       <div style="margin-top:10px;">
         {rule_badge_html}
         {risk_badge_html}
+        {_badge(f"TICKET #{invgate_request_id}", "info") if invgate_request_id else ""}
       </div>
     </div>
 
@@ -369,6 +373,7 @@ def _build_message(
     alert: NormalizedAlert,
     plan: NarratorPlan,
     token: str,
+    invgate_request_id: int | None = None,
 ) -> EmailMessage:
     approve_url = f"{settings.approval_base_url.rstrip('/')}/approve/{token}"
     reject_url = f"{settings.approval_base_url.rstrip('/')}/reject/{token}"
@@ -377,20 +382,27 @@ def _build_message(
     # Limpiar emoji para subject (Exchange/Outlook a veces los quema)
     sev_clean = sev_label.replace("🚨 ", "").replace("⚠️ ", "")
 
+    ticket_tag = f" [ticket #{invgate_request_id}]" if invgate_request_id else ""
     msg = EmailMessage()
     msg["Subject"] = (
         f"[SOC L1][{plan.risk_level.upper()}] {alert.device.hostname or 'unknown'} - "
-        f"{alert.title[:60]}"
+        f"{alert.title[:60]}{ticket_tag}"
     )
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
-    msg.set_content(_build_text_body(alert, plan, approve_url, reject_url))
+    msg.set_content(
+        _build_text_body(
+            alert, plan, approve_url, reject_url,
+            invgate_request_id=invgate_request_id,
+        )
+    )
     review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
     msg.add_alternative(
         _build_html_body(
             alert, plan, approve_url, reject_url,
             ttl_hours=settings.approval_ttl_hours,
             review_url=review_url,
+            invgate_request_id=invgate_request_id,
         ),
         subtype="html",
     )
@@ -423,6 +435,7 @@ async def send_approval_email(
     alert: NormalizedAlert,
     plan: NarratorPlan,
     token: str,
+    invgate_request_id: int | None = None,
 ) -> None:
     """Envía email de aprobación. Si SMTP no está configurado, loggea y skip."""
     if not settings.smtp_host or not settings.smtp_to_approvers:
@@ -434,7 +447,7 @@ async def send_approval_email(
         )
         return
 
-    msg = _build_message(settings, alert, plan, token)
+    msg = _build_message(settings, alert, plan, token, invgate_request_id=invgate_request_id)
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
         logger.info(

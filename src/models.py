@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 UserRole = Literal["logged_on", "file_path_owner", "event_user"]
 AlertSource = Literal["defender_via_wazuh", "wazuh_native"]
-Severity = Literal["low", "medium", "high", "critical"]
+Severity = Literal["informational", "low", "medium", "high", "critical"]
 
 
 class User(BaseModel):
@@ -143,7 +143,7 @@ class WazuhRuleInfo(BaseModel):
 
 
 class WazuhRecentAlert(BaseModel):
-    """Resumen de una alerta histórica para context windowing."""
+    """Resumen de una alerta histórica para context windowing / outbreak detection."""
 
     model_config = ConfigDict(extra="forbid")
     timestamp: str
@@ -152,6 +152,9 @@ class WazuhRecentAlert(BaseModel):
     description: str
     agent_name: str | None = None
     agent_id: str | None = None
+    host: str | None = None
+    user: str | None = None
+    sha256: str | None = None
 
 
 # ===== Threat Intel =====
@@ -217,3 +220,16 @@ class FortigateActionResult(BaseModel):
     action: str  # "quarantine_ip" hoy
     expires_at: str | None = None
     message: str | None = None
+
+
+# ===== InvGate Service Desk =====
+
+
+class InvgateTicketResult(BaseModel):
+    """Resultado de una operación contra el API de InvGate Service Desk."""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: bool
+    request_id: int | None = None
+    info: str | None = None
+    error: str | None = None
