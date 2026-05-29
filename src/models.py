@@ -222,6 +222,25 @@ class FortigateActionResult(BaseModel):
     message: str | None = None
 
 
+# ===== Microsoft Defender for Endpoint (MDE) =====
+
+
+class DefenderActionResult(BaseModel):
+    """Resultado de una machine action contra la API de MDE.
+
+    `action_id` es el id de la machineAction que devuelve Defender (async); sirve
+    para que un humano/L2 siga el estado en el portal si hace falta.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    ok: bool
+    action: str  # "run_av_scan" | "isolate_machine" | "unisolate_machine"
+    host: str | None = None
+    machine_id: str | None = None
+    action_id: str | None = None
+    message: str | None = None
+
+
 # ===== InvGate Service Desk =====
 
 

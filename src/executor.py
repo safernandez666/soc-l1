@@ -8,6 +8,9 @@ side-effect en AD.
 Acciones soportadas:
   - disable_user           → tools.ldap.disable_user
   - force_password_change  → tools.ldap.force_password_change
+  - block_ip               → tools.fortigate.quarantine_ip
+  - scan_host              → tools.defender.run_av_scan (MDE)
+  - isolate_host           → tools.defender.isolate_machine (MDE)
   - notify_only            → no-op (registra "noted")
   - escalate_l2            → no-op (registra "escalated", futuro: ticket/Slack)
 
@@ -15,8 +18,11 @@ Guardrails de seguridad (defensa en profundidad post-approval):
   - PROTECTED_USERS: lista de sams que el executor refusa tocar. Aunque el Narrator
     recomiende disable_user y el humano apruebe, los users protegidos quedan intactos.
     Útil para cuentas de admin, ejecutivos, service accounts.
-  - DRY_RUN_MODE: flag global que convierte todas las acciones AD en no-op (solo log).
-    Útil para validar el comportamiento del Narrator antes de habilitar ejecución real.
+  - PROTECTED_NETWORKS: CIDRs que nunca se bloquean en FortiGate (block_ip).
+  - PROTECTED_HOSTS: hostnames que el executor refusa escanear/aislar (scan_host/
+    isolate_host). Pensado para DCs, Exchange, hipervisores.
+  - DRY_RUN_MODE: flag global que convierte todas las acciones AD/FortiGate/Defender
+    en no-op (solo log). Útil para validar el Narrator antes de habilitar ejecución real.
 
 Cada acción retorna ExecutionResult con ok + message + target.
 La lista completa va al state.mark_executed para audit trail permanente.
@@ -33,6 +39,7 @@ from pydantic import BaseModel, ConfigDict
 from src.agents.narrator import ProposedAction
 from src.config import LdapConfig, Settings
 from src.tools import ldap as ldap_tools
+from src.tools.defender import DefenderClient, DefenderError
 from src.tools.fortigate import FortigateClient, FortigateError
 
 logger = logging.getLogger("soc-l1")
@@ -75,7 +82,7 @@ def _exec_disable_user_sync(cfg: LdapConfig, sam: str) -> ExecutionResult:
             ok=r.ok,
             message=r.message or (f"DN={r.target_dn}" if r.target_dn else None),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("disable_user failed for %s", sam)
         return ExecutionResult(
             action_type="disable_user", target=sam, ok=False, message=str(e)
@@ -91,7 +98,7 @@ def _exec_force_password_sync(cfg: LdapConfig, sam: str) -> ExecutionResult:
             ok=r.ok,
             message=r.message or (f"DN={r.target_dn}" if r.target_dn else None),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("force_password_change failed for %s", sam)
         return ExecutionResult(
             action_type="force_password_change", target=sam, ok=False, message=str(e)
@@ -116,11 +123,39 @@ async def _exec_block_ip(settings: Settings, ip: str) -> ExecutionResult:
         )
 
 
+async def _exec_defender_action(
+    settings: Settings, action_type: str, host: str
+) -> ExecutionResult:
+    """scan_host / isolate_host vía MDE. Resuelve hostname → machineId y acciona."""
+    comment = f"SOC-L1 automated {action_type} (human-approved) on {host}"
+    try:
+        async with DefenderClient(settings) as dc:
+            machine_id = await dc.resolve_machine_id(host)
+            if not machine_id:
+                return ExecutionResult(
+                    action_type=action_type, target=host, ok=False,
+                    message=f"no se encontró machineId en MDE para host '{host}'",
+                )
+            if action_type == "scan_host":
+                r = await dc.run_av_scan(machine_id, comment=comment, host=host)
+            else:  # isolate_host
+                r = await dc.isolate_machine(machine_id, comment=comment, host=host)
+        return ExecutionResult(
+            action_type=action_type, target=host, ok=r.ok, message=r.message,
+        )
+    except DefenderError as e:
+        logger.exception("%s failed for %s", action_type, host)
+        return ExecutionResult(
+            action_type=action_type, target=host, ok=False, message=str(e)
+        )
+
+
 async def _execute_one(
     action: ProposedAction,
     ldap_cfg: LdapConfig | None,
     protected_users: set[str],
     protected_networks: list[str],
+    protected_hosts: set[str],
     dry_run: bool,
     settings: Settings | None,
 ) -> ExecutionResult:
@@ -184,6 +219,34 @@ async def _execute_one(
             )
         return await _exec_block_ip(settings, ip)
 
+    if action.type in ("scan_host", "isolate_host"):
+        host = action.target.strip()
+        # Guardrail PROTECTED_HOSTS: nunca escanear/aislar infra crítica
+        if host.lower() in protected_hosts:
+            logger.warning(
+                "🛡️  PROTECTED HOST | refused %s on target=%r (in PROTECTED_HOSTS list)",
+                action.type, host,
+            )
+            return ExecutionResult(
+                action_type=action.type, target=host, ok=False,
+                message=(
+                    f"REFUSED: '{host}' está en PROTECTED_HOSTS. Defender intacto. "
+                    f"Si querés ejecutar, sacá el host de la lista."
+                ),
+            )
+        if dry_run:
+            logger.warning("🧪 DRY_RUN | would have %s on target=%r", action.type, host)
+            return ExecutionResult(
+                action_type=action.type, target=host, ok=True,
+                message=f"DRY_RUN: {action.type} simulado (Defender intacto)",
+            )
+        if settings is None or not settings.defender_configured():
+            return ExecutionResult(
+                action_type=action.type, target=host, ok=False,
+                message="Defender (MDE) no configurado - acción no ejecutada",
+            )
+        return await _exec_defender_action(settings, action.type, host)
+
     if action.type in ("disable_user", "force_password_change"):
         # Guardrail #1: PROTECTED_USERS (defensa permanente)
         target_lower = action.target.strip().lower()
@@ -212,7 +275,7 @@ async def _execute_one(
                 action_type=action.type,
                 target=action.target,
                 ok=True,
-                message=f"DRY_RUN: acción simulada (no se ejecutó en AD)",
+                message="DRY_RUN: acción simulada (no se ejecutó en AD)",
             )
 
         # Ejecución real
@@ -250,10 +313,12 @@ async def execute_plan(
     """
     protected_users: set[str] = set()
     protected_networks: list[str] = []
+    protected_hosts: set[str] = set()
     dry_run = False
     if settings is not None:
         protected_users = settings.protected_users_set()
         protected_networks = settings.protected_networks_list()
+        protected_hosts = settings.protected_hosts_set()
         dry_run = settings.dry_run_mode
 
     if protected_users:
@@ -266,13 +331,19 @@ async def execute_plan(
             "executor: PROTECTED_NETWORKS activo (%d CIDRs): %s",
             len(protected_networks), protected_networks,
         )
+    if protected_hosts:
+        logger.info(
+            "executor: PROTECTED_HOSTS activo (%d hosts): %s",
+            len(protected_hosts), sorted(protected_hosts),
+        )
     if dry_run:
         logger.warning("executor: DRY_RUN_MODE=true - ninguna acción AD/FortiGate se ejecuta de verdad")
 
     results: list[ExecutionResult] = []
     for action in actions:
         r = await _execute_one(
-            action, ldap_cfg, protected_users, protected_networks, dry_run, settings
+            action, ldap_cfg, protected_users, protected_networks,
+            protected_hosts, dry_run, settings,
         )
         logger.info(
             "EXEC | type=%s target=%s ok=%s msg=%s",

@@ -890,6 +890,8 @@ def _render_review_page(
                 "disable_user": "#dc2626",
                 "force_password_change": "#ea580c",
                 "block_ip": "#7f1d1d",
+                "scan_host": "#0891b2",
+                "isolate_host": "#9333ea",
                 "notify_only": "#0284c7",
                 "escalate_l2": "#a16207",
             }.get(a.type, "#475569")

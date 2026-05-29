@@ -157,6 +157,20 @@ class Settings(BaseSettings):
         default="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
     )
 
+    # Microsoft Defender for Endpoint (acciones de respuesta sobre el endpoint:
+    # scan AV + aislamiento de máquina, post-aprobación). Relación hoy unidireccional
+    # (solo ingesta vía Wazuh); estos 3 datos los provee un App Registration en Entra ID
+    # con permisos de aplicación WindowsDefenderATP (Machine.Scan, Machine.Isolate,
+    # Machine.Read.All) y admin consent. Auth: OAuth2 client-credentials.
+    defender_tenant_id: str = Field(default="")
+    defender_client_id: str = Field(default="")
+    defender_client_secret: str = Field(default="")
+    defender_verify_ssl: bool = Field(default=True)
+    # Hosts "intocables" - el executor refusa scan_host/isolate_host sobre estos nombres
+    # sin importar si el approval se clickeó. Pensado para DCs, Exchange, hipervisores, etc.
+    # Match contra action.target (hostname o FQDN), case-insensitive, comma-separated.
+    protected_hosts: str = Field(default="")
+
     # InvGate Service Desk (creación de tickets post-Narrator + updates en cada hito).
     # Las env vars usan sufijo _INVGATE (USER_INVGATE, PASS_INVGATE, HOST_INVGATE,
     # CREATOR_ID_INVGATE) por convención del admin → mapeamos con validation_alias.
@@ -213,6 +227,22 @@ class Settings(BaseSettings):
             for sam in self.protected_users.split(",")
             if sam.strip()
         }
+
+    def protected_hosts_set(self) -> set[str]:
+        """Parsea protected_hosts a un set lowercase para lookup eficiente."""
+        return {
+            host.strip().lower()
+            for host in self.protected_hosts.split(",")
+            if host.strip()
+        }
+
+    def defender_configured(self) -> bool:
+        """True si están los 3 datos para hablar con la API de MDE."""
+        return bool(
+            self.defender_tenant_id
+            and self.defender_client_id
+            and self.defender_client_secret
+        )
 
     def webhook_allowed_ips_set(self) -> set[str]:
         """Parsea webhook_allowed_ips a un set para lookup O(1)."""

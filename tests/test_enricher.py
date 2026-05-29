@@ -100,7 +100,7 @@ def test_build_enricher_has_tools_and_output() -> None:
     assert agent.name == "Enricher"
     assert agent.output_type is EnrichmentResult
     tool_names = {t.name for t in agent.tools}
-    assert tool_names == {"ldap_search_user", "wazuh_get_rule"}
+    assert tool_names == {"ldap_search_user", "wazuh_get_rule", "wazuh_recent_alerts"}
 
 
 def test_system_prompt_demanda_uso_de_tools() -> None:
