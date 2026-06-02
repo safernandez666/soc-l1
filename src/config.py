@@ -157,6 +157,32 @@ class Settings(BaseSettings):
         default="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
     )
 
+    # Microsoft Defender for Endpoint (acciones de respuesta sobre el endpoint:
+    # scan AV + aislamiento de máquina, post-aprobación). Relación hoy unidireccional
+    # (solo ingesta vía Wazuh); estos 3 datos los provee un App Registration en Entra ID
+    # con permisos de aplicación WindowsDefenderATP (Machine.Scan, Machine.Isolate,
+    # Machine.Read.All) y admin consent. Auth: OAuth2 client-credentials.
+    defender_tenant_id: str = Field(default="")
+    defender_client_id: str = Field(default="")
+    defender_client_secret: str = Field(default="")
+    defender_verify_ssl: bool = Field(default=True)
+    # Hosts "intocables" - el executor refusa scan_host/isolate_host sobre estos nombres
+    # sin importar si el approval se clickeó. Pensado para DCs, Exchange, hipervisores, etc.
+    # Match contra action.target (hostname o FQDN), case-insensitive, comma-separated.
+    protected_hosts: str = Field(default="")
+
+    # InvGate Service Desk (creación de tickets post-Narrator + updates en cada hito).
+    # Las env vars usan sufijo _INVGATE (USER_INVGATE, PASS_INVGATE, HOST_INVGATE,
+    # CREATOR_ID_INVGATE) por convención del admin → mapeamos con validation_alias.
+    # customer_id y category_id son fijos (5 y 59) pero overrideables vía env si hace falta.
+    invgate_host: str = Field(default="", validation_alias="HOST_INVGATE")
+    invgate_user: str = Field(default="", validation_alias="USER_INVGATE")
+    invgate_password: str = Field(default="", validation_alias="PASS_INVGATE")
+    invgate_creator_id: int = Field(default=0, validation_alias="CREATOR_ID_INVGATE")
+    invgate_customer_id: int = Field(default=5, validation_alias="CUSTOMER_ID_INVGATE")
+    invgate_category_id: int = Field(default=59, validation_alias="CATEGORY_ID_INVGATE")
+    invgate_verify_ssl: bool = Field(default=True, validation_alias="INVGATE_VERIFY_SSL")
+
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
     smtp_port: int = Field(default=25)
@@ -201,6 +227,22 @@ class Settings(BaseSettings):
             for sam in self.protected_users.split(",")
             if sam.strip()
         }
+
+    def protected_hosts_set(self) -> set[str]:
+        """Parsea protected_hosts a un set lowercase para lookup eficiente."""
+        return {
+            host.strip().lower()
+            for host in self.protected_hosts.split(",")
+            if host.strip()
+        }
+
+    def defender_configured(self) -> bool:
+        """True si están los 3 datos para hablar con la API de MDE."""
+        return bool(
+            self.defender_tenant_id
+            and self.defender_client_id
+            and self.defender_client_secret
+        )
 
     def webhook_allowed_ips_set(self) -> set[str]:
         """Parsea webhook_allowed_ips a un set para lookup O(1)."""

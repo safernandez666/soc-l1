@@ -11,3 +11,9 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+
+# Secretos y backups locales — nunca versionar
+secrets/
+.env.*
+!.env.example
+*.bak*

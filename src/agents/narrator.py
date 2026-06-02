@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from agents import Agent, Runner
 from pydantic import BaseModel, ConfigDict, Field
 
+from agents import Agent, Runner
 from src.agents.enricher import EnrichmentResult
 from src.agents.threatintel import ThreatIntelResult
 from src.agents.triage import TriageDecision
@@ -26,6 +26,8 @@ ActionType = Literal[
     "disable_user",  # Setea bit ACCOUNTDISABLE en AD
     "force_password_change",  # Setea pwdLastSet=0
     "block_ip",  # Quarantine en FortiGate (target = IP)
+    "scan_host",  # Antivirus scan en Defender/MDE (target = hostname/FQDN)
+    "isolate_host",  # Aislamiento de red en Defender/MDE (target = hostname/FQDN)
     "notify_only",  # No tomar acción, solo registrar
     "escalate_l2",  # Requiere análisis humano más profundo
 ]
@@ -37,13 +39,17 @@ class ProposedAction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     type: ActionType = Field(
-        description="Tipo de acción: disable_user, force_password_change, notify_only, escalate_l2"
+        description=(
+            "Tipo de acción: disable_user, force_password_change, block_ip, "
+            "scan_host, isolate_host, notify_only, escalate_l2"
+        )
     )
     target: str = Field(
         description=(
             "Target de la acción. Para disable_user/force_password_change: el sam "
-            "(ej. 'jdoe'). Para notify_only/escalate_l2: descripción corta del item "
-            "a registrar/escalar."
+            "(ej. 'jdoe'). Para block_ip: la IP exacta. Para scan_host/isolate_host: "
+            "el hostname o FQDN del equipo (device.fqdn si está, si no device.hostname). "
+            "Para notify_only/escalate_l2: descripción corta del item a registrar/escalar."
         )
     )
     justification: str = Field(
@@ -98,6 +104,37 @@ Si threat_intel está presente, USALO. Cita evidencias específicas en tu ration
   - "VT no conoce el hash" → puede ser malware nuevo (zero-day), justifica escalate_l2
   - "IP whitelisted o score=0" → probable falso positivo, podés bajar el risk_level
 
+REGLAS PARA EVIDENCIA DE DEFENDER (endpoint) - usá SIEMPRE estos campos del alert:
+
+`alert.files[].remediation` (remediationStatus de Defender) es DECISIVO:
+  - "prevented" / "blocked" / "remediated" / "quarantined" → Defender YA neutralizó el \
+archivo en el endpoint. NO recomiendes borrado manual ni des por sentado que el equipo \
+sigue infectado. Decilo EXPLÍCITO en el executive_summary y el rationale ("Defender ya \
+previno el archivo, no requiere acción de limpieza manual").
+  - "notFound" / "failed" / "active" / null / desconocido → la amenaza puede seguir \
+viva. ACÁ SÍ corresponde un scan/limpieza de host → usá escalate_l2 (host remediation \
+no está en este pipeline) y explicá por qué.
+
+`alert.threat.display_name` / `alert.threat.family` - clasificá la naturaleza real:
+  - Prefijo "PUA:" / "PUP:" / familias de adware/bundler (ej. Presenoker) → software \
+no deseado, NO robo de credenciales ni RCE. Salvo otra evidencia, esto NO justifica \
+disable_user ni force_password_change.
+  - Familias de credential theft / RAT / ransomware / loader → tratá con la severidad \
+que corresponde.
+
+`alert.device.risk_score` (riskScore de Defender): "none"/"low" sostiene un risk_level \
+más bajo; "high" lo sube. Citalo.
+
+`alert.threat.provider_actions` (recommendedActions de Defender): es la guía del propio \
+vendor. Si recomienda "determine scope / look for presence on other systems", traducilo \
+a una acción concreta de tu vocabulario (típicamente escalate_l2 o notify_only), no lo \
+ignores.
+
+REGLA DE COHERENCIA: si remediationStatus indica que el archivo ya fue prevenido Y es un \
+PUA con riskScore none/low Y no hay señal de credential_access ni de brote (outbreak/ \
+repeat_offender en enrichment.flags), el plan correcto suele ser notify_only (registrar) \
+o, a lo sumo, escalate_l2 para un scan de confirmación - NO un cambio de contraseña.
+
 REGLAS PARA `actions`:
 
 Generá `disable_user` cuando:
@@ -111,6 +148,9 @@ Generá `force_password_change` cuando:
   - Credential dumping detectado pero el user puede seguir operando
   - Hay sospecha pero no certeza → opción menos agresiva que disable_user
   - SOLO si found_in_ad=true para ese target
+  - NO lo generes solo porque el triage marcó fast_track o el archivo es malicious: \
+requiere una señal real de compromiso de credenciales. Un PUA/adware ya prevenido por \
+Defender (remediationStatus=prevented) NO amerita resetear la contraseña del usuario.
 
 Generá `block_ip` cuando:
   - threat_intel.ip_reports tiene una IP con abuse_confidence_score >= 75 (high confidence)
@@ -121,6 +161,26 @@ Generá `block_ip` cuando:
   - NO recomendar block_ip si already_quarantined=true (la IP ya está bloqueada en Forti)
   - NO recomendar block_ip si is_whitelisted=true (probable FP)
   - NO recomendar block_ip si la IP es RFC1918 (10.*, 172.16-31.*, 192.168.*) o tu propia infra
+
+Generá `scan_host` (antivirus scan en Defender) cuando:
+  - El archivo NO fue remediado por Defender (remediationStatus active/failed/notFound/null) \
+y querés confirmar que el equipo quedó limpio
+  - Hay sospecha de más artefactos en el host (provider_actions suele pedir "determine scope")
+  - SOLO si la alerta es de Defender y alert.device.mde_id está presente (sin mde_id no \
+podemos accionar - usá escalate_l2)
+  - target = alert.device.fqdn si existe, si no alert.device.hostname
+  - NO recomiendes scan_host si el archivo ya fue prevented/remediated/quarantined y no hay \
+otra sospecha: en ese caso es redundante, mencionalo en el rationale y no lo agregues
+
+Generá `isolate_host` (aislamiento de red en Defender) cuando:
+  - Evidencia FUERTE de compromiso activo del endpoint: verdict=malicious + \
+credential_access / lateral_movement / persistence, ransomware/RAT/loader, o brote \
+(outbreak_suspected en enrichment.flags)
+  - O device.risk_score = high
+  - Es la acción MÁS agresiva del pipeline - reservala para compromiso real, no para PUA/adware \
+ni para un archivo ya prevenido
+  - SOLO si la alerta es de Defender y alert.device.mde_id está presente
+  - target = alert.device.fqdn si existe, si no alert.device.hostname
 
 Generá `escalate_l2` cuando:
   - Mitre techniques de Initial Access / Lateral Movement / Persistence presentes

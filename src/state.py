@@ -46,17 +46,19 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     decided_by_ua TEXT,
     selected_actions TEXT,
     executed_at TEXT,
-    execution_result TEXT
+    execution_result TEXT,
+    invgate_request_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_alert_id ON pending_approvals(alert_id);
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
 """
 
-# Migration: en DBs existentes que no tienen selected_actions, agregar la columna
-# (ALTER TABLE silencia el error si ya existe vía try/except en _init_db_sync).
+# Migrations idempotentes para DBs existentes (ALTER TABLE silencia el error
+# si ya existe la columna vía try/except en _init_db_sync).
 _MIGRATIONS = [
     "ALTER TABLE pending_approvals ADD COLUMN selected_actions TEXT",
+    "ALTER TABLE pending_approvals ADD COLUMN invgate_request_id INTEGER",
 ]
 
 ApprovalStatus = str  # 'pending' | 'approved' | 'rejected' | 'expired' | 'executed'
@@ -95,15 +97,19 @@ def _init_db_sync(db_path: str) -> None:
 
 
 def _create_pending_sync(
-    db_path: str, alert_id: str, plan_json: str, alert_json: str
+    db_path: str,
+    alert_id: str,
+    plan_json: str,
+    alert_json: str,
+    invgate_request_id: int | None = None,
 ) -> str:
     token = secrets.token_urlsafe(32)
     with _connect(db_path) as conn:
         conn.execute(
             "INSERT INTO pending_approvals "
-            "(token, alert_id, plan_json, alert_json, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?)",
-            (token, alert_id, plan_json, alert_json, _now()),
+            "(token, alert_id, plan_json, alert_json, status, created_at, invgate_request_id) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+            (token, alert_id, plan_json, alert_json, _now(), invgate_request_id),
         )
     return token
 
@@ -202,11 +208,20 @@ async def init_db(db_path: str) -> None:
 
 
 async def create_pending_approval(
-    db_path: str, alert_id: str, plan_json: str, alert_json: str
+    db_path: str,
+    alert_id: str,
+    plan_json: str,
+    alert_json: str,
+    invgate_request_id: int | None = None,
 ) -> str:
-    """Crea un pending approval y devuelve el token único."""
+    """Crea un pending approval y devuelve el token único.
+
+    invgate_request_id: id del ticket InvGate ya creado (si lo está). Se persiste
+    para que /approve, /reject y el executor puedan agregar comentarios al mismo ticket.
+    """
     return await asyncio.to_thread(
-        _create_pending_sync, db_path, alert_id, plan_json, alert_json
+        _create_pending_sync, db_path, alert_id, plan_json, alert_json,
+        invgate_request_id,
     )
 
 
@@ -267,7 +282,7 @@ def _list_approvals_sync(
             rows = conn.execute(
                 "SELECT token, alert_id, status, created_at, decided_at, "
                 "       decided_by_ip, decided_by_ua, selected_actions, "
-                "       executed_at, plan_json "
+                "       executed_at, plan_json, invgate_request_id "
                 "FROM pending_approvals WHERE status = ? "
                 "ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
@@ -277,7 +292,7 @@ def _list_approvals_sync(
             rows = conn.execute(
                 "SELECT token, alert_id, status, created_at, decided_at, "
                 "       decided_by_ip, decided_by_ua, selected_actions, "
-                "       executed_at, plan_json "
+                "       executed_at, plan_json, invgate_request_id "
                 "FROM pending_approvals "
                 "ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),

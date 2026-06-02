@@ -463,22 +463,31 @@ async def _run_narrator_and_request_approval(
             "\n".join(action_lines) if action_lines else "  (no actions - monitor only)",
         )
 
+        invgate_request_id = await _create_invgate_ticket_safely(
+            settings, alert, plan
+        )
+
         token = await create_pending_approval(
             settings.state_db_path,
             alert_id=alert.alert_id,
             plan_json=plan.model_dump_json(),
             alert_json=alert.model_dump_json(),
+            invgate_request_id=invgate_request_id,
         )
         review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
         logger.info(
-            "📬 APPROVAL_PENDING | id=%s risk=%s actions=%d\n  review: %s",
+            "📬 APPROVAL_PENDING | id=%s risk=%s actions=%d ticket=%s\n  review: %s",
             alert.alert_id,
             plan.risk_level,
             len(plan.actions),
+            invgate_request_id or "n/a",
             review_url,
         )
 
-        await send_approval_email(settings, alert, plan, token)
+        await send_approval_email(
+            settings, alert, plan, token,
+            invgate_request_id=invgate_request_id,
+        )
     except Exception:
         logger.exception("narrator/approval failed for alert id=%s", alert.alert_id)
 
@@ -492,6 +501,114 @@ def _build_ldap_cfg_safely():
     except Exception as e:  # noqa: BLE001
         logger.warning("LDAP no disponible (%s) - pipeline correrá sin AD writes", e)
         return None
+
+
+# ===== InvGate ticket helpers =====
+
+
+async def _create_invgate_ticket_safely(
+    settings: Settings, alert: NormalizedAlert, plan,
+) -> int | None:
+    """Crea ticket InvGate post-Narrator. Devuelve request_id o None (nunca aborta)."""
+    try:
+        from src.tools.invgate import InvgateClient, is_configured, priority_id_from_risk
+
+        if not is_configured(settings):
+            return None
+
+        priority = priority_id_from_risk(plan.risk_level)
+        title = f"[SOC-L1] {alert.title} — {alert.device.hostname or 'unknown'}"
+
+        action_lines = []
+        for a in plan.actions:
+            action_lines.append(f"  - {a.type} → {a.target}: {a.justification}")
+
+        description = (
+            f"Resumen ejecutivo:\n{plan.executive_summary}\n\n"
+            f"Risk level: {plan.risk_level.upper()}\n\n"
+            f"Acciones propuestas ({len(plan.actions)}):\n"
+            + ("\n".join(action_lines) if action_lines else "  (ninguna)")
+            + f"\n\nAnálisis:\n{plan.rationale}\n\n"
+            f"---\n"
+            f"Alert ID: {alert.alert_id}\n"
+            f"Host: {alert.device.hostname}\n"
+            f"Wazuh rule: {alert.wazuh_rule.id} (level {alert.wazuh_rule.level})\n"
+            f"Source: {alert.source}\n"
+            f"Timestamp: {alert.timestamp}\n"
+        )
+
+        async with InvgateClient(settings) as client:
+            result = await client.create_incident(
+                title=title,
+                description=description,
+                priority_id=priority,
+            )
+
+        if result.ok and result.request_id is not None:
+            return result.request_id
+        logger.warning(
+            "🎫 INVGATE create FAILED | alert=%s error=%s",
+            alert.alert_id, result.error,
+        )
+        return None
+    except Exception:
+        logger.exception("invgate: create_ticket failed for alert=%s", alert.alert_id)
+        return None
+
+
+async def _update_invgate_on_decision(
+    settings: Settings,
+    request_id: int,
+    decision: str,
+    alert_id: str,
+    ip: str | None,
+) -> None:
+    """Agrega comentario al ticket InvGate reflejando la decisión (fire-and-forget)."""
+    try:
+        from src.tools.invgate import InvgateClient
+
+        if decision == "approved":
+            body = f"Plan APROBADO por {ip or 'unknown'}. Ejecutando acciones."
+        else:
+            body = f"Plan RECHAZADO por {ip or 'unknown'}. No se ejecutan acciones."
+
+        async with InvgateClient(settings) as client:
+            await client.add_comment(request_id, body)
+    except Exception:
+        logger.exception(
+            "invgate: decision comment failed | ticket=%s alert=%s",
+            request_id, alert_id,
+        )
+
+
+async def _update_invgate_post_execution(
+    settings: Settings,
+    request_id: int,
+    alert_id: str,
+    results: list[dict],
+) -> None:
+    """Agrega comentario post-ejecución al ticket InvGate (fire-and-forget)."""
+    try:
+        from src.tools.invgate import InvgateClient
+
+        ok_count = sum(1 for r in results if r.get("ok"))
+        fail_count = len(results) - ok_count
+
+        lines = [f"Ejecución completada: {ok_count} OK, {fail_count} FAIL."]
+        for r in results:
+            tag = "OK" if r.get("ok") else "FAIL"
+            lines.append(
+                f"  [{tag}] {r.get('action', '?')} → {r.get('target', '?')}: "
+                f"{r.get('message', '')}"
+            )
+
+        async with InvgateClient(settings) as client:
+            await client.add_comment(request_id, "\n".join(lines))
+    except Exception:
+        logger.exception(
+            "invgate: post_execution comment failed | ticket=%s alert=%s",
+            request_id, alert_id,
+        )
 
 
 # ===== Approval endpoints =====
@@ -634,6 +751,12 @@ async def _handle_decision(
         ua,
     )
 
+    invgate_rid = row.get("invgate_request_id")
+    if invgate_rid:
+        asyncio.create_task(
+            _update_invgate_on_decision(settings, invgate_rid, decision, alert_id, ip)
+        )
+
     if decision == "rejected":
         return _render_decision_page(
             "rejected",
@@ -669,7 +792,7 @@ async def _handle_decision(
     # Lanzamos el executor en background para responder rápido al humano que clickeó
     asyncio.create_task(
         _execute_approved_plan_in_background(
-            settings, token, alert_id, plan, actions_to_run
+            settings, token, alert_id, plan, actions_to_run, invgate_rid
         )
     )
 
@@ -696,7 +819,8 @@ async def _handle_decision(
 
 
 async def _execute_approved_plan_in_background(
-    settings: Settings, token: str, alert_id: str, plan, actions_to_run
+    settings: Settings, token: str, alert_id: str, plan, actions_to_run,
+    invgate_request_id: int | None = None,
 ) -> None:
     """actions_to_run puede ser un subset del plan original (filtrado en /decide)."""
     from src.executor import execute_plan
@@ -719,6 +843,12 @@ async def _execute_approved_plan_in_background(
             ok_count,
             len(results) - ok_count,
         )
+        if invgate_request_id:
+            asyncio.create_task(
+                _update_invgate_post_execution(
+                    settings, invgate_request_id, alert_id, results
+                )
+            )
     except Exception:
         logger.exception("executor failed | alert=%s token=%s", alert_id, token[:12])
 
@@ -760,6 +890,8 @@ def _render_review_page(
                 "disable_user": "#dc2626",
                 "force_password_change": "#ea580c",
                 "block_ip": "#7f1d1d",
+                "scan_host": "#0891b2",
+                "isolate_host": "#9333ea",
                 "notify_only": "#0284c7",
                 "escalate_l2": "#a16207",
             }.get(a.type, "#475569")

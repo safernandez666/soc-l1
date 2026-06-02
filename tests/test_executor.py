@@ -331,3 +331,64 @@ async def test_block_ip_without_fortigate_config_fails() -> None:
     results = await execute_plan(actions, ldap_cfg=None, settings=settings)
     assert results[0]["ok"] is False
     assert "FortiGate no configurado" in results[0]["message"]
+
+
+# ===== scan_host / isolate_host + PROTECTED_HOSTS =====
+
+
+def _defender_settings(**kw) -> Settings:
+    base = dict(
+        openai_api_key="x",
+        defender_tenant_id="t", defender_client_id="ci", defender_client_secret="cs",
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+@pytest.mark.asyncio
+async def test_protected_host_refuses_isolate() -> None:
+    """Host en PROTECTED_HOSTS → executor refusa sin tocar Defender."""
+    settings = _defender_settings(protected_hosts="dc01,exchange01")
+    actions = [ProposedAction(type="isolate_host", target="DC01", justification="x")]
+    with patch("src.executor._exec_defender_action") as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_not_called()
+    assert results[0]["ok"] is False
+    assert "PROTECTED_HOSTS" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_scan_host_dry_run_no_op() -> None:
+    """DRY_RUN=true → scan_host no llama a Defender."""
+    settings = _defender_settings(dry_run_mode=True)
+    actions = [ProposedAction(type="scan_host", target="desktop-5678", justification="x")]
+    with patch("src.executor._exec_defender_action") as mock_fn:
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_not_called()
+    assert results[0]["ok"] is True
+    assert "DRY_RUN" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_scan_host_without_defender_config_fails() -> None:
+    """Sin credenciales MDE → ok=False, no crash."""
+    settings = Settings(openai_api_key="x")  # defender_* vacíos
+    actions = [ProposedAction(type="scan_host", target="desktop-5678", justification="x")]
+    results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    assert results[0]["ok"] is False
+    assert "Defender (MDE) no configurado" in results[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_isolate_host_executes_when_configured() -> None:
+    """Configurado + no dry_run + host no protegido → dispatchea a _exec_defender_action."""
+    settings = _defender_settings(dry_run_mode=False, protected_hosts="")
+    actions = [ProposedAction(type="isolate_host", target="pwned01", justification="x")]
+    with patch("src.executor._exec_defender_action", new_callable=AsyncMock) as mock_fn:
+        from src.executor import ExecutionResult
+        mock_fn.return_value = ExecutionResult(
+            action_type="isolate_host", target="pwned01", ok=True, message="isolated",
+        )
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_fn.assert_called_once()
+    assert results[0]["ok"] is True

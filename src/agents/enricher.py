@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.config import LdapConfig, Settings
 from src.models import ADUser, NormalizedAlert, WazuhRuleInfo
 from src.tools import ldap as ldap_tools
+from src.tools import wazuh_alerts
 from src.tools.wazuh_api import WazuhApiClient, WazuhApiError
 
 logger = logging.getLogger("soc-l1")
@@ -313,15 +314,104 @@ async def wazuh_get_rule(
     return result
 
 
+@function_tool
+async def wazuh_recent_alerts(
+    ctx: RunContextWrapper[EnricherContext],
+    sha256: str | None = None,
+    host: str | None = None,
+    user: str | None = None,
+    rule_id: str | None = None,
+    minutes: int = 30,
+) -> dict[str, Any]:
+    """Busca alertas recientes de Wazuh para detectar correlación / brote.
+
+    Pasá al menos uno: sha256, host, user, rule_id. El match es OR. Devuelve
+    las alertas que matchean dentro de los últimos `minutes` (default 30, max 1440).
+
+    Usar cuando: hay archivo con sha256 (¿está en otros endpoints?), o un host con
+    múltiples eventos en serie, o un user que repite alertas.
+
+    Args:
+        sha256: hash del archivo a correlar.
+        host: hostname (agent name o device hostname).
+        user: sam del usuario.
+        rule_id: ID de regla para contar disparos.
+        minutes: ventana hacia atrás (default 30).
+    """
+    minutes = max(1, min(minutes, 1440))
+    filters_key = f"sha={sha256}|host={host}|user={user}|rule={rule_id}|min={minutes}"
+    cache_key = f"recent:{filters_key}"
+
+    cached = _cache_get(ctx.context, cache_key)
+    if cached is not None:
+        hit_count = _track_hit(ctx.context, cache_key)
+        if hit_count >= _MAX_REPEAT_HITS:
+            logger.error(
+                "🛑 TOOL wazuh_recent_alerts(%s) → HARD STOP (hit #%d)",
+                filters_key, hit_count,
+            )
+            return _hard_stop_reply("wazuh_recent_alerts", filters_key, hit_count)
+        logger.warning(
+            "⚠️  TOOL wazuh_recent_alerts(%s) → CACHED (hit #%d)",
+            filters_key, hit_count,
+        )
+        return _cached_reply(cached, "wazuh_recent_alerts", filters_key, hit_count)
+
+    logger.info("🔎 TOOL wazuh_recent_alerts(%s) [agent=Enricher]", filters_key)
+
+    if not any((sha256, host, user, rule_id)):
+        result = {
+            "found": False,
+            "count": 0,
+            "matches": [],
+            "error": "Debe proveer al menos un filtro (sha256, host, user, rule_id).",
+        }
+        _cache_set(ctx.context, cache_key, result)
+        return result
+
+    try:
+        matches = wazuh_alerts.query_recent_alerts(
+            sha256=sha256, host=host, user=user, rule_id=rule_id, minutes=minutes,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("↳ wazuh_recent_alerts(%s) → ERROR: %s", filters_key, e)
+        result = {"found": False, "count": 0, "matches": [], "error": str(e)}
+        _cache_set(ctx.context, cache_key, result)
+        return result
+
+    distinct_hosts = len({m.host for m in matches if m.host})
+    distinct_users = len({m.user for m in matches if m.user})
+    distinct_sha256 = len({m.sha256 for m in matches if m.sha256})
+
+    logger.info(
+        "↳ wazuh_recent_alerts(%s) → FOUND %d alerts (hosts=%d users=%d shas=%d, window=%dm)",
+        filters_key, len(matches), distinct_hosts, distinct_users, distinct_sha256, minutes,
+    )
+
+    result = {
+        "found": len(matches) > 0,
+        "count": len(matches),
+        "distinct_hosts": distinct_hosts,
+        "distinct_users": distinct_users,
+        "distinct_sha256": distinct_sha256,
+        "window_minutes": minutes,
+        "matches": [m.model_dump() for m in matches],
+    }
+    _cache_set(ctx.context, cache_key, result)
+    return result
+
+
 # ===== System prompt =====
 
 SYSTEM_PROMPT = """Sos el agente ENRICHER de un SOC L1. Recibís una alerta ya triada \
 (verdict=analyze) y tu trabajo es enriquecerla con contexto antes de que el siguiente \
 agente decida acción.
 
-Tenés 2 tools:
+Tenés 3 tools:
   - ldap_search_user(sam_account_name): mirá AD para cada usuario involucrado.
   - wazuh_get_rule(rule_id): detalle de la rule de Wazuh.
+  - wazuh_recent_alerts(sha256?, host?, user?, rule_id?, minutes?): correlación / brote. \
+Busca alertas recientes con esos filtros (OR-match).
 
 REGLAS CRÍTICAS (anti-loop):
   - Cada tool se llama **MÁXIMO 1 VEZ por argumento**. Si ya llamaste \
@@ -349,7 +439,12 @@ PROCEDIMIENTO OBLIGATORIO (en este orden):
 1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam` \
 (idealmente en paralelo - una llamada por user). Si la lista está vacía, no llames.
 2. Si la alerta tiene wazuh_rule.id, llamá wazuh_get_rule UNA SOLA VEZ con ese id.
-3. Componé y devolvé EXACTAMENTE el JSON de EnrichmentResult. NO más tool calls después \
+3. Si la alerta tiene file con sha256, llamá wazuh_recent_alerts(sha256=..., minutes=30) \
+UNA SOLA VEZ. Si NO hay sha256 pero hay host afectado, llamá wazuh_recent_alerts(host=..., minutes=30). \
+Si NO hay sha256 ni host pero hay user, llamá wazuh_recent_alerts(user=..., minutes=30). \
+Esta tool es para detectar brote/correlación: si vuelve count>=3 o distinct_hosts>=2, hay señal \
+de evento múltiple, no un caso aislado.
+4. Componé y devolvé EXACTAMENTE el JSON de EnrichmentResult. NO más tool calls después \
 de este punto.
 
 CRITERIO PARA `flags` (priorización para el próximo agente):
@@ -362,6 +457,10 @@ CRITERIO PARA `flags` (priorización para el próximo agente):
 - "rule_high_severity" → si rule.level >= 10.
 - "rule_group_<group>" → para grupos críticos: lateral_movement, credential_access, \
 privilege_escalation, persistence, exfiltration. Ej "rule_group_lateral_movement".
+- "outbreak_suspected" → wazuh_recent_alerts devolvió count>=3 o distinct_hosts>=2 con \
+el mismo sha256/host (mismo binario / mismo evento en múltiples endpoints).
+- "repeat_offender_user" → wazuh_recent_alerts(user=...) devolvió count>=3 dentro de la ventana \
+(usuario con eventos múltiples).
 
 CRITERIO PARA `summary`:
 - 2-3 líneas, claras, sin jerga. Mencioná: cuántos users, si alguno está raro, qué dice la rule.
@@ -378,7 +477,7 @@ def build_enricher_agent(model: str = "gpt-4o-mini") -> Agent[EnricherContext]:
         name="Enricher",
         instructions=SYSTEM_PROMPT,
         model=model,
-        tools=[ldap_search_user, wazuh_get_rule],
+        tools=[ldap_search_user, wazuh_get_rule, wazuh_recent_alerts],
         output_type=EnrichmentResult,
     )
 
