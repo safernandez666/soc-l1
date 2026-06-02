@@ -65,11 +65,11 @@ async def test_resolve_exact_match(settings) -> None:
         mock.post(TOKEN_URL).mock(return_value=_token_ok())
         route = mock.get(f"{API}/api/machines").mock(
             return_value=_machines(
-                [{"id": "mid-123", "computerDnsName": "goanote2109.grupoalemana.dns"}]
+                [{"id": "mid-123", "computerDnsName": "desktop-5678.example.local"}]
             )
         )
         async with DefenderClient(settings) as dc:
-            mid = await dc.resolve_machine_id("goanote2109.grupoalemana.dns")
+            mid = await dc.resolve_machine_id("desktop-5678.example.local")
     assert mid == "mid-123"
     assert route.called
 
@@ -110,7 +110,7 @@ async def test_run_av_scan_happy_path(settings) -> None:
             return_value=httpx.Response(201, json={"id": "action-abc", "type": "RunAntiVirusScan"})
         )
         async with DefenderClient(settings) as dc:
-            r = await dc.run_av_scan("mid-123", comment="approved", host="goanote2109")
+            r = await dc.run_av_scan("mid-123", comment="approved", host="desktop-5678")
 
     assert route.called
     payload = json_mod.loads(route.calls.last.request.content)

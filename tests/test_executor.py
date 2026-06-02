@@ -361,7 +361,7 @@ async def test_protected_host_refuses_isolate() -> None:
 async def test_scan_host_dry_run_no_op() -> None:
     """DRY_RUN=true → scan_host no llama a Defender."""
     settings = _defender_settings(dry_run_mode=True)
-    actions = [ProposedAction(type="scan_host", target="goanote2109", justification="x")]
+    actions = [ProposedAction(type="scan_host", target="desktop-5678", justification="x")]
     with patch("src.executor._exec_defender_action") as mock_fn:
         results = await execute_plan(actions, ldap_cfg=None, settings=settings)
     mock_fn.assert_not_called()
@@ -373,7 +373,7 @@ async def test_scan_host_dry_run_no_op() -> None:
 async def test_scan_host_without_defender_config_fails() -> None:
     """Sin credenciales MDE → ok=False, no crash."""
     settings = Settings(openai_api_key="x")  # defender_* vacíos
-    actions = [ProposedAction(type="scan_host", target="goanote2109", justification="x")]
+    actions = [ProposedAction(type="scan_host", target="desktop-5678", justification="x")]
     results = await execute_plan(actions, ldap_cfg=None, settings=settings)
     assert results[0]["ok"] is False
     assert "Defender (MDE) no configurado" in results[0]["message"]

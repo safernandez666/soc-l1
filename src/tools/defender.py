@@ -56,7 +56,7 @@ class DefenderClient:
 
     Uso:
         async with DefenderClient(settings) as dc:
-            mid = await dc.resolve_machine_id("goanote2109")
+            mid = await dc.resolve_machine_id("desktop-5678")
             r = await dc.run_av_scan(mid, comment="SOC-L1 approved")
     """
 
