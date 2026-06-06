@@ -196,6 +196,12 @@ class Settings(BaseSettings):
     smtp_use_starttls: bool = Field(default=True)
     smtp_ssl_verify: bool = Field(default=False)  # self-signed cert del Exchange
 
+    # Notificación de cierre (post-decisión). Teams: hook futuro, vacío = deshabilitado.
+    teams_webhook_url: str = Field(
+        default="",
+        description="Incoming webhook de Teams para notificar el cierre del caso. Vacío = deshabilitado.",
+    )
+
     # Approval workflow
     approval_base_url: str = Field(
         default="http://localhost:8000",

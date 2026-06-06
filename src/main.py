@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from functools import lru_cache
 from typing import Annotated
 
@@ -29,6 +30,7 @@ from src.config import Settings
 from src.models import NormalizedAlert
 from src.normalize import normalize
 from src.security import verify_wazuh_signature
+from src.trace import PipelineTrace
 
 logger = logging.getLogger("soc-l1")
 
@@ -192,27 +194,32 @@ async def _run_triage_in_background(alert: NormalizedAlert, settings: Settings) 
             decision.confidence,
             decision.reason,
         )
-        await _dispatch_by_verdict(alert, decision, settings)
+        trace = PipelineTrace(alert.alert_id)
+        trace.add(
+            "triage", decision.reason,
+            detail=f"verdict={decision.verdict} confidence={decision.confidence}",
+        )
+        await _dispatch_by_verdict(alert, decision, settings, trace)
     except Exception:
         logger.exception("triage failed for alert id=%s", alert.alert_id)
 
 
 async def _dispatch_by_verdict(
-    alert: NormalizedAlert, decision, settings: Settings
+    alert: NormalizedAlert, decision, settings: Settings, trace: PipelineTrace
 ) -> None:
     if decision.verdict == "auto_close_benign":
         await _handle_auto_close(alert, decision)
     elif decision.verdict == "analyze":
-        await _handle_analyze(alert, decision, settings)
+        await _handle_analyze(alert, decision, settings, trace)
     elif decision.verdict == "fast_track_critical":
-        await _handle_fast_track(alert, decision, settings)
+        await _handle_fast_track(alert, decision, settings, trace)
     else:
         logger.warning(
             "unknown verdict | id=%s verdict=%s (treating as analyze)",
             alert.alert_id,
             decision.verdict,
         )
-        await _handle_analyze(alert, decision, settings)
+        await _handle_analyze(alert, decision, settings, trace)
 
 
 async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
@@ -227,7 +234,9 @@ async def _handle_auto_close(alert: NormalizedAlert, decision) -> None:
     )
 
 
-async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) -> None:
+async def _handle_analyze(
+    alert: NormalizedAlert, decision, settings: Settings, trace: PipelineTrace
+) -> None:
     """analyze: Enricher → Narrator → email approval."""
     logger.info(
         "PIPELINE_QUEUED analyze | id=%s host=%s users=%s files=%s",
@@ -236,10 +245,12 @@ async def _handle_analyze(alert: NormalizedAlert, decision, settings: Settings) 
         len(alert.users_involved),
         len(alert.files),
     )
-    await _enrich_and_request_approval(alert, decision, settings, priority="normal")
+    await _enrich_and_request_approval(alert, decision, settings, trace, priority="normal")
 
 
-async def _handle_fast_track(alert: NormalizedAlert, decision, settings: Settings) -> None:
+async def _handle_fast_track(
+    alert: NormalizedAlert, decision, settings: Settings, trace: PipelineTrace
+) -> None:
     """fast_track_critical: misma pipeline que analyze pero con priority=critical.
 
     El Enricher SÍ se ejecuta (a diferencia del diseño v1) - para incidentes críticos
@@ -252,13 +263,14 @@ async def _handle_fast_track(alert: NormalizedAlert, decision, settings: Setting
         alert.device.hostname,
         alert.severity_source,
     )
-    await _enrich_and_request_approval(alert, decision, settings, priority="critical")
+    await _enrich_and_request_approval(alert, decision, settings, trace, priority="critical")
 
 
 async def _enrich_and_request_approval(
     alert: NormalizedAlert,
     decision,
     settings: Settings,
+    trace: PipelineTrace,
     priority: str = "normal",
 ) -> None:
     """Pipeline compartido: Enricher + ThreatIntel (paralelo) → Narrator → email.
@@ -273,12 +285,12 @@ async def _enrich_and_request_approval(
         logger.info("enricher_skipped | id=%s ENABLE_ENRICHER=false", alert.alert_id)
         return
 
-    # Lanzamos Enricher y ThreatIntel en paralelo
-    enrichment_task = asyncio.create_task(_run_enricher_safely(alert, settings, priority))
+    # Lanzamos Enricher y ThreatIntel en paralelo (comparten la referencia al trace)
+    enrichment_task = asyncio.create_task(_run_enricher_safely(alert, settings, priority, trace))
 
     ti_task = None
     if settings.enable_threat_intel:
-        ti_task = asyncio.create_task(_run_threatintel_safely(alert, settings))
+        ti_task = asyncio.create_task(_run_threatintel_safely(alert, settings, trace))
 
     enrichment = await enrichment_task
     if enrichment is None:
@@ -292,12 +304,12 @@ async def _enrich_and_request_approval(
         threat_intel = await ti_task
 
     await _run_narrator_and_request_approval(
-        alert, decision, settings, enrichment, threat_intel
+        alert, decision, settings, enrichment, threat_intel, trace
     )
 
 
 async def _run_enricher_safely(
-    alert: NormalizedAlert, settings: Settings, priority: str
+    alert: NormalizedAlert, settings: Settings, priority: str, trace: PipelineTrace
 ):
     """Wrapper del Enricher con logging + manejo de errores. Devuelve None si falló."""
     try:
@@ -349,13 +361,19 @@ async def _run_enricher_safely(
             "\n".join(user_lines) if user_lines else "  (no users en enrichment)",
             rule_line,
         )
+        trace.add(
+            "enricher", enrichment.summary,
+            detail=f"users={len(enrichment.users)} flags=[{', '.join(enrichment.flags)}]",
+        )
         return enrichment
     except Exception:
         logger.exception("enricher failed for alert id=%s", alert.alert_id)
         return None
 
 
-async def _run_threatintel_safely(alert: NormalizedAlert, settings: Settings):
+async def _run_threatintel_safely(
+    alert: NormalizedAlert, settings: Settings, trace: PipelineTrace
+):
     """Wrapper del ThreatIntel. Si falla, devuelve None (no aborta el pipeline)."""
     try:
         from src.agents.threatintel import threat_intel_alert
@@ -407,6 +425,11 @@ async def _run_threatintel_safely(alert: NormalizedAlert, settings: Settings):
             "\n".join(file_lines) if file_lines else "  (no file reports)",
             "\n".join(ip_lines) if ip_lines else "  (no ip reports)",
         )
+        trace.add(
+            "threat_intel", ti.summary,
+            detail=f"files={len(ti.file_reports)} ips={len(ti.ip_reports)} "
+                   f"flags=[{', '.join(ti.flags)}]",
+        )
         return ti
     except Exception:
         logger.exception("threatintel failed for alert id=%s", alert.alert_id)
@@ -414,7 +437,8 @@ async def _run_threatintel_safely(alert: NormalizedAlert, settings: Settings):
 
 
 async def _run_narrator_and_request_approval(
-    alert: NormalizedAlert, decision, settings: Settings, enrichment, threat_intel=None
+    alert: NormalizedAlert, decision, settings: Settings, enrichment, threat_intel=None,
+    trace: PipelineTrace | None = None,
 ) -> None:
     """Narrator → guardar plan en SQLite → enviar email de approval.
 
@@ -463,9 +487,21 @@ async def _run_narrator_and_request_approval(
             "\n".join(action_lines) if action_lines else "  (no actions - monitor only)",
         )
 
+        if trace is not None:
+            trace.add(
+                "narrator", plan.executive_summary,
+                detail=f"risk={plan.risk_level} actions={len(plan.actions)}",
+            )
+
         invgate_request_id = await _create_invgate_ticket_safely(
             settings, alert, plan
         )
+
+        if trace is not None and invgate_request_id:
+            trace.add(
+                "invgate", f"Ticket #{invgate_request_id} creado en InvGate",
+                detail=f"prioridad por risk={plan.risk_level}",
+            )
 
         token = await create_pending_approval(
             settings.state_db_path,
@@ -473,6 +509,7 @@ async def _run_narrator_and_request_approval(
             plan_json=plan.model_dump_json(),
             alert_json=alert.model_dump_json(),
             invgate_request_id=invgate_request_id,
+            timeline_json=trace.to_json() if trace is not None else None,
         )
         review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
         logger.info(
@@ -598,7 +635,7 @@ async def _update_invgate_post_execution(
         for r in results:
             tag = "OK" if r.get("ok") else "FAIL"
             lines.append(
-                f"  [{tag}] {r.get('action', '?')} → {r.get('target', '?')}: "
+                f"  [{tag}] {r.get('action_type', '?')} → {r.get('target', '?')}: "
                 f"{r.get('message', '')}"
             )
 
@@ -626,17 +663,39 @@ _PAGE_STATES = {
 }
 
 
-def _render_decision_page(state_key: str, body_html: str) -> HTMLResponse:
+def _decision_meta_html(alert_id: str) -> str:
+    """Bloque prominente (alert_id + hora local) para el banner de la confirmación.
+
+    Permite que el operador distinga la decisión recién tomada de una pestaña vieja
+    de otra alerta que pueda haber quedado abierta.
+    """
+    import html as _h
+
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        '<div style="margin-top:12px; font-size:13px; line-height:1.5; opacity:0.96;">'
+        f'Alerta <strong style="font-family:monospace;">{_h.escape(alert_id)}</strong><br>'
+        f'<span style="font-size:12px; opacity:0.85;">🕐 {when}</span>'
+        "</div>"
+    )
+
+
+def _render_decision_page(
+    state_key: str, body_html: str, meta_html: str = ""
+) -> HTMLResponse:
     """Render página de decisión con el design system de soc-l1.
 
     state_key: approved | rejected | already | expired | not_found | error
     body_html: contenido del cuerpo (puede contener <code>, <strong>, etc.)
+    meta_html: bloque opcional (alert_id + hora) que se muestra prominente en el
+        banner, para que el operador distinga ESTA decisión de una pestaña vieja.
     """
     s = _PAGE_STATES.get(state_key, _PAGE_STATES["error"])
     page = f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SOC L1 · {s["title"]}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -661,19 +720,80 @@ def _render_decision_page(state_key: str, body_html: str) -> HTMLResponse:
     <div class="banner">
       <div class="icon">{s["icon"]}</div>
       <h1 class="heading">{s["title"]}</h1>
+      {meta_html}
     </div>
     <div style="padding: 28px 24px 16px;">
       <div class="body">{body_html}</div>
+    </div>
+    <div style="text-align:center; padding: 4px 24px 20px;">
+      <button onclick="cerrarPestana()"
+              style="padding:12px 28px; border:none; border-radius:6px; cursor:pointer;
+                     background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
+        ✕ Cerrar pestaña
+      </button>
+      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#64748b;">
+        Esta pestaña ya cumplió su función — podés cerrarla cuando quieras.
+      </p>
     </div>
     <div class="footer">
       <strong>SOC L1 · Wazuh + Defender</strong><br>
       pipeline multi-agente
     </div>
   </div>
+  <script>
+    function cerrarPestana() {{
+      // window.close() solo funciona en pestañas abiertas por script; el browser
+      // puede ignorarlo (Safari iOS siempre lo bloquea). Intentamos y, si la pestaña
+      // sigue viva, mostramos el hint para que el operador la cierre a mano.
+      window.open('', '_self');
+      window.close();
+      setTimeout(function() {{
+        var h = document.getElementById('cerrar-hint');
+        if (h) h.style.display = 'block';
+      }}, 250);
+    }}
+  </script>
 </body>
 </html>
 """
     return HTMLResponse(content=page)
+
+
+async def _send_closure_safely(
+    settings: Settings,
+    row: dict,
+    *,
+    decision: str,
+    execution_results: list[dict] | None,
+) -> None:
+    """Reconstruye alert/plan/timeline desde el row del approval y notifica el cierre.
+
+    Fire-and-forget: cualquier fallo se loguea, nunca propaga. execution_results None
+    = rechazo (sin bloque ejecución); [] = aprobado sin acciones; lista = ejecutado.
+    """
+    try:
+        from src.agents.narrator import NarratorPlan
+        from src.notify import notify_case_closure
+
+        alert = NormalizedAlert.model_validate_json(row["alert_json"])
+        plan = NarratorPlan.model_validate_json(row["plan_json"])
+    except Exception:
+        logger.exception(
+            "closure: no se pudo reconstruir alert/plan | alert=%s",
+            row.get("alert_id"),
+        )
+        return
+
+    await notify_case_closure(
+        settings, alert, plan,
+        decision=decision,
+        timeline_events=PipelineTrace.events_from_json(row.get("timeline_json")),
+        execution_results=execution_results,
+        decided_by_ip=row.get("decided_by_ip"),
+        decided_at=row.get("decided_at"),
+        executed_at=row.get("executed_at"),
+        invgate_request_id=row.get("invgate_request_id"),
+    )
 
 
 async def _handle_decision(
@@ -738,6 +858,7 @@ async def _handle_decision(
             "already",
             f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>). "
             "Cada link es single-use y no admite cambios.",
+            meta_html=_decision_meta_html(row["alert_id"]) if row else "",
         )
 
     # result == "ok"
@@ -758,11 +879,16 @@ async def _handle_decision(
         )
 
     if decision == "rejected":
+        # row ya trae decided_at/decided_by_ip actualizados; sin ejecución.
+        asyncio.create_task(
+            _send_closure_safely(settings, row, decision="rejected", execution_results=None)
+        )
         return _render_decision_page(
             "rejected",
             f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
             f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
             "y timestamp para audit.",
+            meta_html=_decision_meta_html(alert_id),
         )
 
     # approved → ejecutar plan
@@ -796,6 +922,8 @@ async def _handle_decision(
         )
     )
 
+    import html as _h
+
     n = len(actions_to_run)
     if n == 0:
         body = (
@@ -804,18 +932,25 @@ async def _handle_decision(
             f"No se ejecutó nada. Quedó registrado en SQLite para audit."
         )
     else:
+        actions_list = "".join(
+            f'<li style="margin:4px 0;"><strong style="font-family:monospace;">'
+            f"{_h.escape(a.type)}</strong> → <code>{_h.escape(a.target)}</code></li>"
+            for a in actions_to_run
+        )
         body = (
             f"Plan aprobado para la alerta <code>{alert_id}</code>.<br><br>"
             f"Se {'está' if n == 1 else 'están'} ejecutando <strong>{n} "
-            f"acción{'' if n == 1 else 'es'}</strong> en background"
+            f"acción{'' if n == 1 else 'es'}</strong> en background:"
+            f'<ul style="text-align:left; display:inline-block; margin:10px 0 0; '
+            f'padding-left:20px;">{actions_list}</ul>'
         )
         if skipped > 0:
             body += (
-                f" ({skipped} acción{'es' if skipped > 1 else ''} "
+                f"<br><br>({skipped} acción{'es' if skipped > 1 else ''} "
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
-        body += ". El resultado queda en logs y SQLite."
-    return _render_decision_page("approved", body)
+        body += '<br><br><span style="font-size:12px;color:#64748b;">El resultado queda en logs y SQLite.</span>'
+    return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
 
 
 async def _execute_approved_plan_in_background(
@@ -824,11 +959,17 @@ async def _execute_approved_plan_in_background(
 ) -> None:
     """actions_to_run puede ser un subset del plan original (filtrado en /decide)."""
     from src.executor import execute_plan
-    from src.state import mark_executed
+    from src.state import get_pending_approval, mark_executed
 
     if not actions_to_run:
         await mark_executed(settings.state_db_path, token, [])
         logger.info("EXECUTED | alert=%s actions=0 (nothing selected)", alert_id)
+        # Cierre: aprobado sin acciones → execution_results=[] (no None)
+        row = await get_pending_approval(settings.state_db_path, token)
+        if row:
+            asyncio.create_task(
+                _send_closure_safely(settings, row, decision="approved", execution_results=[])
+            )
         return
 
     try:
@@ -847,6 +988,14 @@ async def _execute_approved_plan_in_background(
             asyncio.create_task(
                 _update_invgate_post_execution(
                     settings, invgate_request_id, alert_id, results
+                )
+            )
+        # Cierre: re-leemos el row para tener executed_at + decided_at actualizados
+        row = await get_pending_approval(settings.state_db_path, token)
+        if row:
+            asyncio.create_task(
+                _send_closure_safely(
+                    settings, row, decision="approved", execution_results=results
                 )
             )
     except Exception:

@@ -186,8 +186,11 @@ Generá `escalate_l2` cuando:
   - Mitre techniques de Initial Access / Lateral Movement / Persistence presentes
   - rule.level >= 12
   - Múltiples flags críticos
-  - Hay un host pero ninguna acción AD aplicable
-  - L2 debería revisar antes de ejecutar (o decidir host isolation, que no está en este pipeline)
+  - Hay un host pero NINGUNA acción aplicable (ni de AD ni de host)
+  - L2 debería revisar antes de ejecutar
+  - NO escales solo porque el user no está en AD: si la alerta es de Defender con \
+device.mde_id presente, scan_host/isolate_host SÍ son acciones aplicables sobre el host, \
+independientes del user. En ese caso proponé esas acciones ADEMÁS de (no en vez de) escalate_l2
 
 Generá `notify_only` cuando:
   - La situación amerita registro pero no acción inmediata
@@ -204,7 +207,10 @@ REGLAS PARA `risk_level`:
 CONSIDERACIÓN ESPECIAL para flag "fast_track_priority":
   - El Triage marcó este incidente como fast_track_critical. Asumí mayor urgencia.
   - Si hay users encontrados en AD, sé MÁS proactivo con disable_user/force_password_change.
-  - Si no hay users en AD, considerá fuertemente escalate_l2.
+  - Si no hay users en AD pero la alerta es de Defender con device.mde_id, las acciones \
+de host (scan_host / isolate_host) son tu PRIMERA opción según la evidencia del device \
+(verdict, risk_score, remediation_status) - no escalate_l2 por defecto. Escalá solo si \
+además querés revisión humana antes de aislar.
 
 PROHIBICIONES:
   - NO inventes acciones sobre usuarios que no aparecen en enrichment.users

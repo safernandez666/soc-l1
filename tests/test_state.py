@@ -154,3 +154,35 @@ async def test_mark_executed_updates_status_and_result(db: str) -> None:
     assert row["status"] == "executed"
     assert row["executed_at"] is not None
     assert json.loads(row["execution_result"]) == result
+
+
+@pytest.mark.asyncio
+async def test_timeline_json_persisted_and_read(db: str) -> None:
+    timeline = '[{"stage":"triage","ts":"2026-06-06T00:00:00+00:00","summary":"x"}]'
+    token = await create_pending_approval(
+        db, "a", "{}", "{}", timeline_json=timeline
+    )
+    row = await get_pending_approval(db, token)
+    assert row["timeline_json"] == timeline
+    # decide_approval también devuelve la columna nueva
+    _, decided = await decide_approval(db, token, "approved")
+    assert decided["timeline_json"] == timeline
+
+
+@pytest.mark.asyncio
+async def test_timeline_json_defaults_to_null(db: str) -> None:
+    """Backwards-compat: crear sin timeline_json deja la columna NULL."""
+    token = await create_pending_approval(db, "a", "{}", "{}")
+    row = await get_pending_approval(db, token)
+    assert row["timeline_json"] is None
+
+
+@pytest.mark.asyncio
+async def test_migration_idempotent_on_existing_db(tmp_path: Path) -> None:
+    """init_db sobre una DB que ya tiene la columna timeline_json no rompe."""
+    path = str(tmp_path / "mig.db")
+    await init_db(path)
+    await init_db(path)  # segunda corrida: ALTER TABLE ya aplicado → no debe fallar
+    token = await create_pending_approval(path, "a", "{}", "{}", timeline_json="[]")
+    row = await get_pending_approval(path, token)
+    assert row["timeline_json"] == "[]"

@@ -10,12 +10,24 @@ import pytest
 from src.agents.narrator import NarratorPlan, ProposedAction
 from src.config import Settings
 from src.mailer import (
+    _build_closure_html_body,
+    _build_closure_message,
+    _build_closure_text_body,
     _build_html_body,
     _build_message,
     _build_text_body,
+    _closure_timeline,
     send_approval_email,
+    send_closure_email,
 )
 from src.normalize import normalize
+
+TIMELINE_EVENTS = [
+    {"stage": "triage", "ts": "2026-06-06T14:00:00+00:00", "summary": "ruido sospechoso", "detail": "verdict=fast_track_critical"},
+    {"stage": "enricher", "ts": "2026-06-06T14:00:05+00:00", "summary": "jdoe no en AD", "detail": "users=1"},
+    {"stage": "threat_intel", "ts": "2026-06-06T14:00:08+00:00", "summary": "VT 66/68 malicious", "detail": None},
+    {"stage": "narrator", "ts": "2026-06-06T14:00:12+00:00", "summary": "Emotet activo, aislar", "detail": "risk=critical actions=2"},
+]
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -162,3 +174,113 @@ async def test_send_propagates_smtp_exception(settings, alert, plan) -> None:
     with patch("src.mailer._send_sync", side_effect=ConnectionRefusedError("nope")):
         with pytest.raises(ConnectionRefusedError):
             await send_approval_email(settings, alert, plan, "TKN")
+
+
+# ===== Email de cierre =====
+
+
+def test_closure_timeline_adds_decision_and_execution() -> None:
+    events = _closure_timeline(
+        TIMELINE_EVENTS,
+        decision="approved",
+        decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00",
+        execution_results=[{"action_type": "isolate_host", "target": "h", "ok": True, "message": "ok"}],
+        executed_at="2026-06-06T14:05:02+00:00",
+    )
+    stages = [e["stage"] for e in events]
+    assert "decision" in stages and "execution" in stages
+    # ordenado por ts: pipeline antes que decisión/ejecución
+    assert stages.index("triage") < stages.index("decision") < stages.index("execution")
+
+
+def test_closure_timeline_rejection_has_no_execution() -> None:
+    events = _closure_timeline(
+        TIMELINE_EVENTS, decision="rejected", decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00", execution_results=None, executed_at=None,
+    )
+    assert "execution" not in [e["stage"] for e in events]
+    assert "decision" in [e["stage"] for e in events]
+
+
+def test_closure_html_contains_all_stages(alert, plan) -> None:
+    events = _closure_timeline(
+        TIMELINE_EVENTS, decision="approved", decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00",
+        execution_results=[{"action_type": "isolate_host", "target": "desktop-1234", "ok": True, "message": "DRY_RUN"}],
+        executed_at="2026-06-06T14:05:02+00:00",
+    )
+    html = _build_closure_html_body(alert, plan, events, [{"action_type": "isolate_host", "target": "desktop-1234", "ok": True, "message": "DRY_RUN"}], "approved")
+    assert "TRIAGE" in html and "ENRICHER" in html and "THREAT INTEL" in html and "NARRATOR" in html
+    assert "isolate_host" in html
+    assert "VT 66/68 malicious" in html
+
+
+def test_closure_text_rejection_omits_execution(alert, plan) -> None:
+    events = _closure_timeline(
+        TIMELINE_EVENTS, decision="rejected", decided_by_ip="9.9.9.9",
+        decided_at="2026-06-06T14:05:00+00:00", execution_results=None, executed_at=None,
+    )
+    body = _build_closure_text_body(alert, plan, events, None, "rejected")
+    assert "CASO CERRADO (RECHAZADO)" in body
+    assert "EJECUCIÓN" not in body
+
+
+def test_closure_subject_distinguishes_decision(settings, alert, plan) -> None:
+    msg = _build_closure_message(
+        settings, alert, plan, decision="approved", timeline_events=TIMELINE_EVENTS,
+        execution_results=[], decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00", executed_at="2026-06-06T14:05:02+00:00",
+    )
+    assert "CERRADO: APROBADO" in msg["Subject"]
+    assert "desktop-1234" in msg["Subject"]
+
+
+def test_closure_html_escapes_user_data(alert) -> None:
+    evil_plan = NarratorPlan(
+        executive_summary="<script>alert('xss')</script>", risk_level="low",
+        actions=[], rationale="r",
+    )
+    events = _closure_timeline(
+        [{"stage": "triage", "ts": "2026-06-06T14:00:00+00:00", "summary": "<b>x</b>", "detail": None}],
+        decision="rejected", decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00", execution_results=None, executed_at=None,
+    )
+    html = _build_closure_html_body(alert, evil_plan, events, None, "rejected")
+    assert "<script>" not in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
+@pytest.mark.asyncio
+async def test_closure_skips_when_smtp_not_configured(alert, plan) -> None:
+    s = Settings(openai_api_key="test", smtp_host="", smtp_to_approvers="")
+    with patch("src.mailer._send_sync") as mocked:
+        await send_closure_email(
+            s, alert, plan, decision="approved", timeline_events=[],
+            execution_results=[], decided_by_ip=None, decided_at=None, executed_at=None,
+        )
+        mocked.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_closure_does_not_propagate_smtp_exception(settings, alert, plan) -> None:
+    """A diferencia del approval, el cierre NO re-eleva: es fire-and-forget."""
+    with patch("src.mailer._send_sync", side_effect=ConnectionRefusedError("nope")):
+        # No debe levantar
+        await send_closure_email(
+            settings, alert, plan, decision="approved", timeline_events=TIMELINE_EVENTS,
+            execution_results=[], decided_by_ip="1.2.3.4",
+            decided_at="2026-06-06T14:05:00+00:00", executed_at="2026-06-06T14:05:02+00:00",
+        )
+
+
+@pytest.mark.asyncio
+async def test_closure_invokes_smtp_when_configured(settings, alert, plan) -> None:
+    with patch("src.mailer._send_sync") as mocked:
+        await send_closure_email(
+            settings, alert, plan, decision="approved", timeline_events=TIMELINE_EVENTS,
+            execution_results=[{"action_type": "isolate_host", "target": "h", "ok": True, "message": "ok"}],
+            decided_by_ip="1.2.3.4", decided_at="2026-06-06T14:05:00+00:00",
+            executed_at="2026-06-06T14:05:02+00:00",
+        )
+        mocked.assert_called_once()

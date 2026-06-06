@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     selected_actions TEXT,
     executed_at TEXT,
     execution_result TEXT,
-    invgate_request_id INTEGER
+    invgate_request_id INTEGER,
+    timeline_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_alert_id ON pending_approvals(alert_id);
@@ -59,6 +60,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(sta
 _MIGRATIONS = [
     "ALTER TABLE pending_approvals ADD COLUMN selected_actions TEXT",
     "ALTER TABLE pending_approvals ADD COLUMN invgate_request_id INTEGER",
+    "ALTER TABLE pending_approvals ADD COLUMN timeline_json TEXT",
 ]
 
 ApprovalStatus = str  # 'pending' | 'approved' | 'rejected' | 'expired' | 'executed'
@@ -102,14 +104,17 @@ def _create_pending_sync(
     plan_json: str,
     alert_json: str,
     invgate_request_id: int | None = None,
+    timeline_json: str | None = None,
 ) -> str:
     token = secrets.token_urlsafe(32)
     with _connect(db_path) as conn:
         conn.execute(
             "INSERT INTO pending_approvals "
-            "(token, alert_id, plan_json, alert_json, status, created_at, invgate_request_id) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-            (token, alert_id, plan_json, alert_json, _now(), invgate_request_id),
+            "(token, alert_id, plan_json, alert_json, status, created_at, "
+            " invgate_request_id, timeline_json) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+            (token, alert_id, plan_json, alert_json, _now(),
+             invgate_request_id, timeline_json),
         )
     return token
 
@@ -213,15 +218,17 @@ async def create_pending_approval(
     plan_json: str,
     alert_json: str,
     invgate_request_id: int | None = None,
+    timeline_json: str | None = None,
 ) -> str:
     """Crea un pending approval y devuelve el token único.
 
     invgate_request_id: id del ticket InvGate ya creado (si lo está). Se persiste
     para que /approve, /reject y el executor puedan agregar comentarios al mismo ticket.
+    timeline_json: hitos del pipeline (PipelineTrace.to_json()) para el email de cierre.
     """
     return await asyncio.to_thread(
         _create_pending_sync, db_path, alert_id, plan_json, alert_json,
-        invgate_request_id,
+        invgate_request_id, timeline_json,
     )
 
 

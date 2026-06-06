@@ -19,6 +19,7 @@ import html
 import logging
 import smtplib
 import ssl
+from datetime import datetime
 from email.message import EmailMessage
 from typing import Any
 
@@ -463,3 +464,323 @@ async def send_approval_email(
             settings.smtp_to_approvers,
         )
         raise
+
+
+# ===== Email de cierre de caso (post-decisión) con timeline por agente =====
+
+# stage del PipelineTrace → (badge style, label legible)
+_STAGE_META = {
+    "triage":       ("info",    "🔍 TRIAGE"),
+    "enricher":     ("default", "🧩 ENRICHER"),
+    "threat_intel": ("warning", "🛰️ THREAT INTEL"),
+    "narrator":     ("success", "🧠 NARRATOR"),
+    "invgate":      ("info",    "🎫 TICKET"),
+    "decision":     ("info",    "👤 DECISIÓN"),
+    "execution":    ("default", "⚙️ EJECUCIÓN"),
+}
+
+
+def _fmt_clock(iso: str | None) -> str:
+    """ISO8601 UTC → 'HH:MM:SS' en hora local del server. Fallback al string crudo."""
+    if not iso:
+        return "--:--:--"
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
+def _decision_label(decision: str) -> str:
+    return {"approved": "APROBADO", "rejected": "RECHAZADO"}.get(decision, decision.upper())
+
+
+def _closure_timeline(
+    timeline_events: list[dict],
+    *,
+    decision: str,
+    decided_by_ip: str | None,
+    decided_at: str | None,
+    execution_results: list[dict] | None,
+    executed_at: str | None,
+) -> list[dict]:
+    """Combina los hitos del pipeline con la decisión humana y la ejecución.
+
+    Devuelve una lista uniforme de {stage, ts, summary, detail} ordenada por ts.
+    execution_results None → rechazo (sin fila de ejecución). [] → 0 acciones.
+    """
+    events: list[dict] = list(timeline_events)
+
+    events.append({
+        "stage": "decision",
+        "ts": decided_at or "",
+        "summary": f"Plan {_decision_label(decision)} por {decided_by_ip or 'IP desconocida'}",
+        "detail": None,
+    })
+
+    if execution_results is not None:
+        ok = sum(1 for r in execution_results if r.get("ok"))
+        fail = len(execution_results) - ok
+        if execution_results:
+            summary = f"Ejecución completada: {ok} OK / {fail} FAIL"
+        else:
+            summary = "Aprobado sin acciones seleccionadas (0 ejecutadas)"
+        events.append({
+            "stage": "execution",
+            "ts": executed_at or "",
+            "summary": summary,
+            "detail": None,
+        })
+
+    # Orden estable por ts (ISO ordena lexicográficamente). Los ts vacíos al final.
+    events.sort(key=lambda e: e.get("ts") or "~")
+    return events
+
+
+def _timeline_rows_html(events: list[dict]) -> str:
+    """Filas <tr> de la tabla de timeline (una por hito)."""
+    rows = []
+    for e in events:
+        style, label = _STAGE_META.get(e.get("stage", ""), ("default", (e.get("stage") or "?").upper()))
+        detail_html = (
+            f"<div style='font-size:11px;color:#64748b;margin-top:3px;'>{_esc(e.get('detail'))}</div>"
+            if e.get("detail") else ""
+        )
+        rows.append(
+            "<tr>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;white-space:nowrap;"
+            f"vertical-align:top;font:bold 12px monospace;color:#475569;'>{_fmt_clock(e.get('ts'))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;white-space:nowrap;"
+            f"vertical-align:top;'>{_badge(label, style)}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;"
+            f"font-size:13px;color:#0f172a;line-height:1.5;'>{_esc(e.get('summary'))}{detail_html}</td>"
+            "</tr>"
+        )
+    return "\n".join(rows)
+
+
+def _execution_rows_html(execution_results: list[dict] | None) -> str:
+    """Sub-listado por acción ejecutada. Vacío si None (rechazo) o lista vacía."""
+    if not execution_results:
+        return ""
+    items = []
+    for r in execution_results:
+        ok = r.get("ok")
+        tag_style = "success" if ok else "danger"
+        tag = "OK" if ok else "FAIL"
+        msg = f" <span style='color:#64748b;'>— {_esc(r.get('message'))}</span>" if r.get("message") else ""
+        items.append(
+            f"<li style='margin:6px 0;'>{_badge(tag, tag_style)} "
+            f"<strong style='font-family:monospace;'>{_esc(r.get('action_type'))}</strong> → "
+            f"<code style='background:#e0f2fe;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
+            f"{msg}</li>"
+        )
+    return (
+        "<div style='background:#f8fafc;padding:16px;margin:20px;border-radius:8px;"
+        "border-left:4px solid #475569;'>"
+        "<div style='font-weight:bold;color:#0f172a;margin-bottom:8px;font-size:14px;'>"
+        "⚙️ Resultado de la ejecución</div>"
+        f"<ul style='margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7;'>{''.join(items)}</ul>"
+        "</div>"
+    )
+
+
+def _build_closure_text_body(
+    alert: NormalizedAlert,
+    plan: NarratorPlan,
+    events: list[dict],
+    execution_results: list[dict] | None,
+    decision: str,
+) -> str:
+    lines: list[str] = []
+    lines.append(f"SOC L1 - CASO CERRADO ({_decision_label(decision)})")
+    lines.append(f"Risk: {plan.risk_level.upper()}")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append("CONTEXTO")
+    lines.append(f"  Alert ID:  {alert.alert_id}")
+    lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}")
+    lines.append(f"  Title:     {alert.title}")
+    lines.append("")
+    lines.append("TIMELINE")
+    for e in events:
+        _, label = _STAGE_META.get(e.get("stage", ""), ("", (e.get("stage") or "?").upper()))
+        clean = label.split(" ", 1)[-1] if " " in label else label
+        lines.append(f"  {_fmt_clock(e.get('ts'))}  [{clean}]  {e.get('summary', '')}")
+        if e.get("detail"):
+            lines.append(f"            {e['detail']}")
+    lines.append("")
+    if execution_results:
+        lines.append("EJECUCIÓN")
+        for r in execution_results:
+            tag = "OK" if r.get("ok") else "FAIL"
+            lines.append(
+                f"  [{tag}] {r.get('action_type', '?')} → {r.get('target', '?')}: "
+                f"{r.get('message', '')}"
+            )
+        lines.append("")
+    lines.append("=" * 60)
+    lines.append("SOC L1 - notificación de cierre (no responder)")
+    return "\n".join(lines)
+
+
+def _build_closure_html_body(
+    alert: NormalizedAlert,
+    plan: NarratorPlan,
+    events: list[dict],
+    execution_results: list[dict] | None,
+    decision: str,
+    invgate_request_id: int | None = None,
+) -> str:
+    sev_cfg = SEV_STYLES.get(plan.risk_level, _DEFAULT_SEV)
+    color = sev_cfg["bg"]
+    decision_style = "success" if decision == "approved" else "danger"
+    decision_badge = _badge(f"CASO CERRADO · {_decision_label(decision)}", decision_style)
+    risk_badge_html = _badge(plan.risk_level.upper(), _risk_badge_style(plan.risk_level))
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SOC L1 — Caso cerrado {_esc(alert.alert_id)}</title>
+  <style>
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
+    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
+    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
+    .title {{ font-size: 22px; font-weight: bold; margin-bottom: 8px; color: #0f172a; }}
+    .tl-table {{ width: 100%; border-collapse: collapse; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+    code {{ font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title">{_esc(alert.title)}</div>
+      <div style="font-size:13px;color:#64748b;margin-top:4px;">
+        Alerta <code>{_esc(alert.alert_id)}</code> · host <strong>{_esc(alert.device.hostname)}</strong>
+      </div>
+      <div style="margin-top:10px;">
+        {decision_badge}
+        {risk_badge_html}
+        {_badge(f"TICKET #{invgate_request_id}", "info") if invgate_request_id else ""}
+      </div>
+    </div>
+
+    <div style="padding:0 24px;">
+      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin:20px 0 8px;">
+        📝 Resumen ejecutivo
+      </div>
+      <div style="color:#334155;font-size:14px;line-height:1.6;white-space:pre-line;">
+        {_esc(plan.executive_summary)}
+      </div>
+    </div>
+
+    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
+      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
+        🕐 Timeline del caso
+      </div>
+      <table class="tl-table">
+        {_timeline_rows_html(events)}
+      </table>
+    </div>
+
+    {_execution_rows_html(execution_results)}
+
+    <div class="footer">
+      <strong>SOC L1 · Wazuh + Defender</strong> • Pipeline multi-agente<br>
+      Notificación de cierre — generada automáticamente, no responder.
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def _build_closure_message(
+    settings: Settings,
+    alert: NormalizedAlert,
+    plan: NarratorPlan,
+    *,
+    decision: str,
+    timeline_events: list[dict],
+    execution_results: list[dict] | None,
+    decided_by_ip: str | None,
+    decided_at: str | None,
+    executed_at: str | None,
+    invgate_request_id: int | None = None,
+) -> EmailMessage:
+    events = _closure_timeline(
+        timeline_events,
+        decision=decision,
+        decided_by_ip=decided_by_ip,
+        decided_at=decided_at,
+        execution_results=execution_results,
+        executed_at=executed_at,
+    )
+    ticket_tag = f" [ticket #{invgate_request_id}]" if invgate_request_id else ""
+    msg = EmailMessage()
+    msg["Subject"] = (
+        f"[SOC L1][CERRADO: {_decision_label(decision)}][{plan.risk_level.upper()}] "
+        f"{alert.device.hostname or 'unknown'} - {alert.title[:60]}{ticket_tag}"
+    )
+    msg["From"] = settings.smtp_from
+    msg["To"] = settings.smtp_to_approvers
+    msg.set_content(_build_closure_text_body(alert, plan, events, execution_results, decision))
+    msg.add_alternative(
+        _build_closure_html_body(
+            alert, plan, events, execution_results, decision,
+            invgate_request_id=invgate_request_id,
+        ),
+        subtype="html",
+    )
+    return msg
+
+
+async def send_closure_email(
+    settings: Settings,
+    alert: NormalizedAlert,
+    plan: NarratorPlan,
+    *,
+    decision: str,
+    timeline_events: list[dict],
+    execution_results: list[dict] | None,
+    decided_by_ip: str | None,
+    decided_at: str | None,
+    executed_at: str | None,
+    invgate_request_id: int | None = None,
+) -> None:
+    """Email de cierre con timeline por agente. Fire-and-forget.
+
+    A diferencia de send_approval_email, NO re-raisea ante fallo de SMTP: el cierre es
+    una notificación, no debe romper el flujo de decisión/ejecución que ya ocurrió.
+    Skip silencioso si SMTP no está configurado.
+    """
+    if not settings.smtp_host or not settings.smtp_to_approvers:
+        logger.warning(
+            "mailer: SMTP no configurado - skip closure email para alert=%s",
+            alert.alert_id,
+        )
+        return
+
+    try:
+        msg = _build_closure_message(
+            settings, alert, plan,
+            decision=decision,
+            timeline_events=timeline_events,
+            execution_results=execution_results,
+            decided_by_ip=decided_by_ip,
+            decided_at=decided_at,
+            executed_at=executed_at,
+            invgate_request_id=invgate_request_id,
+        )
+        await asyncio.to_thread(_send_sync, settings, msg)
+        logger.info(
+            "mailer: closure email enviado | alert=%s decision=%s to=%s subject=%r",
+            alert.alert_id, decision, settings.smtp_to_approvers, msg["Subject"],
+        )
+    except Exception:
+        logger.exception(
+            "mailer: closure send failed | alert=%s decision=%s",
+            alert.alert_id, decision,
+        )
