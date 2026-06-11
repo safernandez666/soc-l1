@@ -19,15 +19,18 @@ _NUMERIC_RULE_ID = re.compile(r"^\d+$")
 
 def _condition_xml(condition: dict[str, str]) -> str:
     lines: list[str] = []
+    quote_entities = {'"': "&quot;"}
     if agent_name := condition.get("agent.name"):
+        safe = escape(f"^{agent_name}$", quote_entities)
         lines.append(
-            f"    <field name={quoteattr('agent.name')}>{escape(f'^{agent_name}$')}</field>"
+            f"    <field name={quoteattr('agent.name')}>{safe}</field>"
         )
     if srcip := condition.get("srcip"):
-        lines.append(f"    <srcip>{escape(srcip)}</srcip>")
+        lines.append(f"    <srcip>{escape(srcip, quote_entities)}</srcip>")
     if user := condition.get("user"):
+        safe = escape(f"^{user}$", quote_entities)
         lines.append(
-            f"    <field name={quoteattr('data.srcuser')}>{escape(f'^{user}$')}</field>"
+            f"    <field name={quoteattr('data.srcuser')}>{safe}</field>"
         )
     return "\n".join(lines)
 
@@ -52,10 +55,12 @@ def render_local_rule(
     body = _condition_xml(condition)
     n = count if count is not None else bucket.count
     generated = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    quote_entities = {'"': "&quot;"}
     meta = escape(
-        f"CleanSwarm candidate for noisy rule {rid}; hash={bucket_hash}; count={n}; generated={generated}; review before enabling"
+        f"CleanSwarm candidate for noisy rule {rid}; hash={bucket_hash}; count={n}; generated={generated}; review before enabling",
+        quote_entities,
     )
-    description = escape(f"CleanSwarm suppress noisy {rid} conditionally")
+    description = escape(f"CleanSwarm suppress noisy {rid} conditionally", quote_entities)
 
     return (
         f"<!-- {meta} -->\n"
