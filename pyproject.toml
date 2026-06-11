@@ -11,6 +11,8 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "httpx>=0.27",
     "openai-agents>=0.0.10",
+    "pyyaml>=6.0",
+    "psutil>=5.9",
 ]
 
 [project.scripts]
