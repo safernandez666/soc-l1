@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,8 +20,40 @@ from src.wazuh_health.store.db import connect, migrate
 from src.wazuh_health.store.findings_store import FindingsStore
 
 
+def load_env_file(path: str | Path | None) -> Path | None:
+    """Load environment variables from a .env file.
+
+    Resolution order (first hit wins):
+      1. Explicit `path` argument (from --env-file CLI flag)
+      2. WAZUH_HEALTH_ENV_FILE env var
+      3. ./.env in the current working directory
+
+    Returns the path that was loaded, or None if nothing was found.
+    Existing environment variables are NOT overwritten (override=False).
+    """
+    from dotenv import load_dotenv
+
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    if env_override := os.getenv("WAZUH_HEALTH_ENV_FILE"):
+        candidates.append(Path(env_override))
+    candidates.append(Path.cwd() / ".env")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+            return candidate
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="wazuh-health")
+    p.add_argument(
+        "--env-file",
+        default=None,
+        help="Path to a .env file (default: ./.env or $WAZUH_HEALTH_ENV_FILE)",
+    )
     sub = p.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve")
     serve.add_argument("--port", type=int, default=8787)
@@ -57,6 +90,7 @@ def _make_source(cfg: HealthConfig, alerts_path_override: str | None = None):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    load_env_file(args.env_file)
     cfg = load_config()
 
     if args.command == "migrate":

@@ -30,19 +30,67 @@ cleanswarm analyze --alerts-path /var/ossec/logs/alerts/alerts.json
 
 Layered: env → `/etc/wazuh-health/config.yaml` → versioned defaults.
 
-Key env vars (see also the design spec):
+### Where env vars are loaded from
+
+The CLI loads a `.env` file at boot. Resolution order (first hit wins, existing
+exported vars are NEVER overwritten):
+
+1. `--env-file /path/to/file` — explicit flag
+2. `WAZUH_HEALTH_ENV_FILE` env var
+3. `./.env` in the current working directory
+
+For systemd, `EnvironmentFile=/etc/wazuh-health/wazuh-health.env` in the unit
+loads the vars BEFORE the process starts — no `.env` lookup happens at runtime
+in that case (already in the process environment).
+
+**Recommended layout in the Wazuh server:**
+
+```bash
+# Copy your existing .env to the canonical location
+sudo install -m 600 -o wazuh-health -g wazuh-health \
+    /path/to/your/.env /etc/wazuh-health/wazuh-health.env
+
+# Run interactively (picks up ./.env in CWD)
+cd /opt/soc-l1 && uv run wazuh-health once
+
+# Run with an explicit file from anywhere
+uv run wazuh-health --env-file /etc/wazuh-health/wazuh-health.env once
+```
+
+### Key env vars
+
+The CLI honors **the same variables you already have in `.env`** for the
+SOC-L1 SOAR — it does not duplicate or shadow them:
 
 | Variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI key for agents |
-| `OPENAI_MODEL_LIGHT` | Model for domain agents (default `gpt-4o-mini`) |
-| `OPENAI_MODEL_HEAVY` | Model for the reporter (default `gpt-4o`) |
-| `WAZUH_HEALTH_SOURCE` | `local_fs` or `wazuh_api` |
-| `WAZUH_HEALTH_DB_PATH` | SQLite state file (default `/var/lib/wazuh-health/state.db`) |
-| `WAZUH_HEALTH_REPORT_DIR` | Where Markdown reports land |
-| `WAZUH_HEALTH_LLM_DAILY_CAP` | Hard cap on LLM invocations per agent per day |
-| `WAZUH_HEALTH_PSEUDONYMIZE` | Mask IPs/users before LLM (default `true`) |
-| `WAZUH_API_HOST/PORT/USER/PASSWORD` | Used when `SOURCE=wazuh_api` |
+**Already in your SOC-L1 `.env` — reused:**
+
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | Used by `_OpenAIAgentsRunner` when a real LLM call is made |
+| `OPENAI_MODEL_LIGHT` | Model for HygieneAgent / CapacityAgent / CoverageAgent (e.g. `gpt-4o-mini`) |
+| `OPENAI_MODEL_HEAVY` | Model for ReporterAgent (e.g. `gpt-4o`) |
+| `WAZUH_API_HOST` | Manager API host (e.g. `192.168.38.60`) |
+| `WAZUH_API_PORT` | Manager API port (default `55000`) |
+| `WAZUH_API_USER` / `WAZUH_API_PASSWORD` | Used only when `WAZUH_HEALTH_SOURCE=wazuh_api` |
+
+**Not read by `wazuh-health`** (kept exclusive to the live SOAR — enforced by `tests/test_boundaries.py`):
+`WAZUH_WEBHOOK_SECRET`, `ENABLE_TRIAGE`.
+
+**New variables specific to `wazuh-health` (all optional, sensible defaults):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WAZUH_HEALTH_SOURCE` | `local_fs` | `local_fs` or `wazuh_api` |
+| `WAZUH_HEALTH_DB_PATH` | `/var/lib/wazuh-health/state.db` | SQLite state file |
+| `WAZUH_HEALTH_REPORT_DIR` | `/var/log/wazuh-health/reports` | Markdown reports location |
+| `WAZUH_HEALTH_LLM_DAILY_CAP` | `50` | Hard cap on LLM invocations per agent per day |
+| `WAZUH_HEALTH_PSEUDONYMIZE` | `true` | Mask IPs/users before LLM |
+| `WAZUH_HEALTH_SLACK_WEBHOOK` | _(unset)_ | Slack webhook URL (notifier disabled if empty) |
+| `WAZUH_HEALTH_EMAIL_TO` | _(unset)_ | Recipient for periodic reports |
+| `WAZUH_HEALTH_CONFIG_PATH` | _(unset)_ | Override YAML config path |
+| `WAZUH_HEALTH_ENV_FILE` | _(unset)_ | Override `.env` location |
 
 ## Architecture
 
