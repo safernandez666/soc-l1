@@ -102,7 +102,12 @@ class EmailNotifyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     to: str = ""
+    sender: str = "wazuh-health@localhost"
     smtp_host: str = "localhost"
+    smtp_port: int = 25
+    smtp_user: str = ""
+    smtp_password: str = ""
+    use_tls: bool = False
 
 
 class FilesystemNotifyConfig(BaseModel):
@@ -129,7 +134,7 @@ class HealthConfig(BaseModel):
     notify: NotifyConfig = NotifyConfig()
 
 
-_ENV_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-(.+?))?\}")
+_ENV_VAR_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-(.*?))?\}")
 
 
 def _expand(value: Any) -> Any:

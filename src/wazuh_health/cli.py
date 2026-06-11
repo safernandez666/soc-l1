@@ -70,6 +70,41 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _build_email_notifier(cfg: HealthConfig):
+    """Return an `EmailNotifier` if a recipient is configured, else None.
+
+    Email is auto-enabled when `notify.email.to` is non-empty (which itself is
+    sourced from `WAZUH_HEALTH_EMAIL_TO`). No need to set `notify.email.enabled`
+    separately — having a recipient is the toggle.
+    """
+    if not cfg.notify.email.to:
+        return None
+    from src.wazuh_health.notify.email import EmailNotifier
+    return EmailNotifier(
+        to=cfg.notify.email.to,
+        smtp_host=cfg.notify.email.smtp_host,
+        smtp_port=cfg.notify.email.smtp_port,
+        sender=cfg.notify.email.sender,
+        smtp_user=cfg.notify.email.smtp_user or None,
+        smtp_password=cfg.notify.email.smtp_password or None,
+        use_tls=cfg.notify.email.use_tls,
+    )
+
+
+def _maybe_send_digest_email(cfg: HealthConfig, audit: AuditStore) -> bool:
+    """Send a deterministic (no-LLM) digest if email is configured.
+
+    Returns True if a mail was sent, False otherwise.
+    """
+    notifier = _build_email_notifier(cfg)
+    if notifier is None:
+        return False
+    from src.wazuh_health.digest import build_email_digest
+    subject, markdown = build_email_digest(audit)
+    notifier.notify_digest(subject=subject, markdown=markdown)
+    return True
+
+
 def _make_source(cfg: HealthConfig, alerts_path_override: str | None = None):
     if cfg.source.backend == "wazuh_api":
         import os
@@ -115,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
                       HygieneProbe(source=src),
                       CoverageProbe(source=src)):
             audit.record_probe_run(probe.run())
+        if _maybe_send_digest_email(cfg, audit):
+            print(f"email digest sent to {cfg.notify.email.to}")
         return 0
 
     if args.command == "report":
@@ -132,6 +169,11 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out).write_text(out, encoding="utf-8")
         else:
             print(out)
+        # Mail the LLM-generated report when email is configured.
+        notifier = _build_email_notifier(cfg)
+        if notifier is not None:
+            notifier.notify_report(report, markdown=out)
+            print(f"email report sent to {cfg.notify.email.to}", file=sys.stderr)
         return 0
 
     if args.command == "serve":

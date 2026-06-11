@@ -73,6 +73,14 @@ notify:
     webhook_url: ""
     severity_floor: warning
   email:
+    # `enabled` is auto-derived from WAZUH_HEALTH_EMAIL_TO presence at runtime
+    # (see cli.py _maybe_send_email). YAML default left false so structure stays
+    # backwards compatible.
     enabled: false
-    to: ""
-    smtp_host: localhost
+    to: ${WAZUH_HEALTH_EMAIL_TO:-}
+    sender: ${WAZUH_HEALTH_EMAIL_FROM:-wazuh-health@localhost}
+    smtp_host: ${WAZUH_HEALTH_SMTP_HOST:-localhost}
+    smtp_port: ${WAZUH_HEALTH_SMTP_PORT:-25}
+    smtp_user: ${WAZUH_HEALTH_SMTP_USER:-}
+    smtp_password: ${WAZUH_HEALTH_SMTP_PASSWORD:-}
+    use_tls: ${WAZUH_HEALTH_SMTP_TLS:-false}

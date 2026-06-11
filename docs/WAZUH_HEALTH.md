@@ -88,9 +88,42 @@ SOC-L1 SOAR — it does not duplicate or shadow them:
 | `WAZUH_HEALTH_LLM_DAILY_CAP` | `50` | Hard cap on LLM invocations per agent per day |
 | `WAZUH_HEALTH_PSEUDONYMIZE` | `true` | Mask IPs/users before LLM |
 | `WAZUH_HEALTH_SLACK_WEBHOOK` | _(unset)_ | Slack webhook URL (notifier disabled if empty) |
-| `WAZUH_HEALTH_EMAIL_TO` | _(unset)_ | Recipient for periodic reports |
+| `WAZUH_HEALTH_EMAIL_TO` | _(unset)_ | Recipient. **Setting this auto-enables email notifications** |
+| `WAZUH_HEALTH_EMAIL_FROM` | `wazuh-health@localhost` | Sender address |
+| `WAZUH_HEALTH_SMTP_HOST` | `localhost` | SMTP relay host (e.g. `smtp.gmail.com`) |
+| `WAZUH_HEALTH_SMTP_PORT` | `25` | `587` for STARTTLS, `465` for implicit TLS |
+| `WAZUH_HEALTH_SMTP_USER` | _(unset)_ | If set, AUTH is performed |
+| `WAZUH_HEALTH_SMTP_PASSWORD` | _(unset)_ | App password / SMTP password |
+| `WAZUH_HEALTH_SMTP_TLS` | `false` | Set to `true` to issue STARTTLS after connect |
 | `WAZUH_HEALTH_CONFIG_PATH` | _(unset)_ | Override YAML config path |
 | `WAZUH_HEALTH_ENV_FILE` | _(unset)_ | Override `.env` location |
+
+### Email notifications
+
+Email is **auto-enabled when `WAZUH_HEALTH_EMAIL_TO` is set** (no separate
+`enabled=true` flag needed). Two behaviors:
+
+- `wazuh-health once` → after the 3 probes run, sends a **template digest**
+  (Markdown, no LLM call, no token spend). Subject summarises the state
+  (e.g. `Wazuh Health digest — ⚠ disk 12%, 3 hygiene recs`).
+- `wazuh-health report` → after the ReporterAgent runs (heavy LLM model),
+  sends the JSON report by email AND prints to stdout / writes `--out`.
+
+Example for Gmail:
+
+```bash
+WAZUH_HEALTH_EMAIL_TO=ops@example.com
+WAZUH_HEALTH_EMAIL_FROM=wazuh-health@example.com
+WAZUH_HEALTH_SMTP_HOST=smtp.gmail.com
+WAZUH_HEALTH_SMTP_PORT=587
+WAZUH_HEALTH_SMTP_USER=wazuh-health@example.com
+WAZUH_HEALTH_SMTP_PASSWORD=<gmail app password>
+WAZUH_HEALTH_SMTP_TLS=true
+```
+
+For Office 365: same, but `WAZUH_HEALTH_SMTP_HOST=smtp.office365.com` and
+`WAZUH_HEALTH_SMTP_PORT=587`. For a relay on `localhost:25`, leave `_USER`
+empty and `_TLS=false` (the defaults).
 
 ## Architecture
 
