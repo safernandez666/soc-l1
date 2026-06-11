@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,12 +11,21 @@ Severity = Literal["info", "warning", "critical"]
 
 
 class DomainFinding(BaseModel):
+    """Single LLM-emitted finding.
+
+    Length limits (title, body_md) and evidence value shape are intentionally
+    NOT enforced at the contract layer; the ``sanitize_finding`` agent is the
+    single enforcement point (defense-in-depth: contract is permissive,
+    sanitizer narrows). Downstream consumers should treat sanitized findings
+    as having ``dict[str, str | int | float]`` evidence.
+    """
+
     model_config = ConfigDict(extra="forbid")
     domain: Domain
     severity: Severity
-    title: str = Field(max_length=120)
-    body_md: str = Field(max_length=4000)
-    evidence: dict[str, str | int | float] = Field(default_factory=dict)
+    title: str
+    body_md: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
     suggested_action: str
     proposed_artifact: str | None = None
     hash_key: str = ""  # filled by daemon, never trusted from LLM
