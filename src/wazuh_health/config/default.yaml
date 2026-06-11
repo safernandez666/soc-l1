@@ -1,0 +1,86 @@
+source:
+  backend: ${WAZUH_HEALTH_SOURCE:-local_fs}
+  local_fs:
+    alerts_path: /var/ossec/logs/alerts/alerts.json
+    rotated_glob: null
+    ossec_conf: /var/ossec/etc/ossec.conf
+    client_keys: /var/ossec/etc/client.keys
+  wazuh_api:
+    host: ${WAZUH_API_HOST}
+    port: 55000
+    verify_ssl: true
+
+scheduler:
+  jitter_seconds: 30
+  jobs:
+    capacity:
+      interval_seconds: 300
+    coverage:
+      interval_seconds: 900
+    hygiene:
+      interval_seconds: 3600
+    reporter:
+      interval_seconds: 21600
+
+thresholds:
+  capacity:
+    - metric: disk.var_ossec.free_pct
+      rule: "value < 15"
+      severity: warning
+    - metric: disk.var_ossec.free_pct
+      rule: "value < 5"
+      severity: critical
+    - metric: indexer.heap_pct
+      rule: "value > 85"
+      severity: warning
+  hygiene:
+    - metric: noise.combined_reduction_pct
+      rule: "value > 10"
+      severity: info
+  coverage:
+    - metric: agents.disconnected
+      rule: "value >= 3 streak >= 2"
+      severity: warning
+
+cooldowns:
+  default_minutes: 360
+  by_metric:
+    indexer.heap_pct: 60
+
+llm:
+  light_model: ${OPENAI_MODEL_LIGHT}
+  heavy_model: ${OPENAI_MODEL_HEAVY}
+  max_tool_calls_per_turn: 6
+  input_token_cap: 8000
+  output_token_cap: 2000
+  timeout_seconds: 60
+  daily_cap_per_agent: 50
+
+privacy:
+  pseudonymize: true
+  pseudonymize_fields: [srcip, dstip, agent.name, user]
+
+storage:
+  db_path: ${WAZUH_HEALTH_DB_PATH:-/var/lib/wazuh-health/state.db}
+  report_dir: ${WAZUH_HEALTH_REPORT_DIR:-/var/log/wazuh-health/reports}
+  retention_days: 30
+
+notify:
+  filesystem:
+    enabled: true
+  slack:
+    enabled: false
+    webhook_url: ""
+    severity_floor: warning
+  email:
+    # `enabled` is auto-derived from WAZUH_HEALTH_EMAIL_TO presence at runtime
+    # (see cli.py _maybe_send_email). YAML default left false so structure stays
+    # backwards compatible.
+    enabled: false
+    to: ${WAZUH_HEALTH_EMAIL_TO:-}
+    sender: ${WAZUH_HEALTH_EMAIL_FROM:-wazuh-health@localhost}
+    smtp_host: ${WAZUH_HEALTH_SMTP_HOST:-localhost}
+    smtp_port: ${WAZUH_HEALTH_SMTP_PORT:-25}
+    smtp_user: ${WAZUH_HEALTH_SMTP_USER:-}
+    smtp_password: ${WAZUH_HEALTH_SMTP_PASSWORD:-}
+    use_tls: ${WAZUH_HEALTH_SMTP_TLS:-false}
