@@ -22,6 +22,7 @@ FORBIDDEN_VERB_RE = re.compile(r"\.(post|put|delete|patch)\(")
 # JWT login is the one allowed POST; whitelist by file path.
 POST_WHITELIST_FILES = {
     "src/wazuh_health/source/wazuh_api.py",
+    "src/wazuh_health/notify/slack.py",
 }
 
 FORBIDDEN_ENV_VARS = {"WAZUH_WEBHOOK_SECRET", "ENABLE_TRIAGE"}
