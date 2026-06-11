@@ -146,3 +146,104 @@ def load_alerts(
         if limit is not None and len(out) >= limit:
             break
     return out
+
+
+# --- LocalFSSource ------------------------------------------------------
+
+import os
+import re
+from collections.abc import Iterable as _Iterable
+from pathlib import Path as _Path
+
+from src.wazuh_health.source.base import (
+    AgentInfo,
+    DiskStats,
+    FilesystemStat,
+    IndexerStats,
+    ManagerStats,
+)
+
+
+_CLIENT_KEY_LINE = re.compile(
+    r"^\s*(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<ip>\S+)\s+\S+\s*$"
+)
+
+
+def _filesystem_stat(path: _Path) -> FilesystemStat:
+    s = os.statvfs(path)
+    total = s.f_frsize * s.f_blocks
+    free = s.f_frsize * s.f_bavail
+    pct = (free / total * 100.0) if total else 0.0
+    return FilesystemStat(
+        path=str(path),
+        total_bytes=total,
+        free_bytes=free,
+        free_pct=round(pct, 2),
+    )
+
+
+class LocalFSSource:
+    """Filesystem-backed WazuhSource.
+
+    Reads from /var/ossec/* paths. Never writes.
+    """
+
+    def __init__(
+        self,
+        *,
+        alerts_path: _Path,
+        rotated_glob: str | None,
+        ossec_conf: _Path,
+        client_keys: _Path,
+        var_ossec_path: _Path | None = None,
+        indexer_path: _Path | None = None,
+    ) -> None:
+        self.alerts_path = _Path(alerts_path)
+        self.rotated_glob = rotated_glob
+        self.ossec_conf = _Path(ossec_conf)
+        self.client_keys = _Path(client_keys)
+        self.var_ossec_path = _Path(var_ossec_path or "/var/ossec")
+        self.indexer_path = _Path(indexer_path or "/var/lib/wazuh-indexer")
+
+    def iter_alerts(self, *, since_days: int | None = None) -> _Iterable[CleanAlert]:
+        return iter_alerts(
+            self.alerts_path,
+            days=since_days,
+            rotated_glob=self.rotated_glob,
+        )
+
+    def disk_stats(self) -> DiskStats:
+        fs: dict[str, FilesystemStat] = {}
+        if self.var_ossec_path.exists():
+            fs["var_ossec"] = _filesystem_stat(self.var_ossec_path)
+        if self.indexer_path.exists():
+            fs["indexer"] = _filesystem_stat(self.indexer_path)
+        size = self.alerts_path.stat().st_size if self.alerts_path.exists() else 0
+        return DiskStats(filesystems=fs, alerts_json_size_bytes=size)
+
+    def list_agents(self) -> list[AgentInfo]:
+        if not self.client_keys.exists():
+            return []
+        out: list[AgentInfo] = []
+        for line in self.client_keys.read_text(errors="replace").splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = _CLIENT_KEY_LINE.match(line)
+            if not m:
+                continue
+            out.append(AgentInfo(
+                agent_id=m.group("id"),
+                name=m.group("name"),
+                ip=m.group("ip") if m.group("ip") != "any" else None,
+                status="unknown",
+            ))
+        return out
+
+    def manager_stats(self) -> ManagerStats:
+        # Local FS does not have manager stats readily available without parsing
+        # ossec-control output. v1: return empty.
+        return ManagerStats()
+
+    def indexer_stats(self) -> IndexerStats:
+        # Same as above — without the API we cannot get heap; return empty.
+        return IndexerStats()
