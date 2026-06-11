@@ -10,7 +10,6 @@ from src.wazuh_health.hygiene.simulator import (
     simulate_combined,
     simulate_recommendations,
 )
-from src.wazuh_health.hygiene.xml_render import render_local_rule
 from src.wazuh_health.source.local_fs import load_alerts
 
 
@@ -30,18 +29,11 @@ def analyze_file(
     )
     buckets = build_noise_buckets(alerts, min_count=min_count, top=top)
     recs = recommend_from_buckets(
-        buckets, total_alerts=len(alerts), max_recommendations=max_recommendations
+        buckets,
+        total_alerts=len(alerts),
+        max_recommendations=max_recommendations,
+        first_local_rule_id=first_local_rule_id,
     )
-    # Attach XML snippets for suppress_conditionally only.
-    for idx, rec in enumerate(recs):
-        if rec.type == "suppress_conditionally":
-            bucket = next(b for b in buckets if str(b.rule_id) == rec.rule_id)
-            rec.proposed_wazuh_rule = render_local_rule(
-                bucket,
-                local_rule_id=first_local_rule_id + idx,
-                bucket_hash=rec.id,
-                count=rec.expected_reduction_count,
-            )
     sims = simulate_recommendations(alerts, recs)
     combined = simulate_combined(alerts, sims) if sims else None
 
