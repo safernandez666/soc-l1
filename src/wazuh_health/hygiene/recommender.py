@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from src.wazuh_health.contracts import NoiseBucket, Recommendation
+from src.wazuh_health.hygiene.xml_render import render_local_rule
 
 SENSITIVE_RULE_GROUPS = frozenset(
     {
@@ -33,10 +34,11 @@ def recommend_from_buckets(
     *,
     total_alerts: int,
     max_recommendations: int = 10,
+    first_local_rule_id: int = 110000,
 ) -> list[Recommendation]:
     recommendations: list[Recommendation] = []
 
-    for bucket in buckets[:max_recommendations]:
+    for idx, bucket in enumerate(buckets[:max_recommendations]):
         if not bucket.rule_id:
             continue
         condition = {k: v for k, v in bucket.dimensions.items() if k != "rule_id"}
@@ -70,9 +72,22 @@ def recommend_from_buckets(
                 "for reversible conditional suppression."
             )
 
+        rec_id = f"cs-{_safe_id(bucket.key)}"
+        proposed_rule: str | None = None
+        if rec_type == "suppress_conditionally":
+            try:
+                proposed_rule = render_local_rule(
+                    bucket,
+                    local_rule_id=first_local_rule_id + idx,
+                    bucket_hash=rec_id,
+                    count=bucket.count,
+                )
+            except ValueError:
+                proposed_rule = None
+
         recommendations.append(
             Recommendation(
-                id=f"cs-{_safe_id(bucket.key)}",
+                id=rec_id,
                 type=rec_type,
                 title=f"Reduce noise of rule {bucket.rule_id}: {bucket.rule_description[:80]}",
                 rule_id=str(bucket.rule_id),
@@ -81,7 +96,7 @@ def recommend_from_buckets(
                 risk=risk,
                 expected_reduction_count=bucket.count,
                 expected_reduction_ratio=round(ratio, 4),
-                proposed_wazuh_rule=None,
+                proposed_wazuh_rule=proposed_rule,
                 rollback=(
                     "Not applied automatically. If approved and added to "
                     f"local_rules.xml, rollback = remove the CleanSwarm rule for {bucket.rule_id}."
