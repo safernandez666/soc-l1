@@ -1,3 +1,8 @@
+> **Note:** CleanSwarm is now part of [Wazuh Health Squad](./WAZUH_HEALTH.md).
+> The `cleanswarm analyze` CLI continues to work unchanged; its internals now
+> live under `wazuh_health/hygiene/`. New checks for capacity and coverage are
+> documented in the Wazuh Health doc.
+
 # CleanSwarm
 
 CleanSwarm is a read-only Wazuh hygiene module for SOC-L1. It is intentionally separated from the live webhook, approval, and executor path.
