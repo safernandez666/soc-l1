@@ -1,0 +1,23 @@
+[Unit]
+Description=Wazuh Health Squad
+After=network-online.target wazuh-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wazuh-health
+Group=wazuh-health
+EnvironmentFile=/etc/wazuh-health/wazuh-health.env
+ExecStart=/usr/local/bin/wazuh-health serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+ReadWritePaths=/var/lib/wazuh-health /var/log/wazuh-health
+ReadOnlyPaths=/var/ossec
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
