@@ -20,7 +20,7 @@ def test_scheduler_runs_due_jobs_in_order():
     clock.advance(11)
     sched.tick()
     assert calls.count("a") == 3
-    assert calls.count("b") == 1
+    assert calls.count("b") == 2
 
 
 def test_scheduler_skips_not_due_jobs():
