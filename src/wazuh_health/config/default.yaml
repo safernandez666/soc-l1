@@ -61,8 +61,8 @@ privacy:
   pseudonymize_fields: [srcip, dstip, agent.name, user]
 
 storage:
-  db_path: /var/lib/wazuh-health/state.db
-  report_dir: /var/log/wazuh-health/reports
+  db_path: ${WAZUH_HEALTH_DB_PATH:-/var/lib/wazuh-health/state.db}
+  report_dir: ${WAZUH_HEALTH_REPORT_DIR:-/var/log/wazuh-health/reports}
   retention_days: 30
 
 notify:
