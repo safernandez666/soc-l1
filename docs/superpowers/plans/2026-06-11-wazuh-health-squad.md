@@ -57,8 +57,8 @@ Each `__init__.py` is empty for now. `src/wazuh_health/__init__.py` gets a one-l
 - [ ] **Step 2: Create `src/wazuh_health/__main__.py`**
 
 ```python
-"""Module entry for `python -m wazuh_health`."""
-from wazuh_health.cli import main
+"""Module entry for `python -m src.wazuh_health`."""
+from src.wazuh_health.cli import main
 
 if __name__ == "__main__":
     raise SystemExit(main())
@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 3: Verify package imports**
 
-Run: `python -c "import wazuh_health; print(wazuh_health.__doc__)"`
+Run: `python -c "import src.wazuh_health; print(src.wazuh_health.__doc__)"`
 Expected: prints the docstring, no errors.
 
 - [ ] **Step 4: Commit**
