@@ -210,6 +210,18 @@ class Settings(BaseSettings):
     approval_ttl_hours: int = Field(default=24)
     state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
 
+    # ===== GUI / Dashboard (ZebraSecurity) =====
+    # Panel de revisión solo-lectura sobre state.db, servido en /ui detrás de login.
+    # Si dashboard_password queda vacío, el login rechaza todo (dashboard inhabilitado).
+    dashboard_enabled: bool = Field(default=True)
+    dashboard_password: str = Field(
+        default="",
+        description="Password compartido para entrar al panel /ui. Vacío = panel inaccesible.",
+    )
+    # Secreto para firmar la cookie de sesión (HMAC). Si vacío, se deriva del webhook secret.
+    dashboard_session_secret: str = Field(default="")
+    dashboard_session_hours: int = Field(default=12)
+
     # Lista de cuentas "intocables" - el executor refusa disable_user/force_password
     # sobre estos sams sin importar si el approval se clickeó. Defensa en profundidad
     # para evitar que un Narrator agresivo + click accidental desactive cuentas críticas.
