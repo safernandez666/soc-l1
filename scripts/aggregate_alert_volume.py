@@ -30,18 +30,42 @@ _MONTHS = {m: i for i, m in enumerate(
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
 _DAY_RE = re.compile(r"ossec-alerts-(\d+)\.json\.gz$")
 
+# Marcadores byte-level para FortiGate (los logs del firewall llegan a Wazuh).
+# El JSON de Wazuh es compacto (sin espacios), así que el match es exacto y barato.
+_FG = b'"fortigate"'
+_FG_BLOCK = (b'"action":"deny"', b'"action":"dropped"', b'"action":"blocked"',
+             b'"action":"drop"', b'"action":"block"')
 
-def _count_lines_gz(path: Path) -> int:
-    """Cuenta líneas (= alertas) de un .gz sin parsear JSON. Rápido y tolerante."""
-    n = 0
+
+def _count_day_gz(path: Path) -> tuple[int, int, int]:
+    """Cuenta (alertas_totales, fortigate_total, fortigate_bloqueos) de un .gz.
+
+    Procesa por chunks partiendo en líneas (rápido, estilo wc). Por cada línea
+    FortiGate chequea si la acción es de bloqueo. No parsea JSON.
+    """
+    total = fg_total = fg_block = 0
+    carry = b""
     try:
         with gzip.open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
-                n += chunk.count(b"\n")
+                lines = (carry + chunk).split(b"\n")
+                carry = lines.pop()
+                for line in lines:
+                    total += 1
+                    if _FG in line:
+                        fg_total += 1
+                        if any(tok in line for tok in _FG_BLOCK):
+                            fg_block += 1
     except (OSError, EOFError, gzip.BadGzipFile) as e:
         print(f"  ! {path.name}: {e}", file=sys.stderr)
-        return 0
-    return n
+        return (0, 0, 0)
+    if carry.strip():
+        total += 1
+        if _FG in carry:
+            fg_total += 1
+            if any(tok in carry for tok in _FG_BLOCK):
+                fg_block += 1
+    return (total, fg_total, fg_block)
 
 
 def _sample(files: list[Path], max_days: int) -> list[Path]:
@@ -70,25 +94,33 @@ def aggregate(archive_dir: Path, max_days_per_month: int) -> dict:
             if not files:
                 continue
             sampled = _sample(files, max_days_per_month)
-            counts = [_count_lines_gz(f) for f in sampled]
-            counts = [c for c in counts if c > 0]
-            if not counts:
+            rows = [_count_day_gz(f) for f in sampled]
+            rows = [r for r in rows if r[0] > 0]
+            if not rows:
                 continue
-            avg = sum(counts) // len(counts)
+            n = len(rows)
+            avg = sum(r[0] for r in rows) // n
+            fg_avg = sum(r[1] for r in rows) // n
+            fg_block_avg = sum(r[2] for r in rows) // n
+            days = len(files)
             months.append({
                 "year": year,
                 "month": month,
                 "label": f"{year}-{month:02d}",
                 "name": f"{mon_dir.name} {year}",
-                "days_present": len(files),
-                "days_sampled": len(counts),
+                "days_present": days,
+                "days_sampled": n,
                 "avg_per_day": avg,
-                "total_estimate": avg * len(files),
-                "min_day": min(counts),
-                "max_day": max(counts),
+                "total_estimate": avg * days,
+                "min_day": min(r[0] for r in rows),
+                "max_day": max(r[0] for r in rows),
+                "fg_avg_per_day": fg_avg,
+                "fg_blocks_avg_per_day": fg_block_avg,
+                "fg_blocks_total_estimate": fg_block_avg * days,
             })
-            print(f"  {year}-{month:02d} {mon_dir.name}: "
-                  f"{avg:,}/día (muestra {len(counts)}/{len(files)} días)", file=sys.stderr)
+            print(f"  {year}-{month:02d} {mon_dir.name}: {avg:,}/día · "
+                  f"FortiGate bloqueos {fg_block_avg:,}/día "
+                  f"(muestra {n}/{days} días)", file=sys.stderr)
 
     months.sort(key=lambda m: m["label"])
     return {

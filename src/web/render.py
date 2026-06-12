@@ -645,29 +645,45 @@ def kpis_page(settings: Settings, k: dict[str, Any]) -> str:
             '<code>scripts/aggregate_alert_volume.py</code>.</div></div>'
         )
 
-    # ---- Bloque 5: Bloqueos en FortiGate (hoy) ----
+    # ---- Bloque 5: Bloqueos de FortiGate (histórico, desde logs en Wazuh) ----
     fg = k.get("fortigate") or {}
-    if fg.get("available"):
-        cnt = fg.get("count", 0)
-        if fg.get("banned"):
-            frows = "".join(
-                f'<tr><td class="strong">{h(b.get("ip"))}</td>'
-                f'<td class="muted">{h(b.get("expires") or "sin vencimiento")}</td></tr>'
-                for b in fg["banned"]
-            )
-            fg_inner = ('<table><thead><tr><th>IP</th><th>Expira</th></tr></thead>'
-                        f'<tbody>{frows}</tbody></table>')
-        else:
-            fg_inner = ('<div class="empty">No hay IPs bloqueadas activas en FortiGate. '
-                        'soc-l1 puede bloquear IPs (block_ip) pero todavía no se usó.</div>')
-        fortigate_block = f"""<div class="section-title"><h3>{icon("lock")}Bloqueos en FortiGate · hoy</h3>
-<span class="muted">{_num(cnt)} IP(s) en quarantine</span></div>
-<div class="card" style="margin-bottom:18px">{fg_inner}</div>"""
+    fg_months = [m for m in (av.get("months") or []) if "fg_blocks_avg_per_day" in m]
+    now_banned = fg.get("count") if fg.get("available") else None
+    now_line = (f' · {_num(now_banned)} en quarantine ahora'
+                if now_banned is not None else "")
+    if fg_months:
+        total_blocks = sum(m.get("fg_blocks_total_estimate", 0) for m in fg_months)
+        cur = fg_months[-1]
+        peak = max(fg_months, key=lambda m: m["fg_blocks_avg_per_day"])
+        fg_caveat = (
+            '<div class="banner dry"><span class="dot on"></span>'
+            'Son eventos de bloqueo <b>logueados a Wazuh</b>, no la protección actual del '
+            'firewall. El desplome de ene-2026 es tuning de logging (dejamos de mandar los '
+            'denies del FortiGate a Wazuh), <b>no menos protección</b> — el firewall sigue '
+            'bloqueando.</div>'
+        )
+        fg_kpis = "".join([
+            _kpi("Eventos de bloqueo", _num(total_blocks),
+                 f'~estimado · {len(fg_months)} meses logueados', "lock"),
+            _kpi("Pico mensual", _num(peak["fg_blocks_avg_per_day"]),
+                 f'{h(peak["name"])} · /día', "trend"),
+            _kpi("Logueados ahora", _num(cur["fg_blocks_avg_per_day"]),
+                 f'{h(cur["name"])} · /día', "activity"),
+            _kpi("En quarantine ahora",
+                 _num(now_banned) if now_banned is not None else "—",
+                 "baneos activos", "clock"),
+        ])
+        fg_bars = _bars([(m["label"], m["fg_blocks_avg_per_day"]) for m in fg_months])
+        fortigate_block = f"""<div class="section-title"><h3>{icon("lock")}Bloqueos de FortiGate · eventos en Wazuh</h3>
+<span class="muted">deny / dropped / blocked{now_line}</span></div>
+{fg_caveat}
+<div class="grid kpis" style="margin-bottom:18px">{fg_kpis}</div>
+<div class="card" style="margin-bottom:18px"><div class="section-title"><h3>{icon("bar")}Eventos de bloqueo/día por mes</h3></div>{fg_bars}</div>"""
     else:
         fortigate_block = (
-            f'<div class="section-title"><h3>{icon("lock")}Bloqueos en FortiGate · hoy</h3></div>'
-            f'<div class="card"><div class="empty">FortiGate no disponible: '
-            f'{h(fg.get("error") or "sin datos")}</div></div>'
+            f'<div class="section-title"><h3>{icon("lock")}Bloqueos de FortiGate</h3></div>'
+            '<div class="card"><div class="empty">Sin datos de bloqueos en el cache. '
+            'Corré <code>scripts/aggregate_alert_volume.py</code>.</div></div>'
         )
 
     body = f"""<div class="section-title"><h1 class="page-title">KPIs · <em>Wazuh</em></h1></div>
