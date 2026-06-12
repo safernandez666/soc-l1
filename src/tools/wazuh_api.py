@@ -131,6 +131,54 @@ class WazuhApiClient:
             return None
         return _parse_rule(items[0])
 
+    # ===== Posture snapshot (panel /ui) =====
+
+    async def posture_snapshot(self) -> dict[str, Any]:
+        """Foto del estado de Wazuh HOY para los KPIs: agentes, OS, reglas, versión.
+
+        Best-effort: cada pieza se tolera por separado para que un endpoint que
+        falle no tire abajo todo el snapshot.
+        """
+        snap: dict[str, Any] = {}
+
+        # Agentes por estado de conexión
+        try:
+            data = (await self._get("/agents/summary/status")).get("data", {})
+            conn = data.get("connection") or data  # 4.3+ anida en .connection
+            snap["agents"] = {
+                "total": int(conn.get("total", 0) or 0),
+                "active": int(conn.get("active", 0) or 0),
+                "disconnected": int(conn.get("disconnected", 0) or 0),
+                "never_connected": int(conn.get("never_connected", 0) or 0),
+                "pending": int(conn.get("pending", 0) or 0),
+            }
+        except WazuhApiError as e:
+            logger.warning("posture: agents/summary/status falló: %s", e)
+
+        # Distribución por OS
+        try:
+            data = (await self._get("/agents/summary/os")).get("data", {})
+            snap["os"] = list(data.get("affected_items") or [])
+        except WazuhApiError as e:
+            logger.warning("posture: agents/summary/os falló: %s", e)
+
+        # Total de reglas cargadas (total_affected_items con limit=1)
+        try:
+            data = (await self._get("/rules", params={"limit": 1})).get("data", {})
+            snap["rules_total"] = int(data.get("total_affected_items", 0) or 0)
+        except WazuhApiError as e:
+            logger.warning("posture: rules count falló: %s", e)
+
+        # Versión del manager
+        try:
+            items = (await self._get("/manager/info")).get("data", {}).get("affected_items") or []
+            if items:
+                snap["manager_version"] = items[0].get("version")
+        except WazuhApiError as e:
+            logger.warning("posture: manager/info falló: %s", e)
+
+        return snap
+
 
 def _parse_rule(item: dict[str, Any]) -> WazuhRuleInfo:
     """Mapea un item de /rules a WazuhRuleInfo. Tolera estructuras parcialmente vacías."""

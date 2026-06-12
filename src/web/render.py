@@ -77,6 +77,8 @@ _ICON_PATHS = {
     "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
     "git": '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
     "x": '<path d="M18 6 6 18"/><path d="M6 6l12 12"/>',
+    "lock": '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "gauge": '<path d="M12 14 16 9"/><path d="M3.5 18a9 9 0 1 1 17 0"/><circle cx="12" cy="14" r="1.5"/>',
 }
 
 
@@ -340,6 +342,7 @@ def _spark(per_day: list[tuple[str, int]]) -> str:
 
 _NAV = [
     ("/ui", "Overview", "dashboard"),
+    ("/ui/kpis", "KPIs", "gauge"),
     ("/ui/queue", "Queue", "list"),
     ("/ui/queue?status=pending", "Pending", "clock"),
 ]
@@ -512,6 +515,168 @@ def panel_page(settings: Settings, m: dict[str, Any]) -> str:
 </div>
 <div class="card"><div class="section-title"><h3>{icon("git")}Pipeline</h3></div>{flag_lines}</div>"""
     return _shell("/ui", settings, body, "Overview")
+
+
+def _num(x: Any) -> str:
+    """Formatea enteros con separador de miles para slides; deja el resto como viene."""
+    if isinstance(x, bool) or x is None:
+        return "—" if x is None else str(x)
+    if isinstance(x, int):
+        return f"{x:,}"
+    if isinstance(x, float):
+        return f"{x:g}"
+    return h(x)
+
+
+def kpis_page(settings: Settings, k: dict[str, Any]) -> str:
+    c = k.get("containment") or {}
+    av = k.get("alert_volume") or {}
+
+    # Período "desde que arrancamos con Wazuh": el más temprano entre el primer mes
+    # de alertas (curva de volumen) y el primer caso SOAR.
+    firsts: list[str] = []
+    lasts: list[str] = []
+    if c.get("available") and (c.get("period") or {}).get("first"):
+        firsts.append(c["period"]["first"])
+        lasts.append(c["period"]["last"])
+    if av.get("available") and av.get("months"):
+        firsts.append(av["months"][0]["label"])
+        lasts.append(av["months"][-1]["label"])
+    since = min(firsts) if firsts else None
+    last = max(lasts) if lasts else "—"
+    since_line = (
+        f'Desde <em>{h(since)}</em> · datos al {h(last)}' if since else "Sin datos todavía"
+    )
+
+    # ---- Bloque 1: Contención / Bloqueos (state.db) ----
+    if c.get("available") and c.get("total_cases"):
+        exec_sub = "simuladas (dry-run)" if settings.dry_run_mode else "ejecutadas de verdad"
+        rate = f'{c["containment_rate"]}%' if c.get("containment_rate") is not None else "—"
+        cont_kpis = "".join([
+            _kpi("Acciones de contención", c["proposed_total"], "propuestas por los agentes", "lock"),
+            _kpi("Ejecutadas", c["executed_total"], exec_sub, "zap"),
+            _kpi("Casos con bloqueo", c["cases_with_containment"],
+                 f'{rate} de {c["total_cases"]} casos', "shield"),
+            _kpi("Hosts alcanzados", c["hosts_contained"], "con ≥1 contención", "server"),
+        ])
+        if c["by_type"]:
+            trows = "".join(
+                f'<tr><td class="strong">{h(action_label(t))}</td>'
+                f'<td>{h(prop)}</td><td class="muted">{h(ex)}</td></tr>'
+                for t, prop, ex in c["by_type"]
+            )
+            by_type = (
+                '<div class="card"><div class="section-title">'
+                f'<h3>{icon("bar")}Contención por tipo</h3></div>'
+                '<table><thead><tr><th>Acción</th><th>Propuestas</th>'
+                '<th>Ejecutadas</th></tr></thead>'
+                f'<tbody>{trows}</tbody></table></div>'
+            )
+        else:
+            by_type = '<div class="card"><div class="muted">Sin acciones de contención en el período.</div></div>'
+        dry_note = (
+            '<div class="banner dry"><span class="dot on"></span>'
+            'DRY-RUN — las contenciones se registran pero se simulan; "Ejecutadas" = decididas, no aplicadas.</div>'
+            if settings.dry_run_mode else ""
+        )
+        containment_block = f"""<div class="section-title"><h3>{icon("lock")}Bloqueos / contención</h3>
+<span class="muted">{h(c["period"]["label"])}</span></div>
+{dry_note}
+<div class="grid kpis" style="margin-bottom:18px">{cont_kpis}</div>
+{by_type}"""
+    else:
+        containment_block = (
+            f'<div class="section-title"><h3>{icon("lock")}Bloqueos / contención</h3></div>'
+            '<div class="card"><div class="empty">Todavía no hay casos en state.db.</div></div>'
+        )
+
+    # ---- Bloque 3: Posture de Wazuh HOY (Management API) ----
+    p = k.get("posture") or {}
+    if p.get("available"):
+        ag = p.get("agents") or {}
+        os_list = p.get("os") or []
+        posture_kpis = "".join([
+            _kpi("Agentes monitoreados", _num(ag.get("total")),
+                 f'{_num(ag.get("active"))} activos', "users"),
+            _kpi("Desconectados", _num(ag.get("disconnected")),
+                 f'{_num(ag.get("never_connected"))} nunca conectados', "server"),
+            _kpi("Reglas activas", _num(p.get("rules_total")), "ruleset cargado", "shield"),
+            _kpi("Versión Wazuh", h(p.get("manager_version") or "—"),
+                 ", ".join(os_list) or "—", "gauge"),
+        ])
+        posture_block = f"""<div class="section-title"><h3>{icon("server")}Posture de Wazuh · hoy</h3>
+<span class="muted">snapshot vía Management API</span></div>
+<div class="grid kpis" style="margin-bottom:18px">{posture_kpis}</div>"""
+    else:
+        posture_block = (
+            f'<div class="section-title"><h3>{icon("server")}Posture de Wazuh · hoy</h3></div>'
+            f'<div class="card"><div class="empty">Wazuh API no disponible: '
+            f'{h(p.get("error") or "sin datos")}</div></div>'
+        )
+
+    # ---- Bloque 4: Volumen de alertas (cómo cambió la infra) ----
+    av = k.get("alert_volume") or {}
+    if av.get("available") and av.get("months"):
+        months = av["months"]
+        cur = months[-1]
+        peak = max(months, key=lambda m: m["avg_per_day"])
+        low = min(months, key=lambda m: m["avg_per_day"])
+        red = (round(100 * (peak["avg_per_day"] - low["avg_per_day"]) / peak["avg_per_day"])
+               if peak["avg_per_day"] else None)
+        av_kpis = "".join([
+            _kpi("Pico de ruido", _num(peak["avg_per_day"]),
+                 f'{h(peak["name"])} · alertas/día', "trend"),
+            _kpi("Piso alcanzado", _num(low["avg_per_day"]),
+                 f'{h(low["name"])} · -{red}% vs pico' if red is not None else h(low["name"]), "check"),
+            _kpi("Mes actual", _num(cur["avg_per_day"]),
+                 f'{h(cur["name"])} · alertas/día', "activity"),
+        ])
+        vol_bars = _bars([(m["label"], m["avg_per_day"]) for m in months])
+        note = (f'muestreo de {av.get("max_days_per_month")} días/mes'
+                if av.get("sampled") else "conteo completo")
+        alert_block = f"""<div class="section-title"><h3>{icon("activity")}Volumen de alertas · cómo cambió la infra</h3>
+<span class="muted">{h(months[0]["name"])} → {h(cur["name"])} · {h(note)}</span></div>
+<div class="grid kpis" style="margin-bottom:18px">{av_kpis}</div>
+<div class="card" style="margin-bottom:18px"><div class="section-title"><h3>{icon("bar")}Alertas/día por mes</h3></div>{vol_bars}</div>"""
+    else:
+        alert_block = (
+            f'<div class="section-title"><h3>{icon("activity")}Volumen de alertas</h3></div>'
+            '<div class="card"><div class="empty">Sin cache de volumen. Corré '
+            '<code>scripts/aggregate_alert_volume.py</code>.</div></div>'
+        )
+
+    # ---- Bloque 5: Bloqueos en FortiGate (hoy) ----
+    fg = k.get("fortigate") or {}
+    if fg.get("available"):
+        cnt = fg.get("count", 0)
+        if fg.get("banned"):
+            frows = "".join(
+                f'<tr><td class="strong">{h(b.get("ip"))}</td>'
+                f'<td class="muted">{h(b.get("expires") or "sin vencimiento")}</td></tr>'
+                for b in fg["banned"]
+            )
+            fg_inner = ('<table><thead><tr><th>IP</th><th>Expira</th></tr></thead>'
+                        f'<tbody>{frows}</tbody></table>')
+        else:
+            fg_inner = ('<div class="empty">No hay IPs bloqueadas activas en FortiGate. '
+                        'soc-l1 puede bloquear IPs (block_ip) pero todavía no se usó.</div>')
+        fortigate_block = f"""<div class="section-title"><h3>{icon("lock")}Bloqueos en FortiGate · hoy</h3>
+<span class="muted">{_num(cnt)} IP(s) en quarantine</span></div>
+<div class="card" style="margin-bottom:18px">{fg_inner}</div>"""
+    else:
+        fortigate_block = (
+            f'<div class="section-title"><h3>{icon("lock")}Bloqueos en FortiGate · hoy</h3></div>'
+            f'<div class="card"><div class="empty">FortiGate no disponible: '
+            f'{h(fg.get("error") or "sin datos")}</div></div>'
+        )
+
+    body = f"""<div class="section-title"><h1 class="page-title">KPIs · <em>Wazuh</em></h1></div>
+<p class="muted" style="margin:-6px 0 20px">{since_line}</p>
+{posture_block}
+{alert_block}
+{containment_block}
+{fortigate_block}"""
+    return _shell("/ui/kpis", settings, body, "KPIs")
 
 
 def queue_page(

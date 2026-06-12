@@ -9,6 +9,8 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.sqlite
+# Cache generado por scripts/aggregate_alert_volume.py (no versionar)
+alert_volume.json
 dist/
 build/
 *.egg-info/

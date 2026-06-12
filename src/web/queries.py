@@ -13,8 +13,15 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from src.config import Settings
+
 # Orden canónico de estados para tablas/gráficos
 STATUS_ORDER = ["pending", "approved", "executed", "rejected", "expired"]
+
+# Acciones que cuentan como "contención / bloqueo" para los KPIs (aislar host,
+# deshabilitar cuenta, forzar reset de password, bloquear IP). scan_host /
+# escalate_l2 / notify_only NO son contención.
+CONTAINMENT_ACTIONS = ("isolate_host", "disable_user", "force_password_change", "block_ip")
 
 
 def _connect_ro(db_path: str) -> sqlite3.Connection:
@@ -61,6 +68,28 @@ def humanize_age(created_at: str | None, *, now: datetime | None = None) -> str:
         return "—"
     now = now or datetime.now(tz=timezone.utc)
     return _human_duration((now - dt).total_seconds())
+
+
+def _human_bytes(n: float | None) -> str:
+    if n is None:
+        return "—"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024.0:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
+
+
+def _period(first: datetime | None, last: datetime | None) -> dict[str, Any]:
+    """Rango de fechas legible para 'desde que arrancamos con Wazuh'."""
+    if first is None:
+        return {"first": None, "last": None, "days": 0, "label": "—"}
+    last = last or first
+    days = max(1, (last.date() - first.date()).days + 1)
+    label = f"{first.date().isoformat()} → {last.date().isoformat()} ({days}d)"
+    return {"first": first.date().isoformat(), "last": last.date().isoformat(),
+            "days": days, "label": label}
 
 
 # ===== Métricas del panel =====
@@ -233,6 +262,170 @@ def _empty_metrics() -> dict[str, Any]:
     }
 
 
+# ===== KPIs (presentación): contención + salud de Wazuh =====
+
+
+def _containment_sync(db_path: str) -> dict[str, Any]:
+    """KPIs de contención/bloqueos acumulados desde state.db (todo el período)."""
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return {"available": False}
+
+    with conn:
+        rows = conn.execute(
+            "SELECT created_at, plan_json, execution_result, alert_json "
+            "FROM pending_approvals"
+        ).fetchall()
+
+    proposed: Counter[str] = Counter()      # contención propuesta por los agentes
+    executed: Counter[str] = Counter()      # ejecutada (simulada bajo dry-run)
+    cases_with_containment = 0
+    hosts_contained: set[str] = set()
+    first_dt: datetime | None = None
+    last_dt: datetime | None = None
+
+    for r in rows:
+        created = _parse_dt(r["created_at"])
+        if created:
+            first_dt = created if first_dt is None else min(first_dt, created)
+            last_dt = created if last_dt is None else max(last_dt, created)
+
+        plan = _loads(r["plan_json"]) or {}
+        actions = plan.get("actions") or []
+        case_has = False
+        for a in actions:
+            t = (a or {}).get("type")
+            if t in CONTAINMENT_ACTIONS:
+                proposed[t] += 1
+                case_has = True
+        if case_has:
+            cases_with_containment += 1
+            alert = _loads(r["alert_json"]) or {}
+            device = alert.get("device") or {}
+            host = device.get("hostname") or device.get("fqdn")
+            if host:
+                hosts_contained.add(host)
+
+        for er in (_loads(r["execution_result"]) or []):
+            if isinstance(er, dict):
+                t = er.get("action_type")
+                if t in CONTAINMENT_ACTIONS:
+                    executed[t] += 1
+
+    total_cases = len(rows)
+    return {
+        "available": True,
+        "period": _period(first_dt, last_dt),
+        "total_cases": total_cases,
+        "cases_with_containment": cases_with_containment,
+        "containment_rate": (
+            round(100 * cases_with_containment / total_cases) if total_cases else None
+        ),
+        "proposed_total": sum(proposed.values()),
+        "executed_total": sum(executed.values()),
+        "hosts_contained": len(hosts_contained),
+        "by_type": [
+            (t, proposed.get(t, 0), executed.get(t, 0))
+            for t in CONTAINMENT_ACTIONS
+            if proposed.get(t, 0) or executed.get(t, 0)
+        ],
+    }
+
+
+def _latest_metrics(conn: sqlite3.Connection, probe: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT metrics_json, run_at FROM probe_runs WHERE probe=? "
+        "ORDER BY run_at DESC LIMIT 1",
+        (probe,),
+    ).fetchone()
+    if row is None:
+        return {}
+    m = _loads(row["metrics_json"]) or {}
+    m["_run_at"] = row["run_at"]
+    return m
+
+
+def _health_sync(db_path: str) -> dict[str, Any]:
+    """KPIs de salud de Wazuh desde wazuh-health.db (último valor de cada probe)."""
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return {"available": False}
+
+    with conn:
+        try:
+            coverage = _latest_metrics(conn, "coverage")
+            capacity = _latest_metrics(conn, "capacity")
+            hygiene = _latest_metrics(conn, "hygiene")
+            span = conn.execute(
+                "SELECT MIN(run_at), MAX(run_at), COUNT(*) FROM probe_runs"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return {"available": False}
+
+    if not (coverage or capacity or hygiene):
+        return {"available": False}
+
+    first = _parse_dt(span[0]) if span else None
+    last = _parse_dt(span[1]) if span else None
+    return {
+        "available": True,
+        "period": _period(first, last),
+        "runs": int(span[2]) if span else 0,
+        "coverage": coverage,
+        "capacity": capacity,
+        "hygiene": hygiene,
+    }
+
+
+def _alert_volume_sync(cache_path: str) -> dict[str, Any]:
+    """Lee el JSON precalculado por scripts/aggregate_alert_volume.py (solo-lectura)."""
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {"available": False}
+    months = data.get("months") or []
+    if not months:
+        return {"available": False}
+    return {"available": True, **data}
+
+
+def _kpis_sync(state_db_path: str, health_db_path: str, alert_cache_path: str) -> dict[str, Any]:
+    # health_db_path queda en la firma por compatibilidad; la sección "Salud de Wazuh"
+    # se quitó del panel (la corrida de prueba contradecía la posture en vivo).
+    return {
+        "containment": _containment_sync(state_db_path),
+        "alert_volume": _alert_volume_sync(alert_cache_path),
+    }
+
+
+async def _wazuh_posture(settings: Settings) -> dict[str, Any]:
+    """Snapshot del Wazuh manager API (best-effort). Nunca tira la página."""
+    try:
+        from src.tools.wazuh_api import WazuhApiClient
+        async with WazuhApiClient(settings) as c:
+            snap = await c.posture_snapshot()
+        snap["available"] = bool(snap.get("agents"))
+        return snap
+    except Exception as e:
+        return {"available": False, "error": str(e)[:200]}
+
+
+async def _fortigate_blocks(settings: Settings) -> dict[str, Any]:
+    """Lista de IPs en quarantine de FortiGate (best-effort)."""
+    if not (settings.fortigate_host and settings.fortigate_token):
+        return {"available": False, "error": "FortiGate no configurado"}
+    try:
+        from src.tools.fortigate import FortigateClient
+        async with FortigateClient(settings) as fg:
+            banned = await fg.list_banned()
+        return {"available": True, "count": len(banned), "banned": banned[:20]}
+    except Exception as e:
+        return {"available": False, "error": str(e)[:200]}
+
+
 # ===== Lista de casos (cola) =====
 
 
@@ -333,6 +526,23 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
 
 async def dashboard_metrics(db_path: str) -> dict[str, Any]:
     return await asyncio.to_thread(_metrics_sync, db_path)
+
+
+async def kpis_metrics(settings: Settings) -> dict[str, Any]:
+    """KPIs de presentación: DBs locales (en thread) + fuentes vivas (Wazuh API,
+    FortiGate) en paralelo. Cada fuente viva es best-effort y no tira la página."""
+    base = await asyncio.to_thread(
+        _kpis_sync,
+        settings.state_db_path,
+        settings.wazuh_health_db_path,
+        settings.alert_volume_cache_path,
+    )
+    posture, fortigate = await asyncio.gather(
+        _wazuh_posture(settings), _fortigate_blocks(settings)
+    )
+    base["posture"] = posture
+    base["fortigate"] = fortigate
+    return base
 
 
 async def list_cases(

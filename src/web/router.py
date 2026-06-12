@@ -3,6 +3,7 @@
 Rutas:
   GET  /ui/login   /ui/logout   POST /ui/login
   GET  /ui                 panel (KPIs, charts, modo)
+  GET  /ui/kpis            KPIs de presentación: bloqueos/contención + salud de Wazuh
   GET  /ui/queue           cola de casos (filtro ?status= , paginado ?page=)
   GET  /ui/case/{rowid}    detalle de un caso
   GET  /ui/static/app.css  hoja de estilos (ZebraSecurity)
@@ -108,6 +109,14 @@ async def panel(request: Request, settings: SettingsDep) -> Response:
         return _redirect_login()
     metrics = await queries.dashboard_metrics(settings.state_db_path)
     return HTMLResponse(render.panel_page(settings, metrics))
+
+
+@router.get("/kpis")
+async def kpis(request: Request, settings: SettingsDep) -> Response:
+    if not _authed(request, settings):
+        return _redirect_login()
+    metrics = await queries.kpis_metrics(settings)
+    return HTMLResponse(render.kpis_page(settings, metrics))
 
 
 @router.get("/queue")
