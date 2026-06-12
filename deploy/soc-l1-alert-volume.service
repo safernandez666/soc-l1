@@ -1,0 +1,27 @@
+[Unit]
+Description=SOC L1 - Refresh KPIs alert-volume cache (panel /ui/kpis)
+Documentation=https://github.com/safernandez666/soc-l1
+
+[Service]
+Type=oneshot
+# Reusa el user dueño de /opt/soc-l1 (mismo que el servicio principal)
+User=__SOC_USER__
+Group=__SOC_GROUP__
+# Necesita leer /var/ossec/logs/alerts (rotados de Wazuh) → grupo wazuh
+SupplementaryGroups=wazuh
+WorkingDirectory=/opt/soc-l1
+
+# Baja prioridad: no competir con Wazuh/indexer al descomprimir los archivos
+Nice=19
+IOSchedulingClass=idle
+
+# Muestreo de 8 días/mes (liviano). --full para conteo completo (pesado).
+ExecStart=/opt/soc-l1/.venv/bin/python /opt/soc-l1/scripts/aggregate_alert_volume.py --max-days-per-month 8
+
+# Logs a journald (ver con: journalctl -u soc-l1-alert-volume.service)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soc-l1-alert-volume
+
+# Solo escribe el JSON cache bajo /opt/soc-l1
+ReadWritePaths=/opt/soc-l1

@@ -1,0 +1,15 @@
+[Unit]
+Description=SOC L1 - Trigger daily refresh of KPIs alert-volume cache
+Documentation=https://github.com/safernandez666/soc-l1
+
+[Timer]
+# Disparar 01:30 cada día (después de la rotación de Wazuh de las 00:00,
+# así toma el archivo .json.gz del día anterior ya cerrado).
+OnCalendar=*-*-* 01:30:00
+# Si el server estaba apagado a esa hora, disparar al boot siguiente
+Persistent=true
+# Variar ±5min para no competir con otros jobs
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
