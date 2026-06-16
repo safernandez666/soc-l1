@@ -524,6 +524,8 @@ async def _run_narrator_and_request_approval(
         await send_approval_email(
             settings, alert, plan, token,
             invgate_request_id=invgate_request_id,
+            enrichment=enrichment,
+            threat_intel=threat_intel,
         )
     except Exception:
         logger.exception("narrator/approval failed for alert id=%s", alert.alert_id)
