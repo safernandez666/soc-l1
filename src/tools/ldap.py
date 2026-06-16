@@ -21,6 +21,7 @@ from ldap3 import (
     Tls,
 )
 from ldap3.core.exceptions import LDAPException
+from ldap3.utils.conv import escape_filter_chars
 
 from src.config import LdapConfig
 from src.models import ADUser, LdapActionResult
@@ -129,7 +130,7 @@ def search_user(cfg: LdapConfig, sam_account_name: str) -> ADUser | None:
     with _connection(cfg) as conn:
         conn.search(
             search_base=cfg.base_dn,
-            search_filter=f"(&(objectClass=user)(sAMAccountName={sam_account_name}))",
+            search_filter=f"(&(objectClass=user)(sAMAccountName={escape_filter_chars(sam_account_name)}))",
             search_scope=SUBTREE,
             attributes=USER_ATTRS,
             size_limit=1,
@@ -144,7 +145,7 @@ def disable_user(cfg: LdapConfig, sam_account_name: str) -> LdapActionResult:
     with _connection(cfg) as conn:
         conn.search(
             search_base=cfg.base_dn,
-            search_filter=f"(&(objectClass=user)(sAMAccountName={sam_account_name}))",
+            search_filter=f"(&(objectClass=user)(sAMAccountName={escape_filter_chars(sam_account_name)}))",
             search_scope=SUBTREE,
             attributes=["distinguishedName", "userAccountControl"],
             size_limit=1,
@@ -174,7 +175,7 @@ def force_password_change(cfg: LdapConfig, sam_account_name: str) -> LdapActionR
     with _connection(cfg) as conn:
         conn.search(
             search_base=cfg.base_dn,
-            search_filter=f"(&(objectClass=user)(sAMAccountName={sam_account_name}))",
+            search_filter=f"(&(objectClass=user)(sAMAccountName={escape_filter_chars(sam_account_name)}))",
             search_scope=SUBTREE,
             attributes=["distinguishedName"],
             size_limit=1,

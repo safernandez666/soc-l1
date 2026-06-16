@@ -55,6 +55,20 @@ def client(settings_factory):
 
 
 @pytest.fixture
+def auth_client(client: TestClient, settings_factory):
+    """client con una sesión de dashboard válida.
+
+    /approvals está detrás del mismo login que /ui (expone tokens/planes), así que
+    requiere la cookie firmada. La emitimos con las mismas settings que usa la app.
+    """
+    from src.web import auth
+
+    cookie = auth.issue_session(settings_factory())
+    client.cookies.set(auth.COOKIE_NAME, cookie)
+    return client
+
+
+@pytest.fixture
 def sample_plan() -> NarratorPlan:
     return NarratorPlan(
         executive_summary="malware detectado",
@@ -324,36 +338,36 @@ def test_decide_invalid_decision_returns_400(
 # ===== /approvals dashboard =====
 
 
-def test_approvals_html_empty_when_no_data(client: TestClient, db_path: str) -> None:
+def test_approvals_html_empty_when_no_data(auth_client: TestClient, db_path: str) -> None:
     """DB vacía (en este test todavía no creamos approvals) → mensaje "No hay approvals"."""
-    r = client.get("/approvals")
+    r = auth_client.get("/approvals")
     assert r.status_code == 200
     assert "Cola de approvals" in r.text
     assert "No hay approvals" in r.text
 
 
 def test_approvals_html_lists_pending_with_review_link(
-    client: TestClient, pending_token: str
+    auth_client: TestClient, pending_token: str
 ) -> None:
     """Approval pending debe aparecer en la tabla con link a /review/{token}."""
-    r = client.get("/approvals")
+    r = auth_client.get("/approvals")
     assert r.status_code == 200
     assert "alert-abc" in r.text  # alert_id del fixture pending_token
     assert f"/review/{pending_token}" in r.text  # link clickeable a la página
     assert "PENDING" in r.text.upper()
 
 
-def test_approvals_filter_by_status(client: TestClient, pending_token: str) -> None:
+def test_approvals_filter_by_status(auth_client: TestClient, pending_token: str) -> None:
     """?status=approved no debería mostrar el pending."""
-    r = client.get("/approvals?status=approved")
+    r = auth_client.get("/approvals?status=approved")
     assert r.status_code == 200
     assert "alert-abc" not in r.text
     assert "No hay approvals" in r.text
 
 
-def test_approvals_json_format(client: TestClient, pending_token: str) -> None:
+def test_approvals_json_format(auth_client: TestClient, pending_token: str) -> None:
     """?format=json devuelve JSON con total + rows + paginación."""
-    r = client.get("/approvals?format=json")
+    r = auth_client.get("/approvals?format=json")
     assert r.status_code == 200
     data = r.json()
     assert "total" in data
@@ -362,9 +376,11 @@ def test_approvals_json_format(client: TestClient, pending_token: str) -> None:
     assert any(row["alert_id"] == "alert-abc" for row in data["rows"])
     # plan_json no debe venir en el JSON (lo strippeamos para no inflar)
     assert all("plan_json" not in row for row in data["rows"])
+    # token NUNCA debe salir en la lista (es la credencial single-use de aprobación)
+    assert all("token" not in row for row in data["rows"])
 
 
-def test_approvals_pagination(client: TestClient, db_path: str) -> None:
+def test_approvals_pagination(auth_client: TestClient, db_path: str) -> None:
     """Limit + offset funcionan correctamente."""
     # Crear 5 approvals para testear paginación
     for i in range(5):
@@ -374,11 +390,11 @@ def test_approvals_pagination(client: TestClient, db_path: str) -> None:
             alert_json="{}",
         ))
 
-    r1 = client.get("/approvals?limit=2&offset=0&format=json")
+    r1 = auth_client.get("/approvals?limit=2&offset=0&format=json")
     assert r1.json()["total"] == 5
     assert len(r1.json()["rows"]) == 2
 
-    r2 = client.get("/approvals?limit=2&offset=2&format=json")
+    r2 = auth_client.get("/approvals?limit=2&offset=2&format=json")
     assert len(r2.json()["rows"]) == 2
 
     # No deben repetirse entre páginas
@@ -387,8 +403,25 @@ def test_approvals_pagination(client: TestClient, db_path: str) -> None:
     assert not (ids_1 & ids_2)
 
 
-def test_approvals_limit_capped_at_500(client: TestClient, db_path: str) -> None:
+def test_approvals_limit_capped_at_500(auth_client: TestClient, db_path: str) -> None:
     """Defensa anti-DoS: limit>500 se capea a 500 internamente (no rompe)."""
-    r = client.get("/approvals?limit=10000&format=json")
+    r = auth_client.get("/approvals?limit=10000&format=json")
     assert r.status_code == 200
     # Aunque devuelva 0 rows (no hay data en este test), la response no falla
+
+
+# ===== /approvals auth (Fase 1: el endpoint expone tokens, exige login) =====
+
+
+def test_approvals_json_without_session_is_401(client: TestClient, pending_token: str) -> None:
+    """Sin cookie de sesión, /approvals?format=json devuelve 401 (no filtra tokens)."""
+    r = client.get("/approvals?format=json")
+    assert r.status_code == 401
+    assert "alert-abc" not in r.text
+
+
+def test_approvals_html_without_session_redirects_to_login(client: TestClient) -> None:
+    """Sin sesión, la vista HTML redirige al login en vez de mostrar la cola."""
+    r = client.get("/approvals", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/login"

@@ -24,7 +24,7 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from src.config import Settings
 from src.models import NormalizedAlert
@@ -33,6 +33,18 @@ from src.security import verify_wazuh_signature
 from src.trace import PipelineTrace
 
 logger = logging.getLogger("soc-l1")
+
+# Background tasks fire-and-forget: guardamos referencia fuerte para que el GC de
+# CPython no las recolecte (y cancele silenciosamente) antes de que terminen.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """create_task anclado: retiene la referencia hasta que la task termina."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 @lru_cache(maxsize=1)
@@ -159,7 +171,7 @@ async def wazuh_webhook(
     )
 
     if settings.enable_triage:
-        asyncio.create_task(_run_triage_in_background(alert, settings))
+        _spawn(_run_triage_in_background(alert, settings))
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -878,13 +890,13 @@ async def _handle_decision(
 
     invgate_rid = row.get("invgate_request_id")
     if invgate_rid:
-        asyncio.create_task(
+        _spawn(
             _update_invgate_on_decision(settings, invgate_rid, decision, alert_id, ip)
         )
 
     if decision == "rejected":
         # row ya trae decided_at/decided_by_ip actualizados; sin ejecución.
-        asyncio.create_task(
+        _spawn(
             _send_closure_safely(settings, row, decision="rejected", execution_results=None)
         )
         return _render_decision_page(
@@ -920,7 +932,7 @@ async def _handle_decision(
         skipped = 0
 
     # Lanzamos el executor en background para responder rápido al humano que clickeó
-    asyncio.create_task(
+    _spawn(
         _execute_approved_plan_in_background(
             settings, token, alert_id, plan, actions_to_run, invgate_rid
         )
@@ -971,7 +983,7 @@ async def _execute_approved_plan_in_background(
         # Cierre: aprobado sin acciones → execution_results=[] (no None)
         row = await get_pending_approval(settings.state_db_path, token)
         if row:
-            asyncio.create_task(
+            _spawn(
                 _send_closure_safely(settings, row, decision="approved", execution_results=[])
             )
         return
@@ -989,7 +1001,7 @@ async def _execute_approved_plan_in_background(
             len(results) - ok_count,
         )
         if invgate_request_id:
-            asyncio.create_task(
+            _spawn(
                 _update_invgate_post_execution(
                     settings, invgate_request_id, alert_id, results
                 )
@@ -997,7 +1009,7 @@ async def _execute_approved_plan_in_background(
         # Cierre: re-leemos el row para tener executed_at + decided_at actualizados
         row = await get_pending_approval(settings.state_db_path, token)
         if row:
-            asyncio.create_task(
+            _spawn(
                 _send_closure_safely(
                     settings, row, decision="approved", execution_results=results
                 )
@@ -1425,6 +1437,7 @@ def _render_approvals_page(
 
 @app.get("/approvals")
 async def list_approvals_endpoint(
+    request: Request,
     settings: SettingsDep,
     status: str | None = None,
     limit: int = 50,
@@ -1433,6 +1446,9 @@ async def list_approvals_endpoint(
 ):
     """Cola de approvals (last N, paginada, filtrable por status).
 
+    Detrás del mismo login que /ui: expone tokens de approval y planes, así que
+    no puede ser anónimo (un token pending filtrado permitiría aprobar acciones).
+
     Query params:
       - status: pending | approved | rejected | expired | executed (opcional)
       - limit: 1-500 (default 50)
@@ -1440,18 +1456,25 @@ async def list_approvals_endpoint(
       - format: html (default) | json
     """
     from src.state import list_approvals
+    from src.web import auth
+
+    if not auth.session_valid(settings, request.cookies.get(auth.COOKIE_NAME)):
+        if format == "json":
+            return JSONResponse(content={"error": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/ui/login", status_code=303)
 
     rows, total = await list_approvals(
         settings.state_db_path, status=status, limit=limit, offset=offset
     )
 
     if format == "json":
-        # JSON: stripeamos plan_json para no devolver objetos masivos en el array
-        # (el caller puede pedir un approval individual si necesita el plan completo)
+        # JSON: stripeamos plan_json (objetos masivos) y token (credencial de
+        # aprobación single-use — nunca debe salir en la lista).
         clean_rows = []
         for r in rows:
             r = dict(r)
             r.pop("plan_json", None)
+            r.pop("token", None)
             clean_rows.append(r)
         return JSONResponse(content={
             "total": total,
