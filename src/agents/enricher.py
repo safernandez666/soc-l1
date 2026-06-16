@@ -18,9 +18,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents import Agent, RunContextWrapper, Runner, function_tool
 from pydantic import BaseModel, ConfigDict, Field
 
+from agents import Agent, RunContextWrapper, function_tool
+from src.agents import run_agent
 from src.config import LdapConfig, Settings
 from src.models import ADUser, NormalizedAlert, WazuhRuleInfo
 from src.tools import ldap as ldap_tools
@@ -503,5 +504,8 @@ async def enrich_alert(
     agent = build_enricher_agent(model=model)
     ctx = EnricherContext(settings=settings, ldap_cfg=ldap_cfg)
     user_input = _alert_to_prompt_input(alert)
-    result = await Runner.run(agent, input=user_input, context=ctx, max_turns=max_turns)
+    result = await run_agent(
+        agent, input=user_input, context=ctx, max_turns=max_turns,
+        timeout=120.0, label="enricher",
+    )
     return result.final_output_as(EnrichmentResult)

@@ -157,6 +157,26 @@ async def test_mark_executed_updates_status_and_result(db: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_executed_returns_true_when_approved(db: str) -> None:
+    token = await create_pending_approval(db, "a", "{}", "{}")
+    await decide_approval(db, token, "approved")
+    assert await mark_executed(db, token, [{"ok": True}]) is True
+
+
+@pytest.mark.asyncio
+async def test_mark_executed_noop_when_not_approved(db: str) -> None:
+    """Si el approval no está 'approved' (p.ej. un reject entró antes), mark_executed
+    no pisa el estado terminal y devuelve False."""
+    token = await create_pending_approval(db, "a", "{}", "{}")
+    await decide_approval(db, token, "rejected")
+    assert await mark_executed(db, token, [{"ok": True}]) is False
+
+    row = await get_pending_approval(db, token)
+    assert row["status"] == "rejected"  # intacto
+    assert row["executed_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_timeline_json_persisted_and_read(db: str) -> None:
     timeline = '[{"stage":"triage","ts":"2026-06-06T00:00:00+00:00","summary":"x"}]'
     token = await create_pending_approval(

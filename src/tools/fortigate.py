@@ -201,10 +201,20 @@ class FortigateClient:
         """
         payload = {"ip_addresses": [ip], "expiry": ttl_seconds}
         try:
-            await self._post("/api/v2/monitor/user/banned/add_users", json=payload)
+            body = await self._post("/api/v2/monitor/user/banned/add_users", json=payload)
         except FortigateError as e:
             return FortigateActionResult(
                 ok=False, ip=ip, action="quarantine_ip", message=str(e)
+            )
+        # FortiOS suele responder HTTP 200 con {"status":"error"} ante fallos
+        # lógicos: validamos el campo status, no solo el código HTTP. Si el body
+        # viene vacío (algunos modelos), el 2xx ya validado en _post alcanza.
+        fg_status = str(body.get("status", "")).lower()
+        if fg_status and fg_status != "success":
+            return FortigateActionResult(
+                ok=False, ip=ip, action="quarantine_ip",
+                message=f"FortiGate rechazó el ban: status={body.get('status')!r} "
+                        f"body={str(body)[:200]}",
             )
         expires_at = (
             datetime.now(tz=timezone.utc) + timedelta(seconds=ttl_seconds)

@@ -193,14 +193,26 @@ def _decide_sync(
         return ("ok", dict(updated) if updated else None)
 
 
-def _mark_executed_sync(db_path: str, token: str, execution_result_json: str) -> None:
+def _mark_executed_sync(db_path: str, token: str, execution_result_json: str) -> bool:
+    """Marca executed solo si el approval sigue en 'approved'.
+
+    El filtro por status evita pisar un estado terminal distinto (p.ej. un reject
+    que entró entre el approve y el mark_executed). Devuelve True si actualizó.
+    """
     with _connect(db_path) as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE pending_approvals "
             "SET status='executed', executed_at=?, execution_result=? "
-            "WHERE token=?",
+            "WHERE token=? AND status='approved'",
             (_now(), execution_result_json, token),
         )
+        if cur.rowcount == 0:
+            logger.warning(
+                "mark_executed no aplicó (estado ya no era 'approved') | token=%s",
+                token[:12],
+            )
+            return False
+        return True
 
 
 # ===== Async wrappers públicas =====
@@ -257,9 +269,12 @@ async def decide_approval(
     )
 
 
-async def mark_executed(db_path: str, token: str, execution_result: list[dict]) -> None:
-    """Marca el approval como ejecutado y guarda el resultado de las acciones."""
-    await asyncio.to_thread(
+async def mark_executed(db_path: str, token: str, execution_result: list[dict]) -> bool:
+    """Marca el approval como ejecutado y guarda el resultado de las acciones.
+
+    Devuelve True si actualizó (estado seguía 'approved'), False si no.
+    """
+    return await asyncio.to_thread(
         _mark_executed_sync,
         db_path,
         token,

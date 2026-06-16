@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
+from agents import Agent
+from src.agents import run_agent
 from src.models import NormalizedAlert
 
 TriageVerdict = Literal["auto_close_benign", "analyze", "fast_track_critical"]
@@ -95,5 +96,5 @@ async def triage_alert(
     """Corre el Triage agent contra una alerta. Devuelve la decisión estructurada."""
     agent = build_triage_agent(model=model)
     user_input = _alert_to_prompt_input(alert)
-    result = await Runner.run(agent, input=user_input)
+    result = await run_agent(agent, input=user_input, timeout=60.0, label="triage")
     return result.final_output_as(TriageDecision)
