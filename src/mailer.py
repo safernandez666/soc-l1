@@ -41,7 +41,7 @@ SEV_STYLES = {
 _DEFAULT_SEV = {"bg": "#475569", "label": "ALERTA"}
 
 BADGE_STYLES = {
-    "default":  ("#f1f5f9", "#334155"),
+    "default":  ("#23272f", "#cbd5e1"),
     "info":     ("#dbeafe", "#1e40af"),
     "success":  ("#dcfce7", "#166534"),
     "warning":  ("#fef3c7", "#92400e"),
@@ -132,7 +132,7 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         ("Alert ID",       f"<code>{_esc(alert.alert_id)}</code>"),
         ("Host",           (
             f"<strong>{_esc(alert.device.hostname)}</strong>"
-            + (f" <code style='color:#64748b;'>{_esc(alert.device.internal_ip)}</code>"
+            + (f" <code style='color:#94a3b8;'>{_esc(alert.device.internal_ip)}</code>"
                if alert.device.internal_ip else "")
         )),
         ("Severidad Wazuh", _badge(alert.severity_source.upper(), sev_badge_style)),
@@ -147,7 +147,7 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
     if alert.users_involved:
         users_html = ", ".join(
             f"<code>{_esc(u.sam)}</code> "
-            f"<span style='color:#64748b;font-size:11px;'>({_esc(u.role)})</span>"
+            f"<span style='color:#94a3b8;font-size:11px;'>({_esc(u.role)})</span>"
             for u in alert.users_involved
         )
         rows.append(("Usuarios", users_html))
@@ -162,11 +162,11 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
             sha = (f.sha256[:16] + "…") if f.sha256 else "-"
             files_html_parts.append(
                 f"{badge_html} <strong>{_esc(name)}</strong> "
-                f"<code style='font-size:11px;color:#64748b;'>{_esc(sha)}</code>"
+                f"<code style='font-size:11px;color:#94a3b8;'>{_esc(sha)}</code>"
             )
         files_html = "<br>".join(files_html_parts)
         if len(alert.files) > 3:
-            files_html += f"<br><em style='color:#64748b;'>+{len(alert.files) - 3} más…</em>"
+            files_html += f"<br><em style='color:#94a3b8;'>+{len(alert.files) - 3} más…</em>"
         rows.append(("Archivos", files_html))
 
     return "\n".join(
@@ -179,16 +179,16 @@ def _actions_html(plan: NarratorPlan) -> str:
     """Lista <li> con cada acción propuesta."""
     if not plan.actions:
         return (
-            "<li style='color:#64748b;font-style:italic;'>"
+            "<li style='color:#94a3b8;font-style:italic;'>"
             "(ninguna - monitor only)</li>"
         )
     items = []
     for a in plan.actions:
         items.append(
             f"<li><strong>{_esc(a.type)}</strong> → "
-            f"<code style='background:#e0f2fe;padding:2px 6px;border-radius:3px;'>"
+            f"<code style='background:#1b2b3a;padding:2px 6px;border-radius:3px;'>"
             f"{_esc(a.target)}</code>"
-            f"<div style='font-size:12px;color:#475569;margin-top:4px;line-height:1.5;'>"
+            f"<div style='font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5;'>"
             f"{_esc(a.justification)}</div></li>"
         )
     return "\n".join(items)
@@ -268,22 +268,26 @@ def _build_html_body(
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="supported-color-schemes" content="dark light">
   <title>SOC L1 — {_esc(alert.title)}</title>
   <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
-    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
-    .title {{ font-size: 24px; font-weight: bold; margin-bottom: 8px; color: #0f172a; }}
-    .pivot-section {{ background: #fef2f2; padding: 16px; margin: 20px; border-radius: 8px; border-left: 4px solid {color}; }}
-    .pivot-label {{ font-weight: bold; color: #374151; margin-bottom: 4px; font-size: 13px; }}
-    .pivot-value {{ font-family: monospace; font-size: 15px; font-weight: bold; color: #1f2937; }}
-    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-    .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
-    .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; color: #475569; font-size: 13px; }}
-    .info-table .value {{ font-size: 13px; color: #0f172a; }}
-    .approval-section {{ background: #f8fafc; padding: 24px; margin: 20px; border-radius: 8px; border: 1px solid #e5e7eb; text-align: center; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
-    code {{ font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }}
+    :root {{ color-scheme: dark light; supported-color-schemes: dark light; }}
+    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#e5e7eb; }}
+    .container {{ max-width:800px; margin:0 auto; background-color:#14171c; border:1px solid #23272f; border-radius:12px; overflow:hidden; }}
+    .header {{ padding:24px; border-left:8px solid {color}; background-color:#0b0d10; }}
+    .title {{ font-size:24px; font-weight:bold; margin-bottom:8px; color:#f3f4f6; }}
+    .pivot-section {{ background-color:#1b1f26; padding:16px; margin:20px; border-radius:8px; border-left:4px solid {color}; }}
+    .pivot-label {{ font-weight:bold; color:#94a3b8; margin-bottom:4px; font-size:13px; }}
+    .pivot-value {{ font-family:monospace; font-size:15px; font-weight:bold; color:#f3f4f6; }}
+    .info-table {{ width:100%; border-collapse:collapse; margin:20px 0; }}
+    .info-table td {{ padding:12px 16px; border-bottom:1px solid #23272f; vertical-align:top; }}
+    .info-table .label {{ font-weight:bold; width:160px; background-color:#1b1f26; color:#94a3b8; font-size:13px; }}
+    .info-table .value {{ font-size:13px; color:#e5e7eb; }}
+    .approval-section {{ background-color:#1b1f26; padding:24px; margin:20px; border-radius:8px; border:1px solid #23272f; text-align:center; }}
+    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
+    code {{ font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
   </style>
 </head>
 <body>
@@ -292,7 +296,7 @@ def _build_html_body(
     <!-- Header con border-left por severidad (estilo Wazuh) -->
     <div class="header">
       <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:14px;color:#64748b;margin-top:4px;">
+      <div style="font-size:14px;color:#94a3b8;margin-top:4px;">
         {_esc(alert.wazuh_rule.description)}
       </div>
       <div style="margin-top:10px;">
@@ -310,10 +314,10 @@ def _build_html_body(
 
     <!-- Resumen ejecutivo del Narrator (estilo párrafo, fuera de tabla) -->
     <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:8px;">
+      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin-bottom:8px;">
         📝 Resumen ejecutivo
       </div>
-      <div style="color:#334155;font-size:14px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#cbd5e1;font-size:14px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.executive_summary)}
       </div>
     </div>
@@ -326,31 +330,31 @@ def _build_html_body(
     </div>
 
     <!-- Card amarilla "Recomendación" (= Análisis del Narrator) -->
-    <div style="background:#fef3c7;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
-      <div style="font-weight:bold;color:#92400e;margin-bottom:8px;font-size:14px;">
+    <div style="background-color:#241c10;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
+      <div style="font-weight:bold;color:#fbbf78;margin-bottom:8px;font-size:14px;">
         💡 Análisis del incidente:
       </div>
-      <div style="color:#78350f;font-size:13px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#e8d5b0;font-size:13px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.rationale)}
       </div>
     </div>
 
     <!-- Card azul "Acciones Sugeridas" (= ProposedActions del Narrator) -->
-    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
-      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
+    <div style="background:#0f1d26;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #38bdf8;">
+      <div style="font-weight:bold;color:#7dd3fc;margin-bottom:12px;font-size:14px;">
         📋 Acciones propuestas ({len(plan.actions)}):
       </div>
-      <ul style="margin:8px 0;padding-left:24px;color:#075985;font-size:13px;line-height:1.8;">
+      <ul style="margin:8px 0;padding-left:24px;color:#bae6fd;font-size:13px;line-height:1.8;">
         {_actions_html(plan)}
       </ul>
     </div>
 
     <!-- Approval section: sutil, sin banner fuerte -->
     <div class="approval-section">
-      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin-bottom:6px;">
+      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin-bottom:6px;">
         ⚠️ Esta alerta requiere tu aprobación
       </div>
-      <div style="color:#64748b;font-size:12px;margin-bottom:16px;">
+      <div style="color:#94a3b8;font-size:12px;margin-bottom:16px;">
         Link single-use, válido por {ttl_hours}h. Primer click decide.
       </div>
       {cta_buttons}
@@ -542,17 +546,17 @@ def _timeline_rows_html(events: list[dict]) -> str:
     for e in events:
         style, label = _STAGE_META.get(e.get("stage", ""), ("default", (e.get("stage") or "?").upper()))
         detail_html = (
-            f"<div style='font-size:11px;color:#64748b;margin-top:3px;'>{_esc(e.get('detail'))}</div>"
+            f"<div style='font-size:11px;color:#94a3b8;margin-top:3px;'>{_esc(e.get('detail'))}</div>"
             if e.get("detail") else ""
         )
         rows.append(
             "<tr>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;white-space:nowrap;"
-            f"vertical-align:top;font:bold 12px monospace;color:#475569;'>{_fmt_clock(e.get('ts'))}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;white-space:nowrap;"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;white-space:nowrap;"
+            f"vertical-align:top;font:bold 12px monospace;color:#94a3b8;'>{_fmt_clock(e.get('ts'))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;white-space:nowrap;"
             f"vertical-align:top;'>{_badge(label, style)}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top;"
-            f"font-size:13px;color:#0f172a;line-height:1.5;'>{_esc(e.get('summary'))}{detail_html}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;vertical-align:top;"
+            f"font-size:13px;color:#f3f4f6;line-height:1.5;'>{_esc(e.get('summary'))}{detail_html}</td>"
             "</tr>"
         )
     return "\n".join(rows)
@@ -567,17 +571,17 @@ def _execution_rows_html(execution_results: list[dict] | None) -> str:
         ok = r.get("ok")
         tag_style = "success" if ok else "danger"
         tag = "OK" if ok else "FAIL"
-        msg = f" <span style='color:#64748b;'>— {_esc(r.get('message'))}</span>" if r.get("message") else ""
+        msg = f" <span style='color:#94a3b8;'>— {_esc(r.get('message'))}</span>" if r.get("message") else ""
         items.append(
             f"<li style='margin:6px 0;'>{_badge(tag, tag_style)} "
             f"<strong style='font-family:monospace;'>{_esc(r.get('action_type'))}</strong> → "
-            f"<code style='background:#e0f2fe;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
+            f"<code style='background:#1b2b3a;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
             f"{msg}</li>"
         )
     return (
-        "<div style='background:#f8fafc;padding:16px;margin:20px;border-radius:8px;"
-        "border-left:4px solid #475569;'>"
-        "<div style='font-weight:bold;color:#0f172a;margin-bottom:8px;font-size:14px;'>"
+        "<div style='background-color:#1b1f26;padding:16px;margin:20px;border-radius:8px;"
+        "border-left:4px solid #64748b;'>"
+        "<div style='font-weight:bold;color:#f3f4f6;margin-bottom:8px;font-size:14px;'>"
         "⚙️ Resultado de la ejecución</div>"
         f"<ul style='margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7;'>{''.join(items)}</ul>"
         "</div>"
@@ -642,22 +646,25 @@ def _build_closure_html_body(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="supported-color-schemes" content="dark light">
   <title>SOC L1 — Caso cerrado {_esc(alert.alert_id)}</title>
   <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
-    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
-    .title {{ font-size: 22px; font-weight: bold; margin-bottom: 8px; color: #0f172a; }}
-    .tl-table {{ width: 100%; border-collapse: collapse; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
-    code {{ font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }}
+    :root {{ color-scheme: dark light; supported-color-schemes: dark light; }}
+    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#e5e7eb; }}
+    .container {{ max-width:800px; margin:0 auto; background-color:#14171c; border:1px solid #23272f; border-radius:12px; overflow:hidden; }}
+    .header {{ padding:24px; border-left:8px solid {color}; background-color:#0b0d10; }}
+    .title {{ font-size:22px; font-weight:bold; margin-bottom:8px; color:#f3f4f6; }}
+    .tl-table {{ width:100%; border-collapse:collapse; }}
+    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
+    code {{ font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:13px;color:#64748b;margin-top:4px;">
+      <div style="font-size:13px;color:#94a3b8;margin-top:4px;">
         Alerta <code>{_esc(alert.alert_id)}</code> · host <strong>{_esc(alert.device.hostname)}</strong>
       </div>
       <div style="margin-top:10px;">
@@ -668,16 +675,16 @@ def _build_closure_html_body(
     </div>
 
     <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#0f172a;font-size:14px;margin:20px 0 8px;">
+      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin:20px 0 8px;">
         📝 Resumen ejecutivo
       </div>
-      <div style="color:#334155;font-size:14px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#cbd5e1;font-size:14px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.executive_summary)}
       </div>
     </div>
 
-    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
-      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
+    <div style="background:#0f1d26;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #38bdf8;">
+      <div style="font-weight:bold;color:#7dd3fc;margin-bottom:12px;font-size:14px;">
         🕐 Timeline del caso
       </div>
       <table class="tl-table">

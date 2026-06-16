@@ -210,6 +210,28 @@ class Settings(BaseSettings):
     approval_ttl_hours: int = Field(default=24)
     state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
 
+    # DB del Wazuh Health Squad (probes de cobertura/capacidad/higiene). Solo-lectura
+    # desde el panel /ui para los KPIs de salud de Wazuh. La escribe el daemon aparte.
+    wazuh_health_db_path: str = Field(default="/var/lib/wazuh-health/state.db")
+
+    # KPIs de volumen de alertas (panel /ui). El agregador (scripts/aggregate_alert_volume.py)
+    # recorre los archivos rotados de Wazuh y deja un JSON con el conteo mensual; el panel
+    # lo lee solo-lectura (descomprimir en cada request sería inviable).
+    wazuh_alerts_archive_dir: str = Field(default="/var/ossec/logs/alerts")
+    alert_volume_cache_path: str = Field(default="/var/lib/soc-l1/alert_volume.json")
+
+    # ===== GUI / Dashboard (ZebraSecurity) =====
+    # Panel de revisión solo-lectura sobre state.db, servido en /ui detrás de login.
+    # Si dashboard_password queda vacío, el login rechaza todo (dashboard inhabilitado).
+    dashboard_enabled: bool = Field(default=True)
+    dashboard_password: str = Field(
+        default="",
+        description="Password compartido para entrar al panel /ui. Vacío = panel inaccesible.",
+    )
+    # Secreto para firmar la cookie de sesión (HMAC). Si vacío, se deriva del webhook secret.
+    dashboard_session_secret: str = Field(default="")
+    dashboard_session_hours: int = Field(default=12)
+
     # Lista de cuentas "intocables" - el executor refusa disable_user/force_password
     # sobre estos sams sin importar si el approval se clickeó. Defensa en profundidad
     # para evitar que un Narrator agresivo + click accidental desactive cuentas críticas.

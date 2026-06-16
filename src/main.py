@@ -656,7 +656,7 @@ async def _update_invgate_post_execution(
 _PAGE_STATES = {
     "approved":    {"banner": "#15803d", "accent": "#16a34a", "icon": "✅", "title": "Aprobado"},
     "rejected":    {"banner": "#9a3412", "accent": "#ea580c", "icon": "❌", "title": "Rechazado"},
-    "already":     {"banner": "#475569", "accent": "#64748b", "icon": "ℹ️",  "title": "Ya decidido"},
+    "already":     {"banner": "#475569", "accent": "#94a3b8", "icon": "ℹ️",  "title": "Ya decidido"},
     "expired":     {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "⏱️",  "title": "Expirado"},
     "not_found":   {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "🚫", "title": "Token inválido"},
     "error":       {"banner": "#7f1d1d", "accent": "#991b1b", "icon": "⚠️",  "title": "Error"},
@@ -696,23 +696,25 @@ def _render_decision_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>SOC L1 · {s["title"]}</title>
   <style>
+    :root {{ color-scheme: dark light; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #f8fafc; margin: 0; padding: 40px 20px; color: #0f172a; }}
-    .container {{ max-width: 560px; margin: 0 auto; background: white;
-                  border-radius: 12px; overflow: hidden;
-                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-    .banner {{ background: {s["banner"]}; color: white; padding: 32px 24px; text-align: center; }}
-    .icon {{ font-size: 48px; line-height: 1; margin-bottom: 12px; }}
-    .heading {{ font-size: 22px; font-weight: bold; margin: 0; }}
-    .body {{ padding: 28px 24px; font-size: 14px; line-height: 1.6; color: #334155;
-             text-align: center; border-left: 4px solid {s["accent"]}; margin: 0 24px;
-             background: #f9fafb; border-radius: 6px; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center;
-               font-size: 12px; color: #64748b; }}
-    code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 3px;
-            font-family: 'SF Mono', Monaco, monospace; font-size: 12px; color: #0f172a; }}
+            background-color:#0b0d10; margin:0; padding:40px 20px; color:#f3f4f6; }}
+    .container {{ max-width:560px; margin:0 auto; background-color:#14171c;
+                  border:1px solid #23272f; border-radius:12px; overflow:hidden;
+                  box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
+    .banner {{ background:{s["banner"]}; color:white; padding:32px 24px; text-align:center; }}
+    .icon {{ font-size:48px; line-height:1; margin-bottom:12px; }}
+    .heading {{ font-size:22px; font-weight:bold; margin:0; }}
+    .body {{ padding:28px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
+             text-align:center; border-left:4px solid {s["accent"]}; margin:0 24px;
+             background-color:#1b1f26; border-radius:6px; }}
+    .footer {{ padding:16px; background-color:#0b0d10; text-align:center;
+               font-size:12px; color:#94a3b8; }}
+    code {{ background-color:#23272f; padding:2px 6px; border-radius:3px;
+            font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
   </style>
 </head>
 <body>
@@ -731,7 +733,7 @@ def _render_decision_page(
                      background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
         ✕ Cerrar pestaña
       </button>
-      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#64748b;">
+      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#94a3b8;">
         Esta pestaña ya cumplió su función — podés cerrarla cuando quieras.
       </p>
     </div>
@@ -949,7 +951,7 @@ async def _handle_decision(
                 f"<br><br>({skipped} acción{'es' if skipped > 1 else ''} "
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
-        body += '<br><br><span style="font-size:12px;color:#64748b;">El resultado queda en logs y SQLite.</span>'
+        body += '<br><br><span style="font-size:12px;color:#94a3b8;">El resultado queda en logs y SQLite.</span>'
     return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
 
 
@@ -1029,7 +1031,7 @@ def _render_review_page(
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
         actions_html = (
-            "<p style='color:#64748b;font-style:italic;'>El plan no incluye acciones "
+            "<p style='color:#94a3b8;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
     else:
@@ -1041,18 +1043,18 @@ def _render_review_page(
                 "block_ip": "#7f1d1d",
                 "scan_host": "#0891b2",
                 "isolate_host": "#9333ea",
-                "notify_only": "#0284c7",
+                "notify_only": "#38bdf8",
                 "escalate_l2": "#a16207",
             }.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
-                                  background:#f9fafb;border-radius:6px;border-left:4px solid {action_color};
+                                  background-color:#1b1f26;border-radius:6px;border-left:4px solid {action_color};
                                   cursor:pointer;">
                   <input type="checkbox" name="action_idx" value="{i}" checked
                          style="margin-right:10px;transform:scale(1.3);vertical-align:middle;">
                   <strong style="font-family:monospace;color:{action_color};">{_h.escape(a.type)}</strong>
-                  → <code style="background:#e0f2fe;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
-                  <div style="margin:6px 0 0 30px;font-size:12px;color:#475569;line-height:1.5;">
+                  → <code style="background-color:#1b2b3a;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 30px;font-size:12px;color:#94a3b8;line-height:1.5;">
                     {_h.escape(a.justification)}
                   </div>
                 </label>"""
@@ -1063,30 +1065,33 @@ def _render_review_page(
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>SOC L1 · Revisar plan {alert_id}</title>
   <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }}
-    .container {{ max-width: 760px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;
-                  box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-    .header {{ padding: 24px; border-left: 8px solid {risk_color}; background: #f8fafc; }}
-    h1 {{ font-size: 20px; margin: 0 0 8px 0; }}
-    .meta {{ font-size: 13px; color: #64748b; }}
-    .badge {{ display: inline-block; padding: 4px 12px; border-radius: 16px;
-              background: {risk_color}; color: white; font: bold 11px sans-serif;
-              text-transform: uppercase; margin-top: 8px; }}
-    .summary {{ padding: 16px 24px; font-size: 14px; line-height: 1.6; color: #334155;
-                background: #fef3c7; margin: 20px; border-radius: 8px;
-                border-left: 4px solid #f59e0b; }}
-    .form-section {{ padding: 0 24px 16px; }}
-    .form-section h2 {{ font-size: 16px; margin: 16px 0 12px; }}
-    .buttons {{ padding: 16px 24px 24px; display: flex; gap: 12px; flex-wrap: wrap; }}
-    .btn {{ padding: 14px 28px; border: none; border-radius: 6px; font-weight: bold;
-            font-size: 14px; cursor: pointer; }}
-    .btn-approve {{ background: #16a34a; color: white; }}
-    .btn-approve:hover {{ background: #15803d; }}
-    .btn-reject {{ background: #dc2626; color: white; }}
-    .btn-reject:hover {{ background: #b91c1c; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+    :root {{ color-scheme: dark light; }}
+    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#f3f4f6; }}
+    .container {{ max-width:760px; margin:0 auto; background-color:#14171c; border:1px solid #23272f;
+                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
+    .header {{ padding:24px; border-left:8px solid {risk_color}; background-color:#0b0d10; }}
+    h1 {{ font-size:20px; margin:0 0 8px 0; color:#f3f4f6; }}
+    .meta {{ font-size:13px; color:#94a3b8; }}
+    .badge {{ display:inline-block; padding:4px 12px; border-radius:16px;
+              background:{risk_color}; color:white; font:bold 11px sans-serif;
+              text-transform:uppercase; margin-top:8px; }}
+    .summary {{ padding:16px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
+                background-color:#241c10; margin:20px; border-radius:8px;
+                border-left:4px solid #f59e0b; }}
+    .form-section {{ padding:0 24px 16px; }}
+    .form-section h2 {{ font-size:16px; margin:16px 0 12px; color:#f3f4f6; }}
+    .buttons {{ padding:16px 24px 24px; display:flex; gap:12px; flex-wrap:wrap; }}
+    .btn {{ padding:14px 28px; border:none; border-radius:6px; font-weight:bold;
+            font-size:14px; cursor:pointer; }}
+    .btn-approve {{ background:#16a34a; color:white; }}
+    .btn-approve:hover {{ background:#15803d; }}
+    .btn-reject {{ background:#dc2626; color:white; }}
+    .btn-reject:hover {{ background:#b91c1c; }}
+    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
   </style>
 </head>
 <body>
@@ -1098,14 +1103,14 @@ def _render_review_page(
     </div>
 
     <div class="summary">
-      <strong style="color:#92400e;">📝 Resumen ejecutivo:</strong><br>
+      <strong style="color:#fbbf78;">📝 Resumen ejecutivo:</strong><br>
       {_h.escape(plan.executive_summary)}
     </div>
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
         <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#64748b;margin:0 0 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0 0 12px;">
           Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
           O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
         </p>
@@ -1221,7 +1226,7 @@ _STATUS_BADGES = {
     "pending":  {"bg": "#fef3c7", "fg": "#92400e"},  # amarillo
     "approved": {"bg": "#dcfce7", "fg": "#166534"},  # verde
     "rejected": {"bg": "#fee2e2", "fg": "#7f1d1d"},  # rojo
-    "expired":  {"bg": "#f1f5f9", "fg": "#334155"},  # gris
+    "expired":  {"bg": "#23272f", "fg": "#334155"},  # gris
     "executed": {"bg": "#dbeafe", "fg": "#1e40af"},  # azul
 }
 
@@ -1235,7 +1240,7 @@ def _render_approvals_page(
 
     if not rows:
         empty_msg = (
-            "<p style='color:#64748b;font-style:italic;text-align:center;padding:40px;'>"
+            "<p style='color:#94a3b8;font-style:italic;text-align:center;padding:40px;'>"
             "No hay approvals que mostrar"
             + (f" con status='{_h.escape(status_filter)}'" if status_filter else "")
             + ".</p>"
@@ -1262,7 +1267,7 @@ def _render_approvals_page(
             }.get(risk, "#475569")
 
             status = row.get("status", "?")
-            badge = _STATUS_BADGES.get(status, {"bg": "#f1f5f9", "fg": "#334155"})
+            badge = _STATUS_BADGES.get(status, {"bg": "#23272f", "fg": "#334155"})
 
             decided = row.get("decided_at") or "—"
             decided_by = row.get("decided_by_ip") or "—"
@@ -1279,7 +1284,7 @@ def _render_approvals_page(
             if status == "pending":
                 alert_cell = (
                     f"<a href='/review/{token}' "
-                    f"style='color:#0284c7;text-decoration:none;'>{alert_id}</a>"
+                    f"style='color:#38bdf8;text-decoration:none;'>{alert_id}</a>"
                 )
             else:
                 alert_cell = alert_id
@@ -1293,26 +1298,26 @@ def _render_approvals_page(
                   <td><span style='background:{badge["bg"]};color:{badge["fg"]};
                                     padding:3px 10px;border-radius:12px;
                                     font:bold 10px sans-serif;text-transform:uppercase;'>{_h.escape(status)}</span></td>
-                  <td style='font-size:12px;color:#475569;'>{_h.escape(actions_summary)}</td>
-                  <td style='font-size:11px;color:#64748b;'>{_h.escape(row.get("created_at", "")[:19])}</td>
-                  <td style='font-size:11px;color:#64748b;'>{_h.escape(decided[:19] if decided != "—" else "—")}</td>
-                  <td style='font-size:11px;color:#64748b;'>{_h.escape(decided_by)}</td>
+                  <td style='font-size:12px;color:#cbd5e1;'>{_h.escape(actions_summary)}</td>
+                  <td style='font-size:11px;color:#94a3b8;'>{_h.escape(row.get("created_at", "")[:19])}</td>
+                  <td style='font-size:11px;color:#94a3b8;'>{_h.escape(decided[:19] if decided != "—" else "—")}</td>
+                  <td style='font-size:11px;color:#94a3b8;'>{_h.escape(decided_by)}</td>
                 </tr>"""
             )
         rows_html = (
             "<table style='width:100%;border-collapse:collapse;'>"
-            "<thead><tr style='background:#f8fafc;text-align:left;'>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Alert ID</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Risk</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Status</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Acciones</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Creado</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Decidido</th>"
-            "<th style='padding:10px;border-bottom:2px solid #e5e7eb;font-size:12px;color:#475569;'>Por IP</th>"
+            "<thead><tr style='background:#0b0d10;text-align:left;'>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Alert ID</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Risk</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Status</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Acciones</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Creado</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Decidido</th>"
+            "<th style='padding:10px;border-bottom:2px solid #23272f;font-size:12px;color:#94a3b8;'>Por IP</th>"
             "</tr></thead>"
             "<tbody>"
             + "\n".join(
-                f"<tr style='border-bottom:1px solid #f1f5f9;'>{r[4:]}"
+                f"<tr style='border-bottom:1px solid #23272f;'>{r[4:]}"
                 for r in row_lines
             )
             + "</tbody></table>"
@@ -1326,8 +1331,8 @@ def _render_approvals_page(
     def _filter_link(label: str, st: str | None) -> str:
         url = "/approvals" if st is None else f"/approvals?status={st}"
         active = (st == status_filter) or (st is None and not status_filter)
-        bg = "#0284c7" if active else "#f1f5f9"
-        fg = "white" if active else "#475569"
+        bg = "#38bdf8" if active else "#23272f"
+        fg = "white" if active else "#cbd5e1"
         return (
             f"<a href='{url}' style='display:inline-block;padding:6px 14px;"
             f"background:{bg};color:{fg};border-radius:4px;text-decoration:none;"
@@ -1354,8 +1359,8 @@ def _render_approvals_page(
         if status_filter:
             url += f"&status={status_filter}"
         pag_parts.append(
-            f"<a href='{url}' style='padding:6px 14px;background:#f1f5f9;"
-            f"color:#475569;border-radius:4px;text-decoration:none;font-size:12px;'>"
+            f"<a href='{url}' style='padding:6px 14px;background:#23272f;"
+            f"color:#94a3b8;border-radius:4px;text-decoration:none;font-size:12px;'>"
             f"← Anteriores</a>"
         )
     if showing_to < total:
@@ -1364,8 +1369,8 @@ def _render_approvals_page(
         if status_filter:
             url += f"&status={status_filter}"
         pag_parts.append(
-            f"<a href='{url}' style='padding:6px 14px;background:#f1f5f9;"
-            f"color:#475569;border-radius:4px;text-decoration:none;font-size:12px;margin-left:6px;'>"
+            f"<a href='{url}' style='padding:6px 14px;background:#23272f;"
+            f"color:#94a3b8;border-radius:4px;text-decoration:none;font-size:12px;margin-left:6px;'>"
             f"Siguientes →</a>"
         )
     pag_html = " ".join(pag_parts)
@@ -1374,20 +1379,23 @@ def _render_approvals_page(
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>SOC L1 · Approvals</title>
   <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #0f172a; }}
-    .container {{ max-width: 1280px; margin: 0 auto; background: white; border-radius: 12px;
-                  overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-    .header {{ padding: 20px 24px; border-left: 8px solid #0284c7; background: #f8fafc; }}
-    .header h1 {{ font-size: 20px; margin: 0 0 4px 0; }}
-    .meta {{ font-size: 13px; color: #64748b; }}
-    .filters {{ padding: 16px 24px; border-bottom: 1px solid #e5e7eb; }}
-    .table-wrap {{ padding: 16px 24px; overflow-x: auto; }}
-    .pagination {{ padding: 16px 24px; text-align: center; border-top: 1px solid #f1f5f9; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
-    code {{ font-family: 'SF Mono', Monaco, monospace; }}
-    a:hover {{ opacity: 0.85; }}
+    :root {{ color-scheme: dark light; }}
+    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#f3f4f6; }}
+    .container {{ max-width:1280px; margin:0 auto; background-color:#14171c; border:1px solid #23272f;
+                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
+    .header {{ padding:20px 24px; border-left:8px solid #38bdf8; background-color:#0b0d10; }}
+    .header h1 {{ font-size:20px; margin:0 0 4px 0; color:#f3f4f6; }}
+    .meta {{ font-size:13px; color:#94a3b8; }}
+    .filters {{ padding:16px 24px; border-bottom:1px solid #23272f; }}
+    .table-wrap {{ padding:16px 24px; overflow-x:auto; }}
+    .pagination {{ padding:16px 24px; text-align:center; border-top:1px solid #23272f; }}
+    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
+    code {{ font-family:'SF Mono',Monaco,monospace; color:#cbd5e1; }}
+    a:hover {{ opacity:0.85; }}
   </style>
 </head>
 <body>
@@ -1452,3 +1460,11 @@ async def list_approvals_endpoint(
         })
 
     return _render_approvals_page(rows, total, status, limit, offset)
+
+
+# ===== GUI / Dashboard (ZebraSecurity) =====
+# Panel de revisión solo-lectura en /ui, detrás de login. Import al final para
+# evitar import circular (src.web define su propio get_settings).
+from src.web import router as _web_router  # noqa: E402
+
+app.include_router(_web_router)

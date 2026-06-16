@@ -1,8 +1,23 @@
-# SOC L1 — Multi-agent SOAR para Wazuh + Microsoft Defender
+# 🛡️ SOC L1 — Multi-agent SOAR para Wazuh + Microsoft Defender
 
-Servicio Python que automatiza el triage inicial de alertas de Wazuh (nativas o forwardeadas
-desde Microsoft Defender for Endpoint) usando un pipeline de agentes LLM y un flujo de
-aprobación humana por email antes de ejecutar acciones en Active Directory.
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
+![Status](https://img.shields.io/badge/status-producci%C3%B3n-success)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
+![LLM](https://img.shields.io/badge/LLM-OpenAI%20gpt--4o-412991)
+![Human in the loop](https://img.shields.io/badge/human--in--the--loop-✓-orange)
+
+Servicio Python que automatiza el **triage inicial** de alertas de Wazuh (nativas o
+forwardeadas desde Microsoft Defender for Endpoint) con un pipeline de **agentes LLM** y
+un flujo de **aprobación humana por email** antes de ejecutar acciones de respuesta en
+Active Directory, FortiGate y Microsoft Defender for Endpoint.
+
+### Por qué
+
+- 🤖 **Triage automático 24/7** — clasifica, enriquece y narra cada alerta en ~10-20 s.
+- ✋ **Humano en el loop** — ninguna acción se ejecuta sin aprobación por email (link single-use, TTL 24 h).
+- 🔒 **Sin LLM en el path de ejecución** — las acciones reales las corre un dispatcher determinístico, nunca el modelo (defensa anti prompt-injection).
+- 🧰 **Respuesta multi-plataforma** — AD (deshabilitar user, reset pass), FortiGate (block IP), Defender (scan / aislar host).
+- 📊 **Visibilidad** — dashboard `/ui` (ZebraSecurity), cola `/approvals` y emails con timeline por agente.
 
 ```
 ┌─────────┐  HMAC   ┌──────────┐    ┌────────┐    ┌──────────┐  ┌────────────┐    ┌──────────┐
@@ -39,6 +54,7 @@ humana, nunca el LLM. Defensa contra prompt injection con efecto side-effect.
 - [Estado actual](#estado-actual)
 - [Pipeline](#pipeline)
 - [Quickstart](#quickstart)
+- [Dashboard de revisión (`/ui`)](#dashboard-de-revisión-ui)
 - [Configuración (`.env`)](#configuración-env)
 - [Comandos comunes](#comandos-comunes)
 - [Arquitectura](#arquitectura)
@@ -60,16 +76,20 @@ humana, nunca el LLM. Defensa contra prompt injection con efecto side-effect.
 | ThreatIntel agent | ✅ | gpt-4o; consulta VirusTotal + AbuseIPDB + **FortiGate** (sessions + quarantine status) |
 | **FortiGate integration** | ✅ | Tool `fortigate_check_ip` + acción `block_ip` (quarantine via REST API) |
 | Narrator agent | ✅ | gpt-4o; produce plan estructurado con `ProposedAction[]` (incluye `block_ip`) |
-| Email approval | ✅ | SMTP (Exchange 2016 STARTTLS), branded HTML matching Wazuh look |
+| Email approval | ✅ | SMTP (Exchange 2016 STARTTLS), HTML oscuro (ZebraSecurity), robusto en Apple Mail / Outlook |
 | Approval endpoints | ✅ | `/approve/{token}` y `/reject/{token}`, single-use, TTL 24h (backwards compat) |
 | **Granular approval** | ✅ | `/review/{token}` con checkboxes per-action + `/decide/{token}` POST handler |
 | Executor | ✅ | Dispatcher determinístico con guardrails (PROTECTED_USERS, **PROTECTED_NETWORKS**, DRY_RUN_MODE) |
 | State (SQLite) | ✅ | Pending approvals con audit trail (IP, UA, timestamps, **selected_actions**) |
 | **Dashboard `/approvals`** | ✅ | HTML table + JSON API con filtros por status + paginación |
+| **Defender response (MDE)** | ✅ | Acciones `scan_host` + `isolate_host` vía Microsoft Defender for Endpoint API |
+| **InvGate ticketing** | ✅ | Creación de tickets + comentarios verificados en el flujo de aprobación |
+| **Email de cierre + timeline** | ✅ | Notificación post-decisión con timeline por agente y resultado de ejecución |
+| **Dashboard `/ui` (ZebraSecurity)** | ✅ | Panel de revisión solo-lectura sobre `state.db`, login por cookie firmada, tema oscuro |
 | systemd service | ✅ | `deploy/soc-l1.service` + `scripts/install-systemd.sh` |
 | **Backup automático** | ✅ | systemd timer diario (02:00) con SQLite online backup + retención 30 días |
 | Observability | ✅ | Logs estructurados por agente y por tool call |
-| Tests | ✅ | 166 tests (respx para HTTP, mock LDAP, FortiGate, e2e approval flow) |
+| Tests | ✅ | respx para HTTP, mock LDAP, FortiGate/Defender, e2e approval flow |
 
 ---
 
@@ -202,6 +222,31 @@ journalctl -u soc-l1 -f
 # o
 ./scripts/restart.sh logs
 ```
+
+---
+
+## Dashboard de revisión (`/ui`)
+
+Panel web **solo-lectura** sobre `state.db` para revisar la cola de aprobaciones y el
+detalle de cada caso, sin tocar el flujo de ejecución. Server-rendered con stdlib (sin
+dependencias nuevas), look **ZebraSecurity** (oscuro + lima).
+
+```
+http://<host>:8000/ui
+```
+
+- **Login por contraseña compartida** (cookie de sesión firmada con HMAC, TTL configurable).
+  Se habilita seteando `DASHBOARD_PASSWORD` en el `.env`; si queda vacío, el panel rechaza todo.
+- **Solo lectura**: lee `state.db`, no expone acciones — las decisiones se siguen tomando
+  desde el email / `/review/{token}`.
+- Convive con la cola operativa `GET /approvals` (HTML + `?format=json`).
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `DASHBOARD_ENABLED` | `true` | Habilita el router `/ui` |
+| `DASHBOARD_PASSWORD` | _(vacío)_ | Contraseña del panel. Vacío = inaccesible |
+| `DASHBOARD_SESSION_SECRET` | _(deriva del webhook secret)_ | Secreto para firmar la cookie |
+| `DASHBOARD_SESSION_HOURS` | `12` | Duración de la sesión |
 
 ---
 

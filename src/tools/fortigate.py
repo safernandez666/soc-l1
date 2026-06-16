@@ -168,6 +168,29 @@ class FortigateClient:
                 return (True, expires_iso)
         return (False, None)
 
+    async def list_banned(self) -> list[dict[str, Any]]:
+        """Lista todas las IPs en quarantine (banned users) del FortiGate.
+
+        GET /api/v2/monitor/user/banned/select → results: [{ip_address, expires, ...}].
+        Read-only; lo usa el panel /ui para el KPI de bloqueos. Devuelve [] si el
+        modelo no soporta el endpoint o no hay baneos.
+        """
+        body = await self._get("/api/v2/monitor/user/banned/select")
+        out: list[dict[str, Any]] = []
+        for entry in body.get("results", []) or []:
+            expires_secs = entry.get("expires")
+            expires_iso: str | None = None
+            if expires_secs and expires_secs > 0:
+                expires_iso = datetime.fromtimestamp(
+                    int(expires_secs), tz=timezone.utc
+                ).isoformat()
+            out.append({
+                "ip": str(entry.get("ip_address", "") or ""),
+                "expires": expires_iso,
+                "source": entry.get("src") or entry.get("source") or None,
+            })
+        return out
+
     async def quarantine_ip(
         self, ip: str, ttl_seconds: int = 3600
     ) -> FortigateActionResult:
