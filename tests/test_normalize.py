@@ -6,9 +6,24 @@ from pathlib import Path
 
 import pytest
 
-from src.normalize import normalize
+from src.normalize import _normalize_severity, normalize
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.mark.parametrize(
+    "raw,level,expected",
+    [
+        ("High", 0, "high"),            # Defender capitalizado → enum
+        ("INFORMATIONAL", 0, "informational"),
+        ("low", 0, "low"),
+        ("bogus", 12, "critical"),      # valor inválido → cae al nivel (12 = critical)
+        (None, 9, "high"),              # ausente → nivel (9 = high)
+        (42, 6, "medium"),              # tipo inesperado → nivel (6 = medium)
+    ],
+)
+def test_normalize_severity_maps_or_falls_back(raw, level, expected) -> None:
+    assert _normalize_severity(raw, level) == expected
 
 
 @pytest.fixture

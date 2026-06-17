@@ -12,8 +12,8 @@ from typing import Any
 from src.models import (
     Device,
     FileEvidence,
-    NormalizedAlert,
     Network,
+    NormalizedAlert,
     Threat,
     User,
     WazuhRule,
@@ -31,6 +31,24 @@ def _severity_from_level(level: int) -> str:
     if level >= 6:
         return "medium"
     return "low"
+
+
+_VALID_SEVERITIES = {"informational", "low", "medium", "high", "critical"}
+
+
+def _normalize_severity(raw: Any, level: int) -> str:
+    """Mapea el severity crudo al enum Severity.
+
+    Defender suele mandar 'High'/'Informational' (capitalizado) y podría mandar
+    valores inesperados; si no matchea o falta, cae al severity derivado del nivel
+    de la rule. Evita que un valor fuera del enum tire ValidationError y se pierda
+    la alerta entera.
+    """
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in _VALID_SEVERITIES:
+            return s
+    return _severity_from_level(level)
 
 
 def _unwrap(raw: dict[str, Any]) -> dict[str, Any]:
@@ -170,7 +188,7 @@ def normalize(raw_payload: dict[str, Any]) -> NormalizedAlert:
         device, users, files, network, threat = _parse_wazuh_native(data, agent, src)
         source = "wazuh_native"
 
-    severity_source = data.get("severity") or _severity_from_level(int(rule.get("level") or 0))
+    severity_source = _normalize_severity(data.get("severity"), int(rule.get("level") or 0))
 
     wazuh_rule = WazuhRule(
         id=str(rule["id"]) if rule.get("id") is not None else None,

@@ -12,8 +12,10 @@ from src.state import (
     create_pending_approval,
     decide_approval,
     get_pending_approval,
+    has_pending_for_alert,
     init_db,
     mark_executed,
+    purge_old_approvals,
 )
 
 
@@ -206,3 +208,54 @@ async def test_migration_idempotent_on_existing_db(tmp_path: Path) -> None:
     token = await create_pending_approval(path, "a", "{}", "{}", timeline_json="[]")
     row = await get_pending_approval(path, token)
     assert row["timeline_json"] == "[]"
+
+
+# ===== dedup =====
+
+
+@pytest.mark.asyncio
+async def test_has_pending_for_alert(db: str) -> None:
+    await create_pending_approval(db, "alert-X", "{}", "{}")
+    assert await has_pending_for_alert(db, "alert-X") is True
+    assert await has_pending_for_alert(db, "alert-otra") is False
+
+
+@pytest.mark.asyncio
+async def test_has_pending_ignores_decided(db: str) -> None:
+    """Un approval ya decidido no cuenta como pending (no bloquea un re-trigger)."""
+    token = await create_pending_approval(db, "alert-Y", "{}", "{}")
+    await decide_approval(db, token, "rejected")
+    assert await has_pending_for_alert(db, "alert-Y") is False
+
+
+# ===== purga =====
+
+
+def _backdate(db_path: str, token: str, days: int) -> None:
+    """Mueve created_at de una fila N días al pasado (para testear la purga)."""
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(tz=timezone.utc) - timedelta(days=days)).isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE pending_approvals SET created_at=? WHERE token=?", (old, token))
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_purge_deletes_old_terminal_and_expires_pending(db: str) -> None:
+    # 1) terminal viejo (rejected hace 40d) → se borra
+    t_old = await create_pending_approval(db, "old-term", "{}", "{}")
+    await decide_approval(db, t_old, "rejected")
+    _backdate(db, t_old, 40)
+    # 2) pending viejo (40d, nunca decidido) → pasa a expired (no se borra aún)
+    t_pend = await create_pending_approval(db, "old-pend", "{}", "{}")
+    _backdate(db, t_pend, 40)
+    # 3) reciente → intacto
+    t_new = await create_pending_approval(db, "fresh", "{}", "{}")
+
+    deleted = await purge_old_approvals(db, retention_days=30)
+    assert deleted == 1  # solo el terminal viejo
+
+    assert await get_pending_approval(db, t_old) is None       # borrado
+    assert (await get_pending_approval(db, t_pend))["status"] == "expired"
+    assert (await get_pending_approval(db, t_new))["status"] == "pending"

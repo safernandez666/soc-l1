@@ -90,13 +90,31 @@ async def lifespan(app: FastAPI):
         )
 
     # Init SQLite si Narrator está habilitado (es lo único que la usa)
+    sweeper: asyncio.Task | None = None
     if settings.enable_narrator:
         from src.state import init_db
 
         await init_db(settings.state_db_path)
+        sweeper = asyncio.create_task(_purge_sweeper(settings))
 
     yield
+    if sweeper is not None:
+        sweeper.cancel()
     logger.info("SOC L1 service shutting down")
+
+
+async def _purge_sweeper(settings: Settings) -> None:
+    """Housekeeping periódico: purga approvals viejos cada 6h (y una vez al boot)."""
+    from src.state import purge_old_approvals
+
+    while True:
+        try:
+            await purge_old_approvals(
+                settings.state_db_path, settings.approval_retention_days
+            )
+        except Exception:  # noqa: BLE001 - el sweeper nunca debe tumbar el servicio
+            logger.exception("purge sweeper falló (reintenta en el próximo ciclo)")
+        await asyncio.sleep(6 * 3600)
 
 
 app = FastAPI(
@@ -169,6 +187,28 @@ async def wazuh_webhook(
         len(alert.users_involved),
         len(alert.files),
     )
+
+    # Dedup: si Wazuh reenvía la misma alerta y ya tiene un approval pending,
+    # no relanzamos el pipeline (evita emails + tickets InvGate duplicados).
+    if settings.enable_narrator:
+        from src.state import has_pending_for_alert
+
+        try:
+            if await has_pending_for_alert(settings.state_db_path, alert.alert_id):
+                logger.info(
+                    "alert deduplicada | id=%s ya tiene un approval pending - skip pipeline",
+                    alert.alert_id,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={
+                        "status": "deduplicated",
+                        "alert_id": alert.alert_id,
+                        "source": alert.source,
+                    },
+                )
+        except Exception:  # noqa: BLE001 - dedup es best-effort, no bloquea el ingest
+            logger.exception("dedup check falló para alert id=%s (sigo)", alert.alert_id)
 
     if settings.enable_triage:
         _spawn(_run_triage_in_background(alert, settings))

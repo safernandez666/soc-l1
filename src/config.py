@@ -208,6 +208,10 @@ class Settings(BaseSettings):
         description="URL pública del servicio (la que aparece en los emails). Ej: https://soc-l1.org.com",
     )
     approval_ttl_hours: int = Field(default=24)
+    approval_retention_days: int = Field(
+        default=30,
+        description="Días que se conservan los approvals terminales antes de purgarlos.",
+    )
     state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
 
     # DB del Wazuh Health Squad (probes de cobertura/capacidad/higiene). Solo-lectura
