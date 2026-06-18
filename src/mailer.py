@@ -21,11 +21,15 @@ import smtplib
 import ssl
 from datetime import datetime
 from email.message import EmailMessage
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.agents.narrator import NarratorPlan
 from src.config import Settings
 from src.models import NormalizedAlert
+
+if TYPE_CHECKING:  # solo para type hints — evita imports en runtime / circular imports
+    from src.agents.enricher import EnrichmentResult
+    from src.agents.threatintel import ThreatIntelResult
 
 logger = logging.getLogger("soc-l1")
 
@@ -41,7 +45,7 @@ SEV_STYLES = {
 _DEFAULT_SEV = {"bg": "#475569", "label": "ALERTA"}
 
 BADGE_STYLES = {
-    "default":  ("#23272f", "#cbd5e1"),
+    "default":  ("#e1e4e8", "#475569"),
     "info":     ("#dbeafe", "#1e40af"),
     "success":  ("#dcfce7", "#166534"),
     "warning":  ("#fef3c7", "#92400e"),
@@ -76,6 +80,62 @@ def _risk_badge_style(risk: str) -> str:
     }.get(risk, "default")
 
 
+# ===== Helpers de evidencia para la toma de decisión =====
+
+# remediationStatus de Defender → (badge style, label legible). Es el campo MÁS
+# decisivo: distingue "Defender ya neutralizó" de "la amenaza puede seguir viva".
+_REMEDIATION_META = {
+    "prevented":   ("success", "✓ Prevenido"),
+    "blocked":     ("success", "✓ Bloqueado"),
+    "remediated":  ("success", "✓ Remediado"),
+    "quarantined": ("success", "✓ En cuarentena"),
+    "active":      ("danger",  "⚠ ACTIVO — no remediado"),
+    "failed":      ("danger",  "⚠ Remediación falló"),
+    "notfound":    ("warning", "? No encontrado"),
+    "unknown":     ("warning", "? Desconocido"),
+}
+
+
+def _remediation_meta(status: str | None) -> tuple[str, str]:
+    """Normaliza el remediationStatus crudo a (badge style, label)."""
+    key = (status or "unknown").strip().lower()
+    return _REMEDIATION_META.get(key, ("warning", f"? {status}"))
+
+
+def _worst_remediation(alert: NormalizedAlert) -> tuple[str, str] | None:
+    """Estado de remediación 'más peligroso' entre todos los archivos.
+
+    Devuelve (style, label) o None si no hay archivos. Prioriza danger > warning
+    > success para que el reviewer vea el peor caso de un vistazo.
+    """
+    if not alert.files:
+        return None
+    _rank = {"danger": 0, "warning": 1, "success": 2, "default": 3, "info": 3}
+    worst = min(
+        (_remediation_meta(f.remediation) for f in alert.files),
+        key=lambda m: _rank.get(m[0], 3),
+    )
+    return worst
+
+
+def _risk_score_badge(risk_score: str | None) -> str:
+    """device.riskScore de Defender → badge coloreado."""
+    rs = (risk_score or "").strip().lower()
+    style = {
+        "high": "danger",
+        "medium": "warning",
+        "low": "info",
+        "none": "success",
+        "informational": "default",
+    }.get(rs, "default")
+    return _badge(risk_score.upper() if risk_score else "N/D", style)
+
+
+def _is_defender(alert: NormalizedAlert) -> bool:
+    """True si la alerta trae evidencia de endpoint (Defender/MDE)."""
+    return bool(alert.threat and alert.threat.provider and "wazuh native" not in alert.threat.provider.lower())
+
+
 # ===== Plain text body (fallback) =====
 
 
@@ -85,6 +145,8 @@ def _build_text_body(
     approve_url: str,
     reject_url: str,
     invgate_request_id: int | None = None,
+    enrichment: "EnrichmentResult | None" = None,
+    threat_intel: "ThreatIntelResult | None" = None,
 ) -> str:
     lines: list[str] = []
     lines.append("SOC L1 - APROBACION REQUERIDA")
@@ -97,10 +159,25 @@ def _build_text_body(
     lines.append("")
     lines.append("CONTEXTO")
     lines.append(f"  Alert ID:  {alert.alert_id}")
-    lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}")
+    lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}"
+                 + (f" ({alert.device.fqdn})" if alert.device.fqdn else ""))
+    if alert.threat and (alert.threat.display_name or alert.threat.family):
+        lines.append(f"  Amenaza:   {alert.threat.display_name or ''}"
+                     + (f" [{alert.threat.family}]" if alert.threat.family else ""))
+    worst = _worst_remediation(alert)
+    if worst:
+        lines.append(f"  Remediación: {worst[1]}")
+    if _is_defender(alert) and alert.device.risk_score:
+        lines.append(f"  Device risk: {alert.device.risk_score} | health: {alert.device.health or '-'}")
     lines.append(f"  Severity:  {alert.severity_source}")
     lines.append(f"  Wazuh:     rule {alert.wazuh_rule.id} (level {alert.wazuh_rule.level})")
     lines.append(f"  Title:     {alert.title}")
+    if alert.threat and alert.threat.provider_actions:
+        lines.append(f"  Defender:  {alert.threat.provider_actions}")
+    if alert.threat and alert.threat.incident_url:
+        lines.append(f"  Incidente: {alert.threat.incident_url}")
+    if alert.threat and alert.threat.alert_url:
+        lines.append(f"  Alerta MDE: {alert.threat.alert_url}")
     lines.append("")
     lines.append(f"ACCIONES PROPUESTAS ({len(plan.actions)})")
     if not plan.actions:
@@ -112,6 +189,49 @@ def _build_text_body(
     lines.append("ANALISIS")
     lines.append(plan.rationale)
     lines.append("")
+
+    # Contexto local (MITRE + cuentas AD + flags)
+    if enrichment is not None:
+        rule = getattr(enrichment, "rule", None)
+        tactics = list(getattr(rule, "mitre_tactics", []) or []) if rule else []
+        techniques = list(getattr(rule, "mitre_techniques", []) or []) if rule else []
+        flags = list(getattr(enrichment, "flags", []) or [])
+        if tactics or techniques or flags:
+            lines.append("CONTEXTO LOCAL")
+            if tactics:
+                lines.append(f"  MITRE tactics:    {', '.join(tactics)}")
+            if techniques:
+                lines.append(f"  MITRE techniques: {', '.join(techniques)}")
+            for u in getattr(enrichment, "users", []) or []:
+                if getattr(u, "found_in_ad", False):
+                    st = "enabled" if getattr(u, "enabled", None) else "DISABLED"
+                    lk = " locked" if getattr(u, "locked_out", None) else ""
+                    lines.append(f"  AD {getattr(u, 'sam', '?')}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
+                else:
+                    lines.append(f"  AD {getattr(u, 'sam', '?')}: no en AD")
+            if flags:
+                lines.append(f"  Flags: {', '.join(flags[:8])}")
+            lines.append("")
+
+    # Inteligencia externa (VT / AbuseIPDB / FortiGate)
+    if threat_intel is not None:
+        ti_lines: list[str] = []
+        for r in getattr(threat_intel, "file_reports", []) or []:
+            ti_lines.append(f"  VT {(getattr(r, 'sha256', '') or '')[:16]}…: "
+                            f"{getattr(r, 'malicious_count', 0)}/{getattr(r, 'total_engines', 0)} malicious"
+                            + (f" [{r.family}]" if getattr(r, 'family', None) else ""))
+        for r in getattr(threat_intel, "ip_reports", []) or []:
+            ti_lines.append(f"  AbuseIPDB {getattr(r, 'ip', '?')}: score={getattr(r, 'abuse_confidence_score', 0)}"
+                            + (f" {r.country_code}" if getattr(r, 'country_code', None) else "")
+                            + (" TOR" if getattr(r, 'is_tor', False) else ""))
+        for r in getattr(threat_intel, "fortigate_contexts", []) or []:
+            ti_lines.append(f"  FortiGate {getattr(r, 'ip', '?')}: {getattr(r, 'active_sessions', 0)} sesiones activas"
+                            + (" (ya quarantined)" if getattr(r, 'already_quarantined', False) else ""))
+        if ti_lines:
+            lines.append("INTELIGENCIA EXTERNA")
+            lines.extend(ti_lines)
+            lines.append("")
+
     lines.append("=" * 60)
     lines.append("DECISION (single-use, TTL 24h):")
     lines.append(f"  APROBAR:  {approve_url}")
@@ -128,15 +248,52 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
     """Construye los <tr> de la tabla de contexto."""
     sev_badge_style = "critical" if alert.severity_source in ("critical", "high") else "warning"
 
+    # Host: hostname + fqdn + IP interna + IP externa
+    host_html = f"<strong>{_esc(alert.device.hostname)}</strong>"
+    if alert.device.fqdn and alert.device.fqdn != alert.device.hostname:
+        host_html += f" <span style='color:#6b7280;font-size:11px;'>{_esc(alert.device.fqdn)}</span>"
+    ip_bits = []
+    if alert.device.internal_ip:
+        ip_bits.append(f"<code style='color:#6b7280;'>int {_esc(alert.device.internal_ip)}</code>")
+    if alert.device.external_ip:
+        ip_bits.append(f"<code style='color:#6b7280;'>ext {_esc(alert.device.external_ip)}</code>")
+    if ip_bits:
+        host_html += "<br>" + " ".join(ip_bits)
+
     rows: list[tuple[str, str]] = [
         ("Alert ID",       f"<code>{_esc(alert.alert_id)}</code>"),
-        ("Host",           (
-            f"<strong>{_esc(alert.device.hostname)}</strong>"
-            + (f" <code style='color:#94a3b8;'>{_esc(alert.device.internal_ip)}</code>"
-               if alert.device.internal_ip else "")
-        )),
+        ("Host",           host_html),
+    ]
+
+    # Amenaza (clasificación real de Defender): display_name + family
+    if alert.threat and (alert.threat.display_name or alert.threat.family):
+        threat_html = ""
+        if alert.threat.display_name:
+            threat_html += f"<strong>{_esc(alert.threat.display_name)}</strong>"
+        if alert.threat.family:
+            threat_html += f" {_badge(alert.threat.family, 'danger')}"
+        rows.append(("Amenaza", threat_html))
+
+    # Remediación (peor caso entre archivos) — el campo más decisivo
+    worst = _worst_remediation(alert)
+    if worst:
+        rows.append(("Remediación", _badge(worst[1], worst[0])))
+
+    rows += [
         ("Severidad Wazuh", _badge(alert.severity_source.upper(), sev_badge_style)),
         ("Risk asignado",   _badge(plan.risk_level.upper(), _risk_badge_style(plan.risk_level))),
+    ]
+
+    # Postura del equipo (Defender): risk score + health + OS
+    if _is_defender(alert) and (alert.device.risk_score or alert.device.health or alert.device.os):
+        posture_bits = [f"risk {_risk_score_badge(alert.device.risk_score)}"]
+        if alert.device.health:
+            posture_bits.append(f"<span style='color:#57606a;'>health: {_esc(alert.device.health)}</span>")
+        if alert.device.os:
+            posture_bits.append(f"<span style='color:#6b7280;'>{_esc(alert.device.os)}</span>")
+        rows.append(("Postura equipo", " · ".join(posture_bits)))
+
+    rows += [
         ("Wazuh rule",     f"{_esc(alert.wazuh_rule.id)} (level {alert.wazuh_rule.level})"),
         ("Categoría",      _esc(alert.category)),
         ("Source",         _esc(alert.source)),
@@ -147,7 +304,7 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
     if alert.users_involved:
         users_html = ", ".join(
             f"<code>{_esc(u.sam)}</code> "
-            f"<span style='color:#94a3b8;font-size:11px;'>({_esc(u.role)})</span>"
+            f"<span style='color:#6b7280;font-size:11px;'>({_esc(u.role)})</span>"
             for u in alert.users_involved
         )
         rows.append(("Usuarios", users_html))
@@ -158,15 +315,19 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         for f in alert.files[:3]:  # cap a 3 para no inundar el email
             badge_style = "critical" if (f.verdict or "").lower() == "malicious" else "warning"
             badge_html = _badge(f.verdict or "unknown", badge_style)
+            rem_style, rem_label = _remediation_meta(f.remediation)
             name = f.name or "(sin nombre)"
             sha = (f.sha256[:16] + "…") if f.sha256 else "-"
-            files_html_parts.append(
-                f"{badge_html} <strong>{_esc(name)}</strong> "
-                f"<code style='font-size:11px;color:#94a3b8;'>{_esc(sha)}</code>"
+            line = (
+                f"{badge_html} {_badge(rem_label, rem_style)} <strong>{_esc(name)}</strong> "
+                f"<code style='font-size:11px;color:#6b7280;'>{_esc(sha)}</code>"
             )
+            if f.path:
+                line += f"<div style='font-size:11px;color:#8b949e;margin-top:2px;'>{_esc(f.path)}</div>"
+            files_html_parts.append(line)
         files_html = "<br>".join(files_html_parts)
         if len(alert.files) > 3:
-            files_html += f"<br><em style='color:#94a3b8;'>+{len(alert.files) - 3} más…</em>"
+            files_html += f"<br><em style='color:#6b7280;'>+{len(alert.files) - 3} más…</em>"
         rows.append(("Archivos", files_html))
 
     return "\n".join(
@@ -179,19 +340,224 @@ def _actions_html(plan: NarratorPlan) -> str:
     """Lista <li> con cada acción propuesta."""
     if not plan.actions:
         return (
-            "<li style='color:#94a3b8;font-style:italic;'>"
+            "<li style='color:#6b7280;font-style:italic;'>"
             "(ninguna - monitor only)</li>"
         )
     items = []
     for a in plan.actions:
         items.append(
             f"<li><strong>{_esc(a.type)}</strong> → "
-            f"<code style='background:#1b2b3a;padding:2px 6px;border-radius:3px;'>"
+            f"<code style='background:#ddf4ff;padding:2px 6px;border-radius:3px;'>"
             f"{_esc(a.target)}</code>"
-            f"<div style='font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5;'>"
+            f"<div style='font-size:12px;color:#6b7280;margin-top:4px;line-height:1.5;'>"
             f"{_esc(a.justification)}</div></li>"
         )
     return "\n".join(items)
+
+
+def _defender_section(alert: NormalizedAlert) -> str:
+    """Card con la guía del vendor (recommendedActions) + pivots a la consola de Defender.
+
+    Vacío si la alerta no es de Defender o no hay nada que mostrar.
+    """
+    if not _is_defender(alert):
+        return ""
+    t = alert.threat
+    has_actions = bool(t and t.provider_actions)
+    links = []
+    if t and t.incident_url:
+        links.append(
+            f"<a href='{html.escape(t.incident_url)}' "
+            f"style='display:inline-block;background:#ddf4ff;color:#0969da;padding:8px 16px;"
+            f"text-decoration:none;border-radius:5px;font-size:12px;font-weight:bold;margin:4px 6px 0 0;'>"
+            f"🛡️ Ver incidente en Defender</a>"
+        )
+    if t and t.alert_url:
+        links.append(
+            f"<a href='{html.escape(t.alert_url)}' "
+            f"style='display:inline-block;background:#ddf4ff;color:#0969da;padding:8px 16px;"
+            f"text-decoration:none;border-radius:5px;font-size:12px;font-weight:bold;margin:4px 6px 0 0;'>"
+            f"🔎 Ver alerta en Defender</a>"
+        )
+    if not has_actions and not links:
+        return ""
+    guidance = (
+        f"<div style='color:#57606a;font-size:13px;line-height:1.6;'>"
+        f"<span style='color:#6b7280;'>Guía del vendor:</span> {_esc(t.provider_actions)}</div>"
+        if has_actions else ""
+    )
+    links_html = f"<div style='margin-top:10px;'>{''.join(links)}</div>" if links else ""
+    return (
+        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
+        "border-left:4px solid #64748b;'>"
+        "<div style='font-weight:bold;color:#57606a;margin-bottom:8px;font-size:14px;'>"
+        "🛡️ Defender — guía y pivots</div>"
+        f"{guidance}{links_html}</div>"
+    )
+
+
+def _enrichment_section(enrichment: "EnrichmentResult | None") -> str:
+    """Card de contexto local: MITRE ATT&CK, estado de cuenta AD y flags.
+
+    Vacío si no hay enrichment o no aporta nada accionable.
+    """
+    if enrichment is None:
+        return ""
+    blocks: list[str] = []
+
+    # MITRE ATT&CK (de la rule de Wazuh)
+    rule = getattr(enrichment, "rule", None)
+    tactics = list(getattr(rule, "mitre_tactics", []) or []) if rule else []
+    techniques = list(getattr(rule, "mitre_techniques", []) or []) if rule else []
+    mitre_ids = list(getattr(rule, "mitre_ids", []) or []) if rule else []
+    if tactics or techniques or mitre_ids:
+        chips = "".join(_badge(t, "warning") for t in tactics)
+        tech_txt = ", ".join(_esc(t) for t in (techniques or mitre_ids))
+        blocks.append(
+            "<div style='margin-bottom:10px;'>"
+            "<span style='color:#6b7280;font-size:12px;font-weight:bold;'>MITRE ATT&amp;CK:</span> "
+            f"{chips}"
+            + (f"<div style='font-size:12px;color:#57606a;margin-top:4px;'>{tech_txt}</div>" if tech_txt else "")
+            + "</div>"
+        )
+
+    # Estado de cuenta AD por usuario (decisivo para disable_user / force_password_change)
+    users = list(getattr(enrichment, "users", []) or [])
+    user_rows = []
+    for u in users:
+        if not getattr(u, "found_in_ad", False):
+            user_rows.append(
+                f"<li><code>{_esc(getattr(u, 'sam', '?'))}</code> {_badge('no en AD', 'default')}</li>"
+            )
+            continue
+        bits = [f"<code>{_esc(getattr(u, 'sam', '?'))}</code>"]
+        enabled = getattr(u, "enabled", None)
+        if enabled is True:
+            bits.append(_badge("habilitada", "success"))
+        elif enabled is False:
+            bits.append(_badge("deshabilitada", "danger"))
+        if getattr(u, "locked_out", None):
+            bits.append(_badge("bloqueada", "warning"))
+        meta = []
+        for attr, lbl in (("department", ""), ("title", ""), ("manager", "mgr: ")):
+            val = getattr(u, attr, None)
+            if val:
+                meta.append(f"{lbl}{_esc(val)}")
+        bpc = getattr(u, "bad_pwd_count", None)
+        if bpc:
+            meta.append(f"bad_pwd={bpc}")
+        meta_html = f" <span style='color:#6b7280;font-size:11px;'>{' · '.join(meta)}</span>" if meta else ""
+        user_rows.append(f"<li>{' '.join(bits)}{meta_html}</li>")
+    if user_rows:
+        blocks.append(
+            "<div style='margin-bottom:6px;'>"
+            "<span style='color:#6b7280;font-size:12px;font-weight:bold;'>Cuentas (AD):</span>"
+            f"<ul style='margin:6px 0;padding-left:20px;font-size:13px;line-height:1.7;color:#24292e;'>{''.join(user_rows)}</ul>"
+            "</div>"
+        )
+
+    # Flags relevantes
+    flags = list(getattr(enrichment, "flags", []) or [])
+    if flags:
+        chips = " ".join(_badge(f, "default") for f in flags[:8])
+        blocks.append(
+            "<div><span style='color:#6b7280;font-size:12px;font-weight:bold;'>Señales:</span> "
+            f"{chips}</div>"
+        )
+
+    if not blocks:
+        return ""
+    return (
+        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
+        "border-left:4px solid #8b949e;'>"
+        "<div style='font-weight:bold;color:#1f2328;margin-bottom:10px;font-size:14px;'>"
+        "🧩 Contexto local (AD + Wazuh)</div>"
+        f"{''.join(blocks)}</div>"
+    )
+
+
+def _threat_intel_section(ti: "ThreatIntelResult | None") -> str:
+    """Card de inteligencia externa: VirusTotal, AbuseIPDB y FortiGate.
+
+    Vacío si no hay TI o ninguna fuente devolvió algo.
+    """
+    if ti is None:
+        return ""
+    blocks: list[str] = []
+
+    # VirusTotal (file hashes)
+    vt_items = []
+    for r in getattr(ti, "file_reports", []) or []:
+        mal = getattr(r, "malicious_count", 0)
+        total = getattr(r, "total_engines", 0)
+        style = "danger" if mal >= 10 else ("warning" if mal > 0 else "success")
+        fam = getattr(r, "family", None)
+        sha = (getattr(r, "sha256", "") or "")[:16]
+        fam_html = f" {_badge(fam, 'danger')}" if fam else ""
+        vt_items.append(
+            f"<li>{_badge(f'{mal}/{total} malicious', style)} "
+            f"<code style='font-size:11px;color:#6b7280;'>{_esc(sha)}…</code>{fam_html}</li>"
+        )
+    if vt_items:
+        blocks.append(
+            "<div style='margin-bottom:8px;'><span style='color:#6b7280;font-size:12px;font-weight:bold;'>"
+            "VirusTotal:</span><ul style='margin:6px 0;padding-left:20px;font-size:13px;line-height:1.7;'>"
+            f"{''.join(vt_items)}</ul></div>"
+        )
+
+    # AbuseIPDB (IP reputation)
+    ip_items = []
+    for r in getattr(ti, "ip_reports", []) or []:
+        score = getattr(r, "abuse_confidence_score", 0)
+        style = "danger" if score >= 75 else ("warning" if score >= 25 else "success")
+        extra = []
+        if getattr(r, "country_code", None):
+            extra.append(_esc(r.country_code))
+        if getattr(r, "is_tor", False):
+            extra.append("TOR")
+        if getattr(r, "is_whitelisted", False):
+            extra.append("whitelisted")
+        reports = getattr(r, "total_reports", 0)
+        if reports:
+            extra.append(f"{reports} reports")
+        extra_html = f" <span style='color:#6b7280;font-size:11px;'>{' · '.join(extra)}</span>" if extra else ""
+        ip_items.append(
+            f"<li><code>{_esc(getattr(r, 'ip', '?'))}</code> {_badge(f'score {score}', style)}{extra_html}</li>"
+        )
+    if ip_items:
+        blocks.append(
+            "<div style='margin-bottom:8px;'><span style='color:#6b7280;font-size:12px;font-weight:bold;'>"
+            "AbuseIPDB:</span><ul style='margin:6px 0;padding-left:20px;font-size:13px;line-height:1.7;'>"
+            f"{''.join(ip_items)}</ul></div>"
+        )
+
+    # FortiGate (tráfico vivo / quarantine)
+    fg_items = []
+    for r in getattr(ti, "fortigate_contexts", []) or []:
+        sess = getattr(r, "active_sessions", 0)
+        quar = getattr(r, "already_quarantined", False)
+        style = "danger" if sess > 0 else "default"
+        quar_html = f" {_badge('ya en quarantine', 'success')}" if quar else ""
+        fg_items.append(
+            f"<li><code>{_esc(getattr(r, 'ip', '?'))}</code> "
+            f"{_badge(f'{sess} sesiones activas', style)}{quar_html}</li>"
+        )
+    if fg_items:
+        blocks.append(
+            "<div><span style='color:#6b7280;font-size:12px;font-weight:bold;'>"
+            "FortiGate:</span><ul style='margin:6px 0;padding-left:20px;font-size:13px;line-height:1.7;'>"
+            f"{''.join(fg_items)}</ul></div>"
+        )
+
+    if not blocks:
+        return ""
+    return (
+        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
+        "border-left:4px solid #8b5cf6;'>"
+        "<div style='font-weight:bold;color:#1f2328;margin-bottom:10px;font-size:14px;'>"
+        "🛰️ Inteligencia externa</div>"
+        f"{''.join(blocks)}</div>"
+    )
 
 
 def _build_html_body(
@@ -202,6 +568,8 @@ def _build_html_body(
     ttl_hours: int = 24,
     review_url: str | None = None,
     invgate_request_id: int | None = None,
+    enrichment: "EnrichmentResult | None" = None,
+    threat_intel: "ThreatIntelResult | None" = None,
 ) -> str:
     """Renderiza el email HTML matcheando el design system del integrator Wazuh unified v4.9.
 
@@ -268,35 +636,30 @@ def _build_html_body(
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light">
-  <meta name="supported-color-schemes" content="dark light">
   <title>SOC L1 — {_esc(alert.title)}</title>
   <style>
-    :root {{ color-scheme: dark light; supported-color-schemes: dark light; }}
-    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#e5e7eb; }}
-    .container {{ max-width:800px; margin:0 auto; background-color:#14171c; border:1px solid #23272f; border-radius:12px; overflow:hidden; }}
-    .header {{ padding:24px; border-left:8px solid {color}; background-color:#0b0d10; }}
-    .title {{ font-size:24px; font-weight:bold; margin-bottom:8px; color:#f3f4f6; }}
-    .pivot-section {{ background-color:#1b1f26; padding:16px; margin:20px; border-radius:8px; border-left:4px solid {color}; }}
-    .pivot-label {{ font-weight:bold; color:#94a3b8; margin-bottom:4px; font-size:13px; }}
-    .pivot-value {{ font-family:monospace; font-size:15px; font-weight:bold; color:#f3f4f6; }}
-    .info-table {{ width:100%; border-collapse:collapse; margin:20px 0; }}
-    .info-table td {{ padding:12px 16px; border-bottom:1px solid #23272f; vertical-align:top; }}
-    .info-table .label {{ font-weight:bold; width:160px; background-color:#1b1f26; color:#94a3b8; font-size:13px; }}
-    .info-table .value {{ font-size:13px; color:#e5e7eb; }}
-    .approval-section {{ background-color:#1b1f26; padding:24px; margin:20px; border-radius:8px; border:1px solid #23272f; text-align:center; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
-    code {{ font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
+    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
+    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
+    .title {{ font-size: 24px; font-weight: bold; margin-bottom: 8px; }}
+    .pivot-section {{ background: #fef2f2; padding: 16px; margin: 20px; border-radius: 8px; border-left: 4px solid {color}; }}
+    .pivot-label {{ font-weight: bold; color: #374151; margin-bottom: 4px; }}
+    .pivot-value {{ font-family: monospace; font-size: 16px; font-weight: bold; color: #1f2937; }}
+    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+    .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
+    .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; }}
+    .approval-section {{ background: #f8fafc; padding: 24px; margin: 20px; border-radius: 8px; border: 1px solid #e5e7eb; text-align: center; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+    code {{ font-family:'SF Mono',Monaco,monospace; font-size: 12px; color: #475569; }}
   </style>
 </head>
 <body>
   <div class="container">
 
-    <!-- Header con border-left por severidad (estilo Wazuh) -->
+    <!-- Header con border-left por severidad (idéntico a Unified Email Notifier v4.9) -->
     <div class="header">
       <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:14px;color:#94a3b8;margin-top:4px;">
+      <div style="font-size:14px;color:#64748b;margin-top:4px;">
         {_esc(alert.wazuh_rule.description)}
       </div>
       <div style="margin-top:10px;">
@@ -314,10 +677,10 @@ def _build_html_body(
 
     <!-- Resumen ejecutivo del Narrator (estilo párrafo, fuera de tabla) -->
     <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin-bottom:8px;">
+      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin-bottom:8px;">
         📝 Resumen ejecutivo
       </div>
-      <div style="color:#cbd5e1;font-size:14px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#57606a;font-size:14px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.executive_summary)}
       </div>
     </div>
@@ -329,32 +692,38 @@ def _build_html_body(
       </table>
     </div>
 
-    <!-- Card amarilla "Recomendación" (= Análisis del Narrator) -->
-    <div style="background-color:#241c10;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
-      <div style="font-weight:bold;color:#fbbf78;margin-bottom:8px;font-size:14px;">
+    {_defender_section(alert)}
+
+    {_enrichment_section(enrichment)}
+
+    {_threat_intel_section(threat_intel)}
+
+    <!-- Card "Recomendación" (= Análisis del Narrator) — paleta v4.9 -->
+    <div style="background:#fef3c7;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
+      <div style="font-weight:bold;color:#92400e;margin-bottom:8px;font-size:14px;">
         💡 Análisis del incidente:
       </div>
-      <div style="color:#e8d5b0;font-size:13px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#78350f;font-size:13px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.rationale)}
       </div>
     </div>
 
-    <!-- Card azul "Acciones Sugeridas" (= ProposedActions del Narrator) -->
-    <div style="background:#0f1d26;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #38bdf8;">
-      <div style="font-weight:bold;color:#7dd3fc;margin-bottom:12px;font-size:14px;">
+    <!-- Card "Acciones Sugeridas" (= ProposedActions del Narrator) — paleta v4.9 -->
+    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
+      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
         📋 Acciones propuestas ({len(plan.actions)}):
       </div>
-      <ul style="margin:8px 0;padding-left:24px;color:#bae6fd;font-size:13px;line-height:1.8;">
+      <ul style="margin:8px 0;padding-left:24px;color:#075985;font-size:13px;line-height:1.8;">
         {_actions_html(plan)}
       </ul>
     </div>
 
     <!-- Approval section: sutil, sin banner fuerte -->
     <div class="approval-section">
-      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin-bottom:6px;">
+      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin-bottom:6px;">
         ⚠️ Esta alerta requiere tu aprobación
       </div>
-      <div style="color:#94a3b8;font-size:12px;margin-bottom:16px;">
+      <div style="color:#6b7280;font-size:12px;margin-bottom:16px;">
         Link single-use, válido por {ttl_hours}h. Primer click decide.
       </div>
       {cta_buttons}
@@ -379,6 +748,8 @@ def _build_message(
     plan: NarratorPlan,
     token: str,
     invgate_request_id: int | None = None,
+    enrichment: "EnrichmentResult | None" = None,
+    threat_intel: "ThreatIntelResult | None" = None,
 ) -> EmailMessage:
     approve_url = f"{settings.approval_base_url.rstrip('/')}/approve/{token}"
     reject_url = f"{settings.approval_base_url.rstrip('/')}/reject/{token}"
@@ -399,6 +770,8 @@ def _build_message(
         _build_text_body(
             alert, plan, approve_url, reject_url,
             invgate_request_id=invgate_request_id,
+            enrichment=enrichment,
+            threat_intel=threat_intel,
         )
     )
     review_url = f"{settings.approval_base_url.rstrip('/')}/review/{token}"
@@ -408,6 +781,8 @@ def _build_message(
             ttl_hours=settings.approval_ttl_hours,
             review_url=review_url,
             invgate_request_id=invgate_request_id,
+            enrichment=enrichment,
+            threat_intel=threat_intel,
         ),
         subtype="html",
     )
@@ -441,6 +816,8 @@ async def send_approval_email(
     plan: NarratorPlan,
     token: str,
     invgate_request_id: int | None = None,
+    enrichment: "EnrichmentResult | None" = None,
+    threat_intel: "ThreatIntelResult | None" = None,
 ) -> None:
     """Envía email de aprobación. Si SMTP no está configurado, loggea y skip."""
     if not settings.smtp_host or not settings.smtp_to_approvers:
@@ -452,7 +829,12 @@ async def send_approval_email(
         )
         return
 
-    msg = _build_message(settings, alert, plan, token, invgate_request_id=invgate_request_id)
+    msg = _build_message(
+        settings, alert, plan, token,
+        invgate_request_id=invgate_request_id,
+        enrichment=enrichment,
+        threat_intel=threat_intel,
+    )
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
         logger.info(
@@ -546,17 +928,17 @@ def _timeline_rows_html(events: list[dict]) -> str:
     for e in events:
         style, label = _STAGE_META.get(e.get("stage", ""), ("default", (e.get("stage") or "?").upper()))
         detail_html = (
-            f"<div style='font-size:11px;color:#94a3b8;margin-top:3px;'>{_esc(e.get('detail'))}</div>"
+            f"<div style='font-size:11px;color:#6b7280;margin-top:3px;'>{_esc(e.get('detail'))}</div>"
             if e.get("detail") else ""
         )
         rows.append(
             "<tr>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;white-space:nowrap;"
-            f"vertical-align:top;font:bold 12px monospace;color:#94a3b8;'>{_fmt_clock(e.get('ts'))}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;white-space:nowrap;"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #e1e4e8;white-space:nowrap;"
+            f"vertical-align:top;font:bold 12px monospace;color:#6b7280;'>{_fmt_clock(e.get('ts'))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #e1e4e8;white-space:nowrap;"
             f"vertical-align:top;'>{_badge(label, style)}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #23272f;vertical-align:top;"
-            f"font-size:13px;color:#f3f4f6;line-height:1.5;'>{_esc(e.get('summary'))}{detail_html}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #e1e4e8;vertical-align:top;"
+            f"font-size:13px;color:#1f2328;line-height:1.5;'>{_esc(e.get('summary'))}{detail_html}</td>"
             "</tr>"
         )
     return "\n".join(rows)
@@ -571,17 +953,17 @@ def _execution_rows_html(execution_results: list[dict] | None) -> str:
         ok = r.get("ok")
         tag_style = "success" if ok else "danger"
         tag = "OK" if ok else "FAIL"
-        msg = f" <span style='color:#94a3b8;'>— {_esc(r.get('message'))}</span>" if r.get("message") else ""
+        msg = f" <span style='color:#6b7280;'>— {_esc(r.get('message'))}</span>" if r.get("message") else ""
         items.append(
             f"<li style='margin:6px 0;'>{_badge(tag, tag_style)} "
             f"<strong style='font-family:monospace;'>{_esc(r.get('action_type'))}</strong> → "
-            f"<code style='background:#1b2b3a;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
+            f"<code style='background:#ddf4ff;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
             f"{msg}</li>"
         )
     return (
-        "<div style='background-color:#1b1f26;padding:16px;margin:20px;border-radius:8px;"
+        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
         "border-left:4px solid #64748b;'>"
-        "<div style='font-weight:bold;color:#f3f4f6;margin-bottom:8px;font-size:14px;'>"
+        "<div style='font-weight:bold;color:#1f2328;margin-bottom:8px;font-size:14px;'>"
         "⚙️ Resultado de la ejecución</div>"
         f"<ul style='margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7;'>{''.join(items)}</ul>"
         "</div>"
@@ -603,6 +985,12 @@ def _build_closure_text_body(
     lines.append("CONTEXTO")
     lines.append(f"  Alert ID:  {alert.alert_id}")
     lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}")
+    if alert.threat and (alert.threat.display_name or alert.threat.family):
+        lines.append(f"  Amenaza:   {alert.threat.display_name or ''}"
+                     + (f" [{alert.threat.family}]" if alert.threat.family else ""))
+    worst = _worst_remediation(alert)
+    if worst:
+        lines.append(f"  Remediación: {worst[1]}")
     lines.append(f"  Title:     {alert.title}")
     lines.append("")
     lines.append("TIMELINE")
@@ -645,26 +1033,25 @@ def _build_closure_html_body(
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light">
-  <meta name="supported-color-schemes" content="dark light">
   <title>SOC L1 — Caso cerrado {_esc(alert.alert_id)}</title>
   <style>
-    :root {{ color-scheme: dark light; supported-color-schemes: dark light; }}
-    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#e5e7eb; }}
-    .container {{ max-width:800px; margin:0 auto; background-color:#14171c; border:1px solid #23272f; border-radius:12px; overflow:hidden; }}
-    .header {{ padding:24px; border-left:8px solid {color}; background-color:#0b0d10; }}
-    .title {{ font-size:22px; font-weight:bold; margin-bottom:8px; color:#f3f4f6; }}
-    .tl-table {{ width:100%; border-collapse:collapse; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
-    code {{ font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
+    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
+    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
+    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
+    .title {{ font-size: 22px; font-weight: bold; margin-bottom: 8px; }}
+    .tl-table {{ width: 100%; border-collapse: collapse; }}
+    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+    .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
+    .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; }}
+    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
+    code {{ font-family:'SF Mono',Monaco,monospace; font-size: 12px; color: #475569; }}
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:13px;color:#94a3b8;margin-top:4px;">
+      <div style="font-size:13px;color:#64748b;margin-top:4px;">
         Alerta <code>{_esc(alert.alert_id)}</code> · host <strong>{_esc(alert.device.hostname)}</strong>
       </div>
       <div style="margin-top:10px;">
@@ -675,16 +1062,25 @@ def _build_closure_html_body(
     </div>
 
     <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#f3f4f6;font-size:14px;margin:20px 0 8px;">
+      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin:20px 0 8px;">
         📝 Resumen ejecutivo
       </div>
-      <div style="color:#cbd5e1;font-size:14px;line-height:1.6;white-space:pre-line;">
+      <div style="color:#57606a;font-size:14px;line-height:1.6;white-space:pre-line;">
         {_esc(plan.executive_summary)}
       </div>
     </div>
 
-    <div style="background:#0f1d26;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #38bdf8;">
-      <div style="font-weight:bold;color:#7dd3fc;margin-bottom:12px;font-size:14px;">
+    <!-- Contexto / evidencia (mismos campos de decisión que el email de aprobación) -->
+    <div style="padding:0 24px;">
+      <table class="info-table">
+        {_ctx_rows(alert, plan)}
+      </table>
+    </div>
+
+    {_defender_section(alert)}
+
+    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
+      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
         🕐 Timeline del caso
       </div>
       <table class="tl-table">
