@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.config import Settings
@@ -29,6 +29,56 @@ logger = logging.getLogger("soc-l1")
 def _observation_path(settings: Settings) -> Path:
     """JSONL de observaciones, junto a la state.db (gitignored)."""
     return Path(settings.state_db_path).with_name("fgt_observations.jsonl")
+
+
+def _notify_state_path(settings: Settings) -> Path:
+    """JSON {ip: last_notified_iso} para deduplicar el email de observación por IP."""
+    return Path(settings.state_db_path).with_name("fgt_notified.json")
+
+
+def _load_notify_state(settings: Settings) -> dict[str, str]:
+    path = _notify_state_path(settings)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 - best-effort, archivo corrupto = sin dedup
+        return {}
+
+
+def recently_notified(settings: Settings, ip: str) -> bool:
+    """True si ya mandamos email de observación para esta IP dentro de la ventana TTL."""
+    last = _load_notify_state(settings).get(ip)
+    if not last:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return False
+    return datetime.now(tz=UTC) - last_dt < timedelta(hours=settings.fortigate_block_ttl_hours)
+
+
+def mark_notified(settings: Settings, ip: str) -> None:
+    """Registra que ya notificamos esta IP. Best-effort; poda entradas viejas."""
+    try:
+        data = _load_notify_state(settings)
+        now = datetime.now(tz=UTC)
+        data[ip] = now.isoformat()
+        # Poda: descarta IPs cuyo último aviso excede 2× el TTL (ya no deduplican).
+        horizon = now - timedelta(hours=2 * settings.fortigate_block_ttl_hours)
+        pruned = {}
+        for k, v in data.items():
+            try:
+                if datetime.fromisoformat(v) >= horizon:
+                    pruned[k] = v
+            except ValueError:
+                continue
+        _notify_state_path(settings).write_text(
+            json.dumps(pruned, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001 - nunca rompe el ingest
+        logger.exception("fgt-autoblock: no pude registrar la notificación")
 
 
 @dataclass(frozen=True)

@@ -226,6 +226,27 @@ async def wazuh_webhook(
         and fgt_decision.candidate
         and not settings.fortigate_autoblock_enabled
     ):
+        # Fase 0: email de observación ("bloquearía X"), sin ejecutar. Dedup por IP
+        # dentro de la ventana TTL. Flag temporal hasta el cutover a Fase 1.
+        if (
+            settings.fortigate_observe_email
+            and fgt_decision.should_block
+            and fgt_decision.ip
+            and not fortigate_autoblock.recently_notified(settings, fgt_decision.ip)
+        ):
+            from src import mailer
+
+            _spawn(
+                mailer.send_fgt_observation_email(
+                    settings,
+                    alert_id=alert.alert_id,
+                    ip=fgt_decision.ip,
+                    rule_id=fgt_decision.rule_id,
+                    host=alert.device.hostname,
+                    ttl_hours=settings.fortigate_block_ttl_hours,
+                )
+            )
+            fortigate_autoblock.mark_notified(settings, fgt_decision.ip)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={

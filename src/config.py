@@ -168,6 +168,10 @@ class Settings(BaseSettings):
         )
     )
     fortigate_block_ttl_hours: int = Field(default=1)
+    # Fase 0: mandar un email de OBSERVACIÓN ("esto bloquearía X") al detectar un
+    # candidato a auto-block, sin ejecutar nada. Temporal, para tener visibilidad por
+    # mail hasta el cutover a Fase 1 (ahí se apaga). Dedup por IP dentro de la ventana TTL.
+    fortigate_observe_email: bool = Field(default=False)
     # CIDRs que JAMÁS deben bloquearse aunque el Narrator lo recomiende y se apruebe.
     # Comma-separated. Default: redes privadas RFC1918 + loopback (defensa anti-pie en pala).
     protected_networks: str = Field(

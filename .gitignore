@@ -27,3 +27,7 @@ secrets/
 
 # observaciones Fase 0 auto-block FortiGate (estado local)
 fgt_observations.jsonl
+fgt_notified.json
+
+# log del uvicorn lanzado por nohup
+uvicorn.out
