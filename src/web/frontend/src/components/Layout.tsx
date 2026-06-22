@@ -41,12 +41,17 @@ const NAV: NavItem[] = [
     to: "/fortigate",
     label: "FortiGate",
     end: false,
-    // shield-ban (bloqueo de red)
+    // firewall: muro de ladrillos + fuego
     icon: (
       <>
-        <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
-        <path d="m9 12 6 6" />
-        <path d="m15 12-6 6" />
+        <path d="M12 2.5c.9 1.6 2.4 2.5 2.4 4.3a2.4 2.4 0 0 1-4.8 0c0-.8.3-1.4.8-2 .3.7.9.9 1.4.6-.5-.8-.3-1.8.2-2.9z" />
+        <path d="M3 10.5h18v10.5H3z" />
+        <path d="M3 15.75h18" />
+        <path d="M9.5 10.5v5.25" />
+        <path d="M14.5 10.5v5.25" />
+        <path d="M6.5 15.75V21" />
+        <path d="M12 15.75V21" />
+        <path d="M17.5 15.75V21" />
       </>
     ),
   },

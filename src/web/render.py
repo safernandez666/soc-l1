@@ -579,6 +579,7 @@ def login_page(settings: Settings, error: str = "") -> str:
   </form>"""
     return f"""<!doctype html><html lang="es" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/ui/static/favicon.svg">
 <title>Acceso · SOC-L1</title>
 <style>
   :root {{

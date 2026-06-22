@@ -72,6 +72,16 @@ async def zebra_logo_svg() -> Response:
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@router.get("/static/favicon.svg")
+async def favicon_svg() -> Response:
+    try:
+        svg = (_STATIC_DIR / "favicon.svg").read_text(encoding="utf-8")
+    except OSError:
+        return Response(status_code=http_status.HTTP_404_NOT_FOUND)
+    return Response(content=svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 # ===== Auth =====
 
 
