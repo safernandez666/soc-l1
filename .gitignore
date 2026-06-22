@@ -24,3 +24,6 @@ secrets/
 
 # claude-flow tooling (local)
 .claude-flow/
+
+# observaciones Fase 0 auto-block FortiGate (estado local)
+fgt_observations.jsonl

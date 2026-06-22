@@ -207,6 +207,36 @@ async def wazuh_webhook(
         len(alert.files),
     )
 
+    # Auto-block FortiGate. Ver docs/fortigate-autoblock-plan.md. Best-effort.
+    try:
+        from src import fortigate_autoblock
+
+        fgt_decision = fortigate_autoblock.observe(alert, settings)
+    except Exception:  # noqa: BLE001
+        logger.exception("fgt-autoblock observe falló para id=%s (sigo)", alert.alert_id)
+        fgt_decision = None
+
+    # Fase 0 (fortigate_autoblock_enabled=False): para las reglas candidatas, SOLO
+    # observa y corta acá — el integration custom-email-unified de Wazuh sigue siendo
+    # el que bloquea y notifica. Evita spamear aprobadores/tickets con cada alerta IPS.
+    # En Fase 1 (enabled=True) este short-circuit se quita: SOC-L1 ejecuta el quarantine
+    # en el ingest y deja correr el pipeline para enriquecer/ticket/mail.
+    if (
+        fgt_decision is not None
+        and fgt_decision.candidate
+        and not settings.fortigate_autoblock_enabled
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "observed_fgt_autoblock",
+                "alert_id": alert.alert_id,
+                "rule_id": fgt_decision.rule_id,
+                "would_block": fgt_decision.ip,
+                "reason": fgt_decision.reason,
+            },
+        )
+
     # Dedup: si Wazuh reenvía la misma alerta y ya tiene un approval pending,
     # no relanzamos el pipeline (evita emails + tickets InvGate duplicados).
     if settings.enable_narrator:

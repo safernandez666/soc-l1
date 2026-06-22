@@ -153,6 +153,21 @@ class Settings(BaseSettings):
     fortigate_host: str = Field(default="")
     fortigate_token: str = Field(default="")
     fortigate_verify_ssl: bool = Field(default=False)
+
+    # ===== Auto-block FortiGate migrado desde custom-email-unified =====
+    # Ver docs/fortigate-autoblock-plan.md. Reglas IPS de alta confianza que disparan
+    # quarantine automático (las mismas 24 que hoy bloquea el integration de Wazuh).
+    # fortigate_autoblock_enabled=False → Fase 0 (solo OBSERVA y loguea qué bloquearía,
+    # no ejecuta). True → Fase 1 (ejecuta el quarantine en el ingest, fast-path).
+    fortigate_autoblock_enabled: bool = Field(default=False)
+    fortigate_auto_block_rules: str = Field(
+        default=(
+            "196201,196202,196203,196204,196207,196208,196210,196212,196213,196214,"
+            "196215,196217,196218,196220,196221,196222,196223,196226,196227,196228,"
+            "196230,196100,196101,196112"
+        )
+    )
+    fortigate_block_ttl_hours: int = Field(default=1)
     # CIDRs que JAMÁS deben bloquearse aunque el Narrator lo recomiende y se apruebe.
     # Comma-separated. Default: redes privadas RFC1918 + loopback (defensa anti-pie en pala).
     protected_networks: str = Field(
@@ -293,6 +308,12 @@ class Settings(BaseSettings):
         return [
             cidr.strip() for cidr in self.protected_networks.split(",") if cidr.strip()
         ]
+
+    def fortigate_auto_block_rules_set(self) -> set[str]:
+        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1))."""
+        return {
+            r.strip() for r in self.fortigate_auto_block_rules.split(",") if r.strip()
+        }
 
     @model_validator(mode="after")
     def _check_secrets(self) -> "Settings":

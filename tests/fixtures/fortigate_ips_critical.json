@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-06-22T18:40:12.000-0300",
+  "rule": {
+    "id": "196201",
+    "level": 13,
+    "description": "FGT IPS: CRITICAL attack detected - Apache.Struts.OGNL.Injection from 203.0.113.66",
+    "groups": ["attack", "critical", "fortigate_ips"],
+    "mitre": { "id": ["T1190"] }
+  },
+  "agent": { "id": "000", "name": "fortigate-fw" },
+  "manager": { "name": "wazuh-test-mgr" },
+  "id": "1750626012.123456",
+  "decoder": { "name": "fortigate-ips" },
+  "data": {
+    "severity": "critical",
+    "srcip": "203.0.113.66",
+    "dstip": "10.99.0.5",
+    "dstport": "443",
+    "attack": "Apache.Struts.OGNL.Injection",
+    "action": "dropped"
+  },
+  "location": "/var/log/fortigate.log"
+}
