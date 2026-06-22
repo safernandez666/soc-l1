@@ -37,7 +37,7 @@ export function StatusPie({ m }: { m: Metrics }) {
   if (data.length === 0) {
     return (
       <div className="flex h-[240px] items-center justify-center text-sm text-muted-foreground">
-        Sin casos en el período.
+        No hay incidentes en los últimos 14 días.
       </div>
     )
   }
@@ -81,9 +81,12 @@ export function OpenClosedLine({ m }: { m: Metrics }) {
   }))
 
   return (
-    <ChartContainer config={flowConfig} className="h-[240px] w-full">
+    <ChartContainer
+      config={flowConfig}
+      className="h-[240px] w-full [&_.recharts-cartesian-axis-tick_text]:fill-[var(--zs-text-secondary)]"
+    >
       <LineChart accessibilityLayer data={data} margin={{ left: 4, right: 12, top: 8 }}>
-        <CartesianGrid vertical={false} />
+        <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.8} />
         <XAxis
           dataKey="day"
           tickLine={false}

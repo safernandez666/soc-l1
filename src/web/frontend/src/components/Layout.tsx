@@ -112,19 +112,51 @@ export function Layout() {
   const [collapsed, setCollapsed] = useState<boolean>(
     () => localStorage.getItem("sidebar-collapsed") === "1"
   )
+  const [mobileOpen, setMobileOpen] = useState(false)
   useEffect(() => {
     localStorage.setItem("sidebar-collapsed", collapsed ? "1" : "0")
   }, [collapsed])
 
-  // El collapse solo aplica en desktop (md+); en mobile el sidebar es un top-bar.
+  // El collapse solo aplica en desktop (md+); en mobile el sidebar es un drawer.
   const hideOnCollapse = collapsed ? "md:hidden" : ""
 
   return (
     <div className="min-h-svh md:flex">
+      {/* Top-bar mobile con hamburguesa (oculto en desktop) */}
+      <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-sidebar-border bg-sidebar px-4 py-3 md:hidden">
+        <button
+          type="button"
+          onClick={() => setMobileOpen(true)}
+          aria-label="Abrir menú"
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+        >
+          <NavIcon>
+            <line x1="4" x2="20" y1="6" y2="6" />
+            <line x1="4" x2="20" y1="12" y2="12" />
+            <line x1="4" x2="20" y1="18" y2="18" />
+          </NavIcon>
+        </button>
+        <img
+          src="/ui/static/zebra-logo.svg"
+          alt="ZebraSecurity"
+          className="h-7 w-auto"
+        />
+        <span className="text-sm font-semibold">SOC-L1</span>
+      </header>
+
+      {/* Overlay mobile cuando el drawer está abierto */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={() => setMobileOpen(false)}
+          aria-hidden
+        />
+      )}
+
       <aside
-        className={`flex flex-col border-b md:border-b-0 md:border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:fixed md:inset-y-0 md:left-0 transition-[width] duration-200 ${
-          collapsed ? "md:w-16" : "md:w-60"
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-transform duration-200 md:z-auto md:translate-x-0 ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        } md:transition-[width] ${collapsed ? "md:w-16" : "md:w-60"}`}
       >
         <div
           className={`flex items-center gap-3 py-4 ${
@@ -150,6 +182,7 @@ export function Layout() {
               key={n.to}
               to={n.to}
               end={n.end}
+              onClick={() => setMobileOpen(false)}
               title={collapsed ? n.label : undefined}
               className={({ isActive }) =>
                 `relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
@@ -203,7 +236,7 @@ export function Layout() {
       </aside>
 
       <main
-        className={`flex-1 px-6 py-8 transition-[margin] duration-200 ${
+        className={`flex-1 px-4 py-6 transition-[margin] duration-200 md:px-6 md:py-8 ${
           collapsed ? "md:ml-16" : "md:ml-60"
         }`}
       >

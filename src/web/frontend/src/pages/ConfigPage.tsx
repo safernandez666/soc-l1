@@ -81,10 +81,10 @@ function ConfigView({
               key={s.key}
               type="button"
               onClick={() => setActiveKey(s.key)}
-              className={`rounded-md px-3 py-2 text-left text-sm transition-colors ${
+              className={`rounded-md border-l-2 px-3 py-2 text-left text-sm transition-colors ${
                 s.key === active?.key
-                  ? "bg-secondary font-medium text-foreground"
-                  : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
+                  ? "border-primary bg-secondary font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
               }`}
             >
               {s.title}
@@ -177,14 +177,21 @@ function SectionForm({
         ))}
       </div>
 
-      <div className="mt-6 flex items-center gap-3 border-t border-border pt-4">
-        <Button onClick={onSave} disabled={saving}>
+      <div className="mt-6 flex flex-col gap-3 border-t border-border pt-4 md:flex-row md:items-center">
+        <Button
+          onClick={onSave}
+          disabled={saving}
+          className="w-full px-6 md:w-auto"
+        >
           {saving ? "Guardando…" : "Guardar"}
         </Button>
         {msg && (
           <span
-            className={`text-sm ${
-              msg.kind === "ok" ? "text-muted-foreground" : "text-destructive"
+            role="status"
+            className={`rounded-md border px-3 py-1.5 text-sm ${
+              msg.kind === "ok"
+                ? "border-primary/40 bg-primary/10 text-primary"
+                : "border-destructive/40 bg-destructive/10 text-destructive"
             }`}
           >
             {msg.text}

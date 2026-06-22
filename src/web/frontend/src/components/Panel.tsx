@@ -132,32 +132,49 @@ export function Panel({ m }: { m: Metrics }) {
         />
       </section>
 
-      {/* Charts: por estado (pie) + abierto vs cerrado (line) */}
-      <section className="grid gap-4 lg:grid-cols-2">
-        <Card className="flex flex-col">
-          <CardHeader>
-            <CardTitle className="text-sm">Por estado</CardTitle>
-          </CardHeader>
-          <CardContent className="flex-1 pb-2">
-            <StatusPie m={m} />
-          </CardContent>
-        </Card>
+      {/* Charts: por estado (pie) + abierto vs cerrado (line).
+          Sin casos → una sola card resumen en vez de dos gráficos vacíos. */}
+      {m.total === 0 ? (
+        <section>
+          <Card>
+            <CardContent className="py-12 text-center">
+              <p className="text-sm font-medium">
+                No hay incidentes en los últimos 14 días.
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Cuando lleguen alertas vas a ver acá el flujo diario y el
+                desglose por estado.
+              </p>
+            </CardContent>
+          </Card>
+        </section>
+      ) : (
+        <section className="grid gap-4 lg:grid-cols-2">
+          <Card className="flex flex-col">
+            <CardHeader>
+              <CardTitle className="text-sm">Por estado</CardTitle>
+            </CardHeader>
+            <CardContent className="flex-1 pb-2">
+              <StatusPie m={m} />
+            </CardContent>
+          </Card>
 
-        <Card className="flex flex-col">
-          <CardHeader>
-            <CardTitle className="text-sm">
-              Flujo diario · ingresados vs cerrados (14 días)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex-1 space-y-2">
-            <OpenClosedLine m={m} />
-            <p className="text-xs text-muted-foreground">
-              {m.vol_7} abiertos en 7d · {m.vol_30} en 30d
-              {trend ? ` · ${trend}` : ""}
-            </p>
-          </CardContent>
-        </Card>
-      </section>
+          <Card className="flex flex-col">
+            <CardHeader>
+              <CardTitle className="text-sm">
+                Flujo diario · ingresados vs cerrados (14 días)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex-1 space-y-2">
+              <OpenClosedLine m={m} />
+              <p className="text-xs text-muted-foreground">
+                {m.vol_7} abiertos en 7d · {m.vol_30} en 30d
+                {trend ? ` · ${trend}` : ""}
+              </p>
+            </CardContent>
+          </Card>
+        </section>
+      )}
 
       {/* Top hosts / usuarios */}
       <section className="grid gap-4 lg:grid-cols-2">
@@ -234,7 +251,9 @@ function TopTable({
       </CardHeader>
       <CardContent className={rows.length === 0 ? "" : "p-0"}>
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Sin datos.</p>
+          <p className="text-sm text-muted-foreground">
+            Aún no hay datos suficientes.
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <Table>

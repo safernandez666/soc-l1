@@ -571,11 +571,15 @@ def login_page(settings: Settings, error: str = "") -> str:
         if disabled else ""
     )
     form = "" if disabled else """
-  <form method="post" action="/ui/login" class="ls-form">
+  <form method="post" action="/ui/login" class="ls-form" id="ls-form">
     <label class="ls-label" for="pw">Contraseña</label>
     <input class="ls-input" type="password" id="pw" name="password"
+           placeholder="••••••••"
            autocomplete="current-password" required autofocus>
-    <button class="ls-btn" type="submit">Ingresar a la consola</button>
+    <button class="ls-btn" type="submit" id="ls-btn">
+      <span class="ls-spin" aria-hidden></span>
+      <span class="ls-btn-label">Ingresar a la consola</span>
+    </button>
   </form>"""
     return f"""<!doctype html><html lang="es" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -614,7 +618,7 @@ def login_page(settings: Settings, error: str = "") -> str:
   }}
   .ls-card > * {{ position:relative; z-index:1; }}
   #ls-particles {{ position:absolute; inset:0; width:100%; height:100%; z-index:0; pointer-events:none; }}
-  .ls-logo {{ display:block; height:44px; width:auto; margin-bottom:20px; }}
+  .ls-logo {{ display:block; height:44px; width:auto; margin-bottom:28px; }}
   .ls-eyebrow {{
     display:inline-flex; align-items:center; gap:8px; color:var(--primary);
     font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.2em;
@@ -640,13 +644,23 @@ def login_page(settings: Settings, error: str = "") -> str:
     width:100%; padding:11px 13px; border-radius:10px; font-size:14px;
     color:var(--fg); background:#0a0a0b; border:1px solid var(--border); outline:none;
   }}
-  .ls-input:focus {{ border-color:var(--primary); box-shadow:0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent); }}
+  .ls-input:focus {{ border-color:var(--primary); box-shadow:0 0 0 2px color-mix(in oklab, var(--primary) 45%, transparent); }}
+  .ls-input::placeholder {{ color:var(--muted); letter-spacing:.15em; }}
   .ls-btn {{
-    margin-top:8px; padding:11px 14px; border:none; border-radius:10px; cursor:pointer;
-    font-size:14px; font-weight:600; color:#0a0a0b; background:var(--primary);
+    margin-top:8px; padding:12px 14px; border:none; border-radius:10px; cursor:pointer;
+    display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    font-size:14px; font-weight:700; color:#0a0a0b; background:var(--primary);
     transition:filter .15s;
   }}
   .ls-btn:hover {{ filter:brightness(1.08); }}
+  .ls-btn[disabled] {{ cursor:progress; opacity:.85; }}
+  .ls-spin {{
+    display:none; width:14px; height:14px; border-radius:50%;
+    border:2px solid color-mix(in oklab, #0a0a0b 35%, transparent);
+    border-top-color:#0a0a0b; animation:ls-rot .6s linear infinite;
+  }}
+  .ls-btn.is-loading .ls-spin {{ display:inline-block; }}
+  @keyframes ls-rot {{ to {{ transform:rotate(360deg); }} }}
   .ls-alert {{ font-size:13px; padding:10px 12px; border-radius:10px; margin-bottom:14px; }}
   .ls-alert--danger {{ color:#fecaca; background:color-mix(in oklab,#ef4444 15%,transparent); border:1px solid color-mix(in oklab,#ef4444 40%,transparent); }}
   .ls-alert--warn {{ color:#fef08a; background:color-mix(in oklab,#eaff00 10%,transparent); border:1px solid color-mix(in oklab,#eaff00 30%,transparent); }}
@@ -659,6 +673,13 @@ def login_page(settings: Settings, error: str = "") -> str:
   {note}{err}{form}
 </div>
 <script>
+(function(){{
+  var f=document.getElementById('ls-form'), b=document.getElementById('ls-btn');
+  if(f&&b) f.addEventListener('submit',function(){{
+    b.classList.add('is-loading'); b.disabled=true;
+    var lbl=b.querySelector('.ls-btn-label'); if(lbl) lbl.textContent='Ingresando…';
+  }});
+}})();
 (function(){{
   var cv=document.getElementById('ls-particles'); if(!cv) return;
   var par=cv.parentElement, g=cv.getContext('2d'); if(!g) return;

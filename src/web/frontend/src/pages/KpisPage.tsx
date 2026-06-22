@@ -47,7 +47,7 @@ function Bars({ data }: { data: [string, number][] }) {
       {data.map(([label, n]) => (
         <div
           key={label}
-          className="flex-1 rounded-t-sm bg-primary/70 hover:bg-primary transition-colors"
+          className="flex-1 rounded-t-sm bg-slate-500/60 hover:bg-slate-400 transition-colors"
           style={{ height: `${Math.max(3, (n / max) * 100)}%` }}
           title={`${label}: ${num(n)}`}
         />
@@ -170,7 +170,7 @@ function ContainmentBlock({ k }: { k: Kpis }) {
   if (!c.available || !c.total_cases) {
     return (
       <Section title="Contención / bloqueos">
-        <Empty>Todavía no hay casos en state.db.</Empty>
+        <Empty>No hay acciones de contención registradas aún.</Empty>
       </Section>
     )
   }
@@ -283,7 +283,7 @@ export function KpisPage() {
   return (
     <StateView state={state}>
       {(k) => (
-        <div className="space-y-10">
+        <div className="space-y-14">
           <PostureBlock k={k} />
           <VolumeBlock k={k} />
           <ContainmentBlock k={k} />

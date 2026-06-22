@@ -65,9 +65,59 @@ export function QueuePage() {
       <StateView state={state}>
         {(q) => {
           const pages = Math.max(1, Math.ceil(q.total / q.per_page))
+
+          if (q.cases.length === 0) {
+            return (
+              <Card>
+                <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    No hay casos para este filtro.
+                  </p>
+                  {status && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setFilter("")}
+                    >
+                      Limpiar filtros
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          }
+
           return (
             <>
-              <Card>
+              {/* Mobile: cards apiladas */}
+              <div className="space-y-3 md:hidden">
+                {q.cases.map((c) => (
+                  <Card
+                    key={c.rowid}
+                    onClick={() => navigate(`/case/${c.rowid}`)}
+                    className="cursor-pointer"
+                  >
+                    <CardContent className="space-y-2 py-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-medium">{c.title}</div>
+                        <RiskPill risk={c.risk_level} />
+                      </div>
+                      <div className="font-mono text-xs text-muted-foreground">
+                        {c.alert_id}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <StatusBadge status={c.status} />
+                        <span className="font-mono">{c.host}</span>
+                        <span>{humanizeAge(c.created_at)}</span>
+                        <span>· {c.n_actions} acc.</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+
+              {/* Desktop: tabla */}
+              <Card className="hidden md:block">
                 <CardContent className="p-0">
                   <div className="overflow-x-auto">
                     <Table>
@@ -82,73 +132,65 @@ export function QueuePage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {q.cases.length === 0 ? (
-                          <TableRow>
-                            <TableCell
-                              colSpan={6}
-                              className="py-10 text-center text-muted-foreground"
-                            >
-                              No hay casos para este filtro.
+                        {q.cases.map((c) => (
+                          <TableRow
+                            key={c.rowid}
+                            onClick={() => navigate(`/case/${c.rowid}`)}
+                            className="cursor-pointer"
+                          >
+                            <TableCell>
+                              <div className="font-medium">{c.title}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {c.alert_id}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <RiskPill risk={c.risk_level} />
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge status={c.status} />
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {c.host}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {humanizeAge(c.created_at)}
+                            </TableCell>
+                            <TableCell className="text-right text-muted-foreground">
+                              {c.n_actions} acc.
                             </TableCell>
                           </TableRow>
-                        ) : (
-                          q.cases.map((c) => (
-                            <TableRow
-                              key={c.rowid}
-                              onClick={() => navigate(`/case/${c.rowid}`)}
-                              className="cursor-pointer"
-                            >
-                              <TableCell>
-                                <div className="font-medium">{c.title}</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {c.alert_id}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <RiskPill risk={c.risk_level} />
-                              </TableCell>
-                              <TableCell>
-                                <StatusBadge status={c.status} />
-                              </TableCell>
-                              <TableCell className="font-mono text-xs">
-                                {c.host}
-                              </TableCell>
-                              <TableCell className="text-muted-foreground">
-                                {humanizeAge(c.created_at)}
-                              </TableCell>
-                              <TableCell className="text-right text-muted-foreground">
-                                {c.n_actions} acc.
-                              </TableCell>
-                            </TableRow>
-                          ))
-                        )}
+                        ))}
                       </TableBody>
                     </Table>
                   </div>
                 </CardContent>
               </Card>
 
-              <div className="flex items-center justify-between">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page <= 1}
-                  onClick={() => goPage(page - 1)}
-                >
-                  ← Anterior
-                </Button>
-                <span className="text-sm text-muted-foreground">
-                  Página {page} de {pages} · {q.total} casos
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page >= pages}
-                  onClick={() => goPage(page + 1)}
-                >
-                  Siguiente →
-                </Button>
-              </div>
+              {/* Paginación — solo si hay más de una página */}
+              {pages > 1 && (
+                <div className="flex items-center justify-between">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page <= 1}
+                    onClick={() => goPage(page - 1)}
+                  >
+                    ← Anterior
+                  </Button>
+                  <span className="text-sm text-muted-foreground">
+                    Página {page} de {pages} · {q.total} casos
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={page >= pages}
+                    onClick={() => goPage(page + 1)}
+                  >
+                    Siguiente →
+                  </Button>
+                </div>
+              )}
             </>
           )
         }}
