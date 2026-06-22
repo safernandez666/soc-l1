@@ -5,6 +5,7 @@ import { QueuePage } from "@/pages/QueuePage"
 import { CasePage } from "@/pages/CasePage"
 import { KpisPage } from "@/pages/KpisPage"
 import { ConfigPage } from "@/pages/ConfigPage"
+import { ReportPage } from "@/pages/ReportPage"
 
 const router = createBrowserRouter(
   [
@@ -19,6 +20,8 @@ const router = createBrowserRouter(
         { path: "config", element: <ConfigPage /> },
       ],
     },
+    // Informe imprimible: fuera del Layout (sin sidebar), documento limpio para PDF.
+    { path: "/case/:rowid/report", element: <ReportPage /> },
   ],
   { basename: "/ui" }
 )

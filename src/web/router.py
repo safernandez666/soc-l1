@@ -62,6 +62,16 @@ async def robot_svg() -> Response:
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@router.get("/static/zebra-logo.svg")
+async def zebra_logo_svg() -> Response:
+    try:
+        svg = (_STATIC_DIR / "zebra-logo.svg").read_text(encoding="utf-8")
+    except OSError:
+        return Response(status_code=http_status.HTTP_404_NOT_FOUND)
+    return Response(content=svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 # ===== Auth =====
 
 

@@ -611,7 +611,9 @@ def login_page(settings: Settings, error: str = "") -> str:
     -webkit-mask-image:radial-gradient(80% 70% at 50% 0%, #000 20%, transparent 78%);
     mask-image:radial-gradient(80% 70% at 50% 0%, #000 20%, transparent 78%);
   }}
-  .ls-card > * {{ position:relative; }}
+  .ls-card > * {{ position:relative; z-index:1; }}
+  #ls-particles {{ position:absolute; inset:0; width:100%; height:100%; z-index:0; pointer-events:none; }}
+  .ls-logo {{ display:block; height:44px; width:auto; margin-bottom:20px; }}
   .ls-eyebrow {{
     display:inline-flex; align-items:center; gap:8px; color:var(--primary);
     font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.2em;
@@ -649,11 +651,39 @@ def login_page(settings: Settings, error: str = "") -> str:
   .ls-alert--warn {{ color:#fef08a; background:color-mix(in oklab,#eaff00 10%,transparent); border:1px solid color-mix(in oklab,#eaff00 30%,transparent); }}
 </style></head>
 <body><div class="ls-card">
-  <div class="ls-eyebrow"><span class="ls-dot"></span>SOC-L1 · ZebraSecurity</div>
-  <div class="ls-brand">{_logo(30)}<div class="ls-title">Centro de Operaciones</div></div>
+  <canvas id="ls-particles"></canvas>
+  <img class="ls-logo" src="/ui/static/zebra-logo.svg" alt="ZebraSecurity">
+  <div class="ls-eyebrow"><span class="ls-dot"></span>SOC-L1 · Centro de Operaciones</div>
   <p class="ls-sub">Ingresá para revisar casos, KPIs y la cola de aprobaciones.</p>
   {note}{err}{form}
-</div></body></html>"""
+</div>
+<script>
+(function(){{
+  var cv=document.getElementById('ls-particles'); if(!cv) return;
+  var par=cv.parentElement, g=cv.getContext('2d'); if(!g) return;
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var dpr=Math.min(window.devicePixelRatio||1,2), W=0,H=0,pts=[],raf=0;
+  var COUNT=42, LINK=120, LIME='163,230,53';
+  function rnd(a,b){{return a+Math.random()*(b-a);}}
+  function resize(){{var r=par.getBoundingClientRect();W=Math.max(1,r.width);H=Math.max(1,r.height);
+    cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);cv.style.width=W+'px';cv.style.height=H+'px';
+    g.setTransform(dpr,0,0,dpr,0,0);}}
+  function seed(){{pts=[];for(var i=0;i<COUNT;i++)pts.push({{x:rnd(0,W),y:rnd(0,H),vx:rnd(-0.2,0.2),vy:rnd(-0.2,0.2)}});}}
+  function draw(step){{g.clearRect(0,0,W,H);
+    if(step)for(var i=0;i<pts.length;i++){{var p=pts[i];p.x+=p.vx;p.y+=p.vy;
+      if(p.x<=0||p.x>=W)p.vx*=-1;if(p.y<=0||p.y>=H)p.vy*=-1;}}
+    for(var a=0;a<pts.length;a++)for(var b=a+1;b<pts.length;b++){{
+      var dx=pts[a].x-pts[b].x,dy=pts[a].y-pts[b].y,d=Math.sqrt(dx*dx+dy*dy);
+      if(d<LINK){{g.strokeStyle='rgba('+LIME+','+((1-d/LINK)*0.16)+')';g.lineWidth=1;
+        g.beginPath();g.moveTo(pts[a].x,pts[a].y);g.lineTo(pts[b].x,pts[b].y);g.stroke();}}}}
+    g.fillStyle='rgba('+LIME+',0.7)';
+    for(var k=0;k<pts.length;k++){{g.beginPath();g.arc(pts[k].x,pts[k].y,1.4,0,Math.PI*2);g.fill();}}}}
+  function loop(){{draw(true);raf=requestAnimationFrame(loop);}}
+  resize();seed();reduce?draw(false):(raf=requestAnimationFrame(loop));
+  window.addEventListener('resize',function(){{resize();seed();if(reduce)draw(false);}});
+}})();
+</script>
+</body></html>"""
 
 
 def panel_page(settings: Settings, m: dict[str, Any]) -> str:

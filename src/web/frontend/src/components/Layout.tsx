@@ -8,30 +8,51 @@ const NAV: NavItem[] = [
     to: "/",
     label: "Panel",
     end: true,
+    // layout-dashboard
     icon: (
-      <path d="M3 13h8V3H3v10Zm0 8h8v-6H3v6Zm10 0h8V11h-8v10Zm0-18v6h8V3h-8Z" />
+      <>
+        <rect width="7" height="9" x="3" y="3" rx="1" />
+        <rect width="7" height="5" x="14" y="3" rx="1" />
+        <rect width="7" height="9" x="14" y="12" rx="1" />
+        <rect width="7" height="5" x="3" y="16" rx="1" />
+      </>
     ),
   },
   {
     to: "/queue",
     label: "Cola",
     end: false,
-    icon: <path d="M4 6h16M4 12h16M4 18h16" />,
+    // inbox
+    icon: (
+      <>
+        <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+        <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      </>
+    ),
   },
   {
     to: "/kpis",
     label: "KPIs",
     end: false,
-    icon: <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />,
+    // activity (pulso)
+    icon: <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />,
   },
   {
     to: "/config",
     label: "Configuración",
     end: false,
+    // sliders-horizontal
     icon: (
       <>
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+        <line x1="21" x2="14" y1="4" y2="4" />
+        <line x1="10" x2="3" y1="4" y2="4" />
+        <line x1="21" x2="12" y1="12" y2="12" />
+        <line x1="8" x2="3" y1="12" y2="12" />
+        <line x1="21" x2="16" y1="20" y2="20" />
+        <line x1="12" x2="3" y1="20" y2="20" />
+        <line x1="14" x2="14" y1="2" y2="6" />
+        <line x1="8" x2="8" y1="10" y2="14" />
+        <line x1="16" x2="16" y1="18" y2="22" />
       </>
     ),
   },
@@ -59,10 +80,16 @@ export function Layout() {
     <div className="min-h-svh md:flex">
       <aside className="md:fixed md:inset-y-0 md:left-0 md:w-60 flex flex-col border-b md:border-b-0 md:border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
         <div className="flex items-center gap-3 px-5 py-4">
-          <img src="/ui/static/robot.svg" alt="" className="h-8 w-8" />
-          <div>
-            <div className="text-base font-semibold leading-tight">SOC-L1</div>
-            <div className="text-[11px] text-muted-foreground">ZebraSecurity</div>
+          <img
+            src="/ui/static/zebra-logo.svg"
+            alt="ZebraSecurity"
+            className="h-9 w-auto"
+          />
+          <div className="leading-tight">
+            <div className="text-base font-semibold">SOC-L1</div>
+            <div className="text-[11px] tracking-wide text-muted-foreground">
+              Zebra<span className="font-bold text-foreground">Security</span>
+            </div>
           </div>
         </div>
 

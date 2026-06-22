@@ -92,9 +92,15 @@ export function CasePage() {
                   <h1 className="text-2xl font-semibold">
                     {alert.title || "Caso"}
                   </h1>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
                     <RiskPill risk={plan.risk_level} />
                     <StatusBadge status={c.status} />
+                    <Link
+                      to={`/case/${rowid}/report`}
+                      className="rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20"
+                    >
+                      Informe
+                    </Link>
                   </div>
                 </div>
               </CardContent>
