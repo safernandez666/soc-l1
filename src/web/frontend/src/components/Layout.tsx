@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom"
-import type { ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 
 type NavItem = { to: string; label: string; end: boolean; icon: ReactNode }
 
@@ -94,16 +94,34 @@ function NavIcon({ children }: { children: ReactNode }) {
 }
 
 export function Layout() {
+  const [collapsed, setCollapsed] = useState<boolean>(
+    () => localStorage.getItem("sidebar-collapsed") === "1"
+  )
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", collapsed ? "1" : "0")
+  }, [collapsed])
+
+  // El collapse solo aplica en desktop (md+); en mobile el sidebar es un top-bar.
+  const hideOnCollapse = collapsed ? "md:hidden" : ""
+
   return (
     <div className="min-h-svh md:flex">
-      <aside className="md:fixed md:inset-y-0 md:left-0 md:w-60 flex flex-col border-b md:border-b-0 md:border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-        <div className="flex items-center gap-3 px-5 py-4">
+      <aside
+        className={`flex flex-col border-b md:border-b-0 md:border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:fixed md:inset-y-0 md:left-0 transition-[width] duration-200 ${
+          collapsed ? "md:w-16" : "md:w-60"
+        }`}
+      >
+        <div
+          className={`flex items-center gap-3 py-4 ${
+            collapsed ? "px-5 md:justify-center md:px-0" : "px-5"
+          }`}
+        >
           <img
             src="/ui/static/zebra-logo.svg"
             alt="ZebraSecurity"
-            className="h-9 w-auto"
+            className="h-9 w-auto shrink-0"
           />
-          <div className="leading-tight">
+          <div className={`leading-tight ${hideOnCollapse}`}>
             <div className="text-base font-semibold">SOC-L1</div>
             <div className="text-[11px] tracking-wide text-muted-foreground">
               Zebra<span className="font-bold text-foreground">Security</span>
@@ -117,8 +135,11 @@ export function Layout() {
               key={n.to}
               to={n.to}
               end={n.end}
+              title={collapsed ? n.label : undefined}
               className={({ isActive }) =>
                 `relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
+                  collapsed ? "md:justify-center md:px-0" : ""
+                } ${
                   isActive
                     ? "bg-sidebar-accent text-primary font-medium before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-primary"
                     : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
@@ -126,23 +147,51 @@ export function Layout() {
               }
             >
               <NavIcon>{n.icon}</NavIcon>
-              {n.label}
+              <span className={hideOnCollapse}>{n.label}</span>
             </NavLink>
           ))}
         </nav>
 
-        <a
-          href="/ui/logout"
-          className="mt-auto flex items-center gap-3 px-3 py-2 m-3 rounded-md text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
-        >
-          <NavIcon>
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
-          </NavIcon>
-          Salir
-        </a>
+        <div className="mt-auto flex flex-col gap-1 p-3">
+          {/* Toggle de collapse — solo desktop */}
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
+            title={collapsed ? "Expandir" : "Colapsar"}
+            className={`hidden items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground md:flex ${
+              collapsed ? "md:justify-center md:px-0" : ""
+            }`}
+          >
+            <NavIcon>
+              {collapsed ? (
+                <path d="m9 18 6-6-6-6" />
+              ) : (
+                <path d="m15 18-6-6 6-6" />
+              )}
+            </NavIcon>
+            <span className={hideOnCollapse}>Colapsar</span>
+          </button>
+
+          <a
+            href="/ui/logout"
+            title={collapsed ? "Salir" : undefined}
+            className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground ${
+              collapsed ? "md:justify-center md:px-0" : ""
+            }`}
+          >
+            <NavIcon>
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+            </NavIcon>
+            <span className={hideOnCollapse}>Salir</span>
+          </a>
+        </div>
       </aside>
 
-      <main className="flex-1 md:ml-60 px-6 py-8">
+      <main
+        className={`flex-1 px-6 py-8 transition-[margin] duration-200 ${
+          collapsed ? "md:ml-16" : "md:ml-60"
+        }`}
+      >
         <div className="mx-auto max-w-6xl">
           <Outlet />
         </div>
