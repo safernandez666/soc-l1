@@ -487,6 +487,49 @@ def _list_cases_sync(
     return (cases, int(total))
 
 
+def _cases_in_range_sync(
+    db_path: str,
+    date_from: str | None,
+    date_to: str | None,
+    status: str | None,
+    risk: str | None,
+    cap: int = 2000,
+) -> list[dict[str, Any]]:
+    """Casos en un rango de fechas (para reportería). Lista completa (hasta `cap`).
+
+    Filtra fecha/estado en SQL; el riesgo (vive en plan_json) se post-filtra en Python.
+    No aplica baseline: el rango de fechas es el filtro explícito del reporte.
+    """
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return []
+    conds: list[str] = []
+    params: list[Any] = []
+    if status:
+        conds.append("status=?")
+        params.append(status)
+    if date_from:
+        conds.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        # si llega solo fecha (sin hora), cubrir hasta el fin del día
+        params.append(date_to if "T" in date_to else f"{date_to}T23:59:59")
+        conds.append("created_at <= ?")
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    with conn:
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
+            "       executed_at, plan_json, alert_json, invgate_request_id "
+            f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ?",
+            [*params, max(1, min(int(cap), 5000))],
+        ).fetchall()
+    cases = [_summarize_row(dict(r)) for r in rows]
+    if risk:
+        cases = [c for c in cases if c["risk_level"] == risk]
+    return cases
+
+
 def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
     """Aplana una fila para la tabla de cola. NUNCA incluye el token."""
     plan = _loads(r.get("plan_json")) or {}
@@ -568,6 +611,18 @@ async def kpis_metrics(settings: Settings) -> dict[str, Any]:
     base["posture"] = posture
     base["fortigate"] = fortigate
     return base
+
+
+async def cases_in_range(
+    db_path: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(
+        _cases_in_range_sync, db_path, date_from, date_to, status, risk
+    )
 
 
 async def list_cases(

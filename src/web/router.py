@@ -181,6 +181,71 @@ async def api_fgt_observations(request: Request, settings: SettingsDep) -> Respo
     })
 
 
+_REPORT_RISKS = {"critical", "high", "medium", "low", "unknown"}
+
+
+@router.get("/api/reports")
+async def api_reports(
+    request: Request,
+    settings: SettingsDep,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+) -> Response:
+    """Casos en un rango de fechas (hub de reportería). Lista completa filtrable."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    status = status if status in _QUEUE_STATUSES else None
+    risk = risk if risk in _REPORT_RISKS else None
+    cases = await queries.cases_in_range(
+        settings.state_db_path, date_from, date_to, status, risk
+    )
+    return JSONResponse({
+        "cases": cases,
+        "total": len(cases),
+        "filters": {"date_from": date_from, "date_to": date_to, "status": status, "risk": risk},
+    })
+
+
+@router.get("/api/reports.csv")
+async def api_reports_csv(
+    request: Request,
+    settings: SettingsDep,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+) -> Response:
+    """Export CSV de los casos del rango (mismos filtros que /api/reports)."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    import csv
+    import io
+
+    status = status if status in _QUEUE_STATUSES else None
+    risk = risk if risk in _REPORT_RISKS else None
+    cases = await queries.cases_in_range(
+        settings.state_db_path, date_from, date_to, status, risk
+    )
+    cols = [
+        "rowid", "alert_id", "created_at", "status", "risk_level", "host",
+        "title", "n_actions", "decided_at", "decided_by_ip", "executed_at",
+        "invgate_request_id",
+    ]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for c in cases:
+        w.writerow(c)
+    fname = f"soc-l1-casos-{date_from or 'inicio'}_{date_to or 'hoy'}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("/api/kpis")
 async def api_kpis(request: Request, settings: SettingsDep) -> Response:
     if not _authed(request, settings):

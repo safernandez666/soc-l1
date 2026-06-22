@@ -7,6 +7,8 @@ import { KpisPage } from "@/pages/KpisPage"
 import { ConfigPage } from "@/pages/ConfigPage"
 import { ReportPage } from "@/pages/ReportPage"
 import { FgtPage } from "@/pages/FgtPage"
+import { ReportsPage } from "@/pages/ReportsPage"
+import { ConsolidatedReportPage } from "@/pages/ConsolidatedReportPage"
 
 const router = createBrowserRouter(
   [
@@ -19,11 +21,13 @@ const router = createBrowserRouter(
         { path: "case/:rowid", element: <CasePage /> },
         { path: "kpis", element: <KpisPage /> },
         { path: "fortigate", element: <FgtPage /> },
+        { path: "reportes", element: <ReportsPage /> },
         { path: "config", element: <ConfigPage /> },
       ],
     },
-    // Informe imprimible: fuera del Layout (sin sidebar), documento limpio para PDF.
+    // Informes imprimibles: fuera del Layout (sin sidebar), documento limpio para PDF.
     { path: "/case/:rowid/report", element: <ReportPage /> },
+    { path: "/reportes/consolidado", element: <ConsolidatedReportPage /> },
   ],
   { basename: "/ui" }
 )

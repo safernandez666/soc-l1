@@ -287,6 +287,33 @@ export interface FgtObservations {
   ttl_hours: number
 }
 
+export interface ReportFilters {
+  date_from?: string
+  date_to?: string
+  status?: string
+  risk?: string
+}
+
+export interface ReportsResponse {
+  cases: CaseSummary[]
+  total: number
+  filters: {
+    date_from: string | null
+    date_to: string | null
+    status: string | null
+    risk: string | null
+  }
+}
+
+function reportQs(f: ReportFilters): string {
+  const qs = new URLSearchParams()
+  if (f.date_from) qs.set("date_from", f.date_from)
+  if (f.date_to) qs.set("date_to", f.date_to)
+  if (f.status) qs.set("status", f.status)
+  if (f.risk) qs.set("risk", f.risk)
+  return qs.toString()
+}
+
 export const api = {
   session: () => get<Session>("/session"),
   metrics: () => get<Metrics>("/metrics"),
@@ -302,4 +329,6 @@ export const api = {
   saveConfig: (updates: ConfigUpdate) =>
     post<{ ok: boolean; applied: string[] }>("/config", updates),
   fgtObservations: () => get<FgtObservations>("/fgt-observations"),
+  reports: (f: ReportFilters) => get<ReportsResponse>(`/reports?${reportQs(f)}`),
+  reportsCsvUrl: (f: ReportFilters) => `${BASE}/reports.csv?${reportQs(f)}`,
 }
