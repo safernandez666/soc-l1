@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import os
+from functools import lru_cache
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -236,6 +238,12 @@ class Settings(BaseSettings):
     dashboard_session_secret: str = Field(default="")
     dashboard_session_hours: int = Field(default=12)
 
+    # Línea base de medición: los contadores del panel y los KPIs solo cuentan casos
+    # con created_at >= este timestamp (ISO 8601). Vacío = sin corte (cuenta todo el
+    # histórico). Sirve para "arrancar de cero" sin borrar datos: lo viejo queda en la
+    # DB pero no se mide. Reversible: vaciar el campo restaura el histórico completo.
+    metrics_baseline_at: str = Field(default="")
+
     # Lista de cuentas "intocables" - el executor refusa disable_user/force_password
     # sobre estos sams sin importar si el approval se clickeó. Defensa en profundidad
     # para evitar que un Narrator agresivo + click accidental desactive cuentas críticas.
@@ -285,3 +293,52 @@ class Settings(BaseSettings):
         return [
             cidr.strip() for cidr in self.protected_networks.split(",") if cidr.strip()
         ]
+
+    @model_validator(mode="after")
+    def _check_secrets(self) -> "Settings":
+        """Falla el arranque (o avisa) ante secretos en default que abren agujeros.
+
+        El combo realmente explotable: panel /ui accesible (enabled + password) con
+        la cookie firmada por un secreto derivado del webhook secret default
+        'change-me' → cualquiera forja una sesión válida. Eso hard-failea. El resto
+        son WARNINGs para no bloquear entornos de dev.
+        """
+        log = logging.getLogger("soc-l1")
+        panel_reachable = self.dashboard_enabled and bool(self.dashboard_password)
+        weak_cookie_secret = (
+            not self.dashboard_session_secret and self.wazuh_webhook_secret == "change-me"
+        )
+        if panel_reachable and weak_cookie_secret:
+            raise ValueError(
+                "Config insegura: el panel /ui está habilitado pero la cookie de "
+                "sesión se firma con el webhook secret default 'change-me' "
+                "(forjable). Seteá DASHBOARD_SESSION_SECRET o WAZUH_WEBHOOK_SECRET."
+            )
+        if self.wazuh_webhook_secret == "change-me":
+            log.warning("config: WAZUH_WEBHOOK_SECRET está en el default 'change-me' — cambialo.")
+        if self.dashboard_enabled and not self.dashboard_session_secret:
+            log.warning(
+                "config: DASHBOARD_SESSION_SECRET vacío — la cookie se deriva del "
+                "webhook secret. Seteá un secreto dedicado."
+            )
+        return self
+
+
+# ===== Singleton de settings (lee .env una sola vez) =====
+#
+# Único get_settings de toda la app: main.py y src/web/router.py lo importan de
+# acá (antes cada uno tenía su propio @lru_cache, y un cambio en uno dejaba al
+# otro con valores viejos). reload_settings() limpia el cache para que el próximo
+# request/alerta tome el .env reescrito desde la UI de configuración, sin reiniciar.
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> "Settings":
+    """Cache singleton de settings (lee .env una sola vez)."""
+    return Settings()
+
+
+def reload_settings() -> "Settings":
+    """Invalida el cache y re-lee .env. Usar tras escribir .env desde la UI."""
+    get_settings.cache_clear()
+    return get_settings()

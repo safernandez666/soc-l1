@@ -21,3 +21,6 @@ secrets/
 .env.*
 !.env.example
 *.bak*
+
+# claude-flow tooling (local)
+.claude-flow/

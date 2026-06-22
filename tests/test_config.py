@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import LdapConfig
+from src.config import LdapConfig, Settings
 
 # Password con TODOS los chars que rompen .env parsing
 NASTY_PASSWORD = "=P,T\"JH57CGE;B+0$Q4@.R8NW0GO'HV~"
