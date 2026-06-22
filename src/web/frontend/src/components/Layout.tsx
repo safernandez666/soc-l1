@@ -73,9 +73,9 @@ export function Layout() {
               to={n.to}
               end={n.end}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
+                `relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
                   isActive
-                    ? "bg-sidebar-accent text-primary font-medium"
+                    ? "bg-sidebar-accent text-primary font-medium before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-primary"
                     : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
                 }`
               }

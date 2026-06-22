@@ -69,7 +69,7 @@ export function StatusPie({ m }: { m: Metrics }) {
 
 // Config del line abierto vs cerrado: lima para abiertos, amarillo fluo para cerrados.
 const flowConfig = {
-  open: { label: "Abiertos", color: "var(--zs-ok)" },
+  open: { label: "Ingresados", color: "var(--zs-ok)" },
   closed: { label: "Cerrados", color: "var(--zs-warn)" },
 } satisfies ChartConfig
 

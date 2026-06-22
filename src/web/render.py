@@ -558,30 +558,102 @@ def _shell(active: str, settings: Settings, body: str, title: str = "SOC-L1") ->
 
 
 def login_page(settings: Settings, error: str = "") -> str:
-    err = f'<div class="alert alert--danger">{icon("alert", 16)}{h(error)}</div>' if error else ""
+    """Login server-rendered, autocontenido (no depende del app.css viejo).
+
+    Mismo lenguaje visual que el SPA: negro/lima, glow radial, punto 'en vivo'.
+    """
+    err = (
+        f'<div class="ls-alert ls-alert--danger">{h(error)}</div>' if error else ""
+    )
     disabled = not (settings.dashboard_enabled and settings.dashboard_password)
     note = (
-        f'<div class="alert alert--warning">{icon("alert", 16)}Console access is disabled.</div>'
+        '<div class="ls-alert ls-alert--warn">El acceso a la consola está deshabilitado.</div>'
         if disabled else ""
     )
-    return f"""<!doctype html><html lang="en" class="dark"><head>
+    form = "" if disabled else """
+  <form method="post" action="/ui/login" class="ls-form">
+    <label class="ls-label" for="pw">Contraseña</label>
+    <input class="ls-input" type="password" id="pw" name="password"
+           autocomplete="current-password" required autofocus>
+    <button class="ls-btn" type="submit">Ingresar a la consola</button>
+  </form>"""
+    return f"""<!doctype html><html lang="es" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Access · SOC-L1</title><link rel="stylesheet" href="/ui/static/app.css"></head>
-<body><div class="login-page"><div class="login-card">
-  <div class="login__brand">{_logo(32)}<div>
-    <div class="login__title">SOC-L1</div>
-    <div class="eyebrow">Command Surface</div>
-  </div></div>
-  <p class="login__subtitle">Sign in to review cases, KPIs and queue status.</p>
-  {note}{err}
-  <form method="post" action="/ui/login">
-    <div class="form-group">
-      <label class="form-label" for="pw">Password</label>
-      <input class="input" type="password" id="pw" name="password" autocomplete="current-password" required autofocus>
-    </div>
-    <button class="btn btn--primary btn--block" type="submit">Access console</button>
-  </form>
-</div></div></body></html>"""
+<title>Acceso · SOC-L1</title>
+<style>
+  :root {{
+    --bg:#0a0a0b; --card:#131316; --fg:#f4f5f0; --muted:#8b8f87;
+    --primary:#a3e635; --border:#26262c;
+  }}
+  * {{ box-sizing:border-box; }}
+  body {{
+    margin:0; min-height:100svh; display:grid; place-items:center; padding:24px;
+    font-family:'Geist Variable',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    color:var(--fg);
+    background:
+      radial-gradient(46rem 30rem at 15% -10%, color-mix(in oklab, var(--primary) 12%, transparent), transparent 60%),
+      radial-gradient(38rem 26rem at 100% 0%, color-mix(in oklab, #eaff00 6%, transparent), transparent 55%),
+      var(--bg);
+  }}
+  .ls-card {{
+    position:relative; overflow:hidden; width:100%; max-width:380px;
+    border:1px solid var(--border); border-radius:18px; padding:32px 30px;
+    background:
+      radial-gradient(28rem 14rem at 100% -40%, color-mix(in oklab, var(--primary) 16%, transparent), transparent 60%),
+      linear-gradient(135deg, color-mix(in oklab, var(--primary) 6%, var(--card)) 0%, var(--card) 60%);
+  }}
+  .ls-card::before {{
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--fg) 5%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--fg) 5%, transparent) 1px, transparent 1px);
+    background-size:32px 32px;
+    -webkit-mask-image:radial-gradient(80% 70% at 50% 0%, #000 20%, transparent 78%);
+    mask-image:radial-gradient(80% 70% at 50% 0%, #000 20%, transparent 78%);
+  }}
+  .ls-card > * {{ position:relative; }}
+  .ls-eyebrow {{
+    display:inline-flex; align-items:center; gap:8px; color:var(--primary);
+    font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.2em;
+    margin-bottom:18px;
+  }}
+  .ls-dot {{
+    width:7px; height:7px; border-radius:9999px; background:var(--primary);
+    box-shadow:0 0 0 0 color-mix(in oklab, var(--primary) 60%, transparent);
+    animation:ls-pulse 2s ease-out infinite;
+  }}
+  @keyframes ls-pulse {{
+    0% {{ box-shadow:0 0 0 0 color-mix(in oklab, var(--primary) 60%, transparent); }}
+    70% {{ box-shadow:0 0 0 7px transparent; }}
+    100% {{ box-shadow:0 0 0 0 transparent; }}
+  }}
+  .ls-brand {{ display:flex; align-items:center; gap:12px; }}
+  .ls-brand .logo {{ color:var(--primary); }}
+  .ls-title {{ font-size:22px; font-weight:600; letter-spacing:-.02em; }}
+  .ls-sub {{ color:var(--muted); font-size:13px; margin:14px 0 22px; }}
+  .ls-form {{ display:flex; flex-direction:column; gap:8px; }}
+  .ls-label {{ font-size:12px; color:var(--muted); }}
+  .ls-input {{
+    width:100%; padding:11px 13px; border-radius:10px; font-size:14px;
+    color:var(--fg); background:#0a0a0b; border:1px solid var(--border); outline:none;
+  }}
+  .ls-input:focus {{ border-color:var(--primary); box-shadow:0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent); }}
+  .ls-btn {{
+    margin-top:8px; padding:11px 14px; border:none; border-radius:10px; cursor:pointer;
+    font-size:14px; font-weight:600; color:#0a0a0b; background:var(--primary);
+    transition:filter .15s;
+  }}
+  .ls-btn:hover {{ filter:brightness(1.08); }}
+  .ls-alert {{ font-size:13px; padding:10px 12px; border-radius:10px; margin-bottom:14px; }}
+  .ls-alert--danger {{ color:#fecaca; background:color-mix(in oklab,#ef4444 15%,transparent); border:1px solid color-mix(in oklab,#ef4444 40%,transparent); }}
+  .ls-alert--warn {{ color:#fef08a; background:color-mix(in oklab,#eaff00 10%,transparent); border:1px solid color-mix(in oklab,#eaff00 30%,transparent); }}
+</style></head>
+<body><div class="ls-card">
+  <div class="ls-eyebrow"><span class="ls-dot"></span>SOC-L1 · ZebraSecurity</div>
+  <div class="ls-brand">{_logo(30)}<div class="ls-title">Centro de Operaciones</div></div>
+  <p class="ls-sub">Ingresá para revisar casos, KPIs y la cola de aprobaciones.</p>
+  {note}{err}{form}
+</div></body></html>"""
 
 
 def panel_page(settings: Settings, m: dict[str, Any]) -> str:

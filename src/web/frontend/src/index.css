@@ -170,3 +170,62 @@
   --zs-text-secondary: #b9bcb2;
   --zs-text-muted: #8b8f87;
 }
+
+/* ===== Profundidad de marca: glow radial de fondo (sutil, fijo al viewport) ===== */
+@layer base {
+  body {
+    background:
+      radial-gradient(48rem 32rem at 12% -8%,
+        color-mix(in oklab, var(--primary) 9%, transparent), transparent 60%),
+      radial-gradient(40rem 28rem at 100% 0%,
+        color-mix(in oklab, var(--chart-2, var(--primary)) 5%, transparent), transparent 55%),
+      var(--background);
+    background-attachment: fixed;
+  }
+}
+
+/* ===== Hero del panel: gradiente lima + grid tenue con máscara + glow ===== */
+.zs-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  background:
+    radial-gradient(34rem 18rem at 88% -40%,
+      color-mix(in oklab, var(--primary) 20%, transparent), transparent 60%),
+    linear-gradient(135deg,
+      color-mix(in oklab, var(--primary) 7%, var(--card)) 0%, var(--card) 58%);
+}
+.zs-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right,
+      color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom,
+      color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px);
+  background-size: 34px 34px;
+  -webkit-mask-image: radial-gradient(70% 90% at 50% 0%, #000 25%, transparent 78%);
+  mask-image: radial-gradient(70% 90% at 50% 0%, #000 25%, transparent 78%);
+  pointer-events: none;
+}
+.zs-hero > * {
+  position: relative;
+}
+
+/* Punto "en vivo" con pulso lima */
+.zs-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 70%, transparent);
+  animation: zs-pulse 2s ease-out infinite;
+}
+@keyframes zs-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 60%, transparent); }
+  70%  { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}

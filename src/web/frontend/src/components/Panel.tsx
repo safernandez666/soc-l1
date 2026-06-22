@@ -2,6 +2,7 @@ import { Link } from "react-router-dom"
 import type { Metrics } from "@/lib/api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { StatusPie, OpenClosedLine } from "@/components/charts"
+import { Particles } from "@/components/Particles"
 import {
   Table,
   TableBody,
@@ -50,6 +51,31 @@ function pct(n: number | null): string {
   return n === null ? "—" : `${n}%`
 }
 
+function HeroStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string
+  value: string | number
+  accent?: boolean
+}) {
+  return (
+    <div className="min-w-[5.5rem] rounded-xl border border-border bg-background/40 px-4 py-3 backdrop-blur-sm">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div
+        className={`text-2xl font-semibold tabular-nums ${
+          accent ? "text-primary" : ""
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
 export function Panel({ m }: { m: Metrics }) {
   const trend =
     m.trend_7d === null
@@ -58,6 +84,35 @@ export function Panel({ m }: { m: Metrics }) {
 
   return (
     <div className="space-y-8">
+      {/* Hero */}
+      <section className="zs-hero px-6 py-7 md:px-9 md:py-9">
+        <Particles className="opacity-80" />
+        <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+          <div className="space-y-3">
+            <div className="inline-flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.2em] text-primary">
+              <span className="zs-live-dot" />
+              SOC-L1 · ZebraSecurity
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight md:text-[2rem] md:leading-tight">
+              Centro de Operaciones
+            </h1>
+            <p className="max-w-xl text-sm text-muted-foreground">
+              Triage autónomo de alertas Wazuh con enriquecimiento, threat
+              intel y aprobación humana en el loop.
+            </p>
+          </div>
+          <div className="flex shrink-0 gap-3">
+            <HeroStat
+              label="Pendientes"
+              value={m.pending}
+              accent={m.pending > 0}
+            />
+            <HeroStat label="Casos 24h" value={m.vol_24} />
+            <HeroStat label="Aprobación" value={pct(m.approval_rate)} />
+          </div>
+        </div>
+      </section>
+
       {/* KPIs — Pendientes destacado */}
       <section className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
         <Kpi
@@ -91,7 +146,7 @@ export function Panel({ m }: { m: Metrics }) {
         <Card className="flex flex-col">
           <CardHeader>
             <CardTitle className="text-sm">
-              Abierto vs cerrado · últimos 14 días
+              Flujo diario · ingresados vs cerrados (14 días)
             </CardTitle>
           </CardHeader>
           <CardContent className="flex-1 space-y-2">
