@@ -12,7 +12,7 @@ const STATUS_COLOR: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   pending: "Pendiente",
   approved: "Aprobado",
-  executed: "Ejecutado",
+  executed: "Cerrado",
   rejected: "Rechazado",
   expired: "Expirado",
 }

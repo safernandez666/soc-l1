@@ -802,22 +802,22 @@ def _render_decision_page(
   <meta name="color-scheme" content="dark light">
   <title>SOC L1 · {s["title"]}</title>
   <style>
-    :root {{ color-scheme: dark light; }}
+    :root {{ color-scheme: light; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background-color:#0b0d10; margin:0; padding:40px 20px; color:#f3f4f6; }}
-    .container {{ max-width:560px; margin:0 auto; background-color:#14171c;
-                  border:1px solid #23272f; border-radius:12px; overflow:hidden;
-                  box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
+            background-color:#f6f8fa; margin:0; padding:40px 20px; color:#1f2328; }}
+    .container {{ max-width:560px; margin:0 auto; background-color:#ffffff;
+                  border:1px solid #d0d7de; border-radius:12px; overflow:hidden;
+                  box-shadow:0 1px 3px rgba(31,35,40,.06), 0 8px 24px rgba(31,35,40,.05); }}
     .banner {{ background:{s["banner"]}; color:white; padding:32px 24px; text-align:center; }}
     .icon {{ font-size:48px; line-height:1; margin-bottom:12px; }}
     .heading {{ font-size:22px; font-weight:bold; margin:0; }}
-    .body {{ padding:28px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
+    .body {{ padding:28px 24px; font-size:14px; line-height:1.6; color:#57606a;
              text-align:center; border-left:4px solid {s["accent"]}; margin:0 24px;
-             background-color:#1b1f26; border-radius:6px; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center;
-               font-size:12px; color:#94a3b8; }}
-    code {{ background-color:#23272f; padding:2px 6px; border-radius:3px;
-            font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
+             background-color:#f6f8fa; border-radius:6px; }}
+    .footer {{ padding:16px; background-color:#f6f8fa; text-align:center;
+               font-size:12px; color:#6b7280; }}
+    code {{ background-color:#eff2f5; padding:2px 6px; border-radius:3px;
+            font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#1f2328; }}
   </style>
 </head>
 <body>
@@ -836,7 +836,7 @@ def _render_decision_page(
                      background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
         ✕ Cerrar pestaña
       </button>
-      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#94a3b8;">
+      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#6b7280;">
         Esta pestaña ya cumplió su función — podés cerrarla cuando quieras.
       </p>
     </div>
@@ -1054,7 +1054,7 @@ async def _handle_decision(
                 f"<br><br>({skipped} acción{'es' if skipped > 1 else ''} "
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
-        body += '<br><br><span style="font-size:12px;color:#94a3b8;">El resultado queda en logs y SQLite.</span>'
+        body += '<br><br><span style="font-size:12px;color:#6b7280;">El resultado queda en logs y SQLite.</span>'
     return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
 
 
@@ -1134,7 +1134,7 @@ def _render_review_page(
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
         actions_html = (
-            "<p style='color:#94a3b8;font-style:italic;'>El plan no incluye acciones "
+            "<p style='color:#6b7280;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
     else:
@@ -1151,13 +1151,13 @@ def _render_review_page(
             }.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
-                                  background-color:#1b1f26;border-radius:6px;border-left:4px solid {action_color};
+                                  background-color:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {action_color};
                                   cursor:pointer;">
                   <input type="checkbox" name="action_idx" value="{i}" checked
                          style="margin-right:10px;transform:scale(1.3);vertical-align:middle;">
                   <strong style="font-family:monospace;color:{action_color};">{_h.escape(a.type)}</strong>
-                  → <code style="background-color:#1b2b3a;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
-                  <div style="margin:6px 0 0 30px;font-size:12px;color:#94a3b8;line-height:1.5;">
+                  → <code style="background-color:#ddf4ff;color:#0969da;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 30px;font-size:12px;color:#6b7280;line-height:1.5;">
                     {_h.escape(a.justification)}
                   </div>
                 </label>"""
@@ -1172,29 +1172,29 @@ def _render_review_page(
   <meta name="color-scheme" content="dark light">
   <title>SOC L1 · Revisar plan {alert_id}</title>
   <style>
-    :root {{ color-scheme: dark light; }}
-    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#f3f4f6; }}
-    .container {{ max-width:760px; margin:0 auto; background-color:#14171c; border:1px solid #23272f;
-                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
-    .header {{ padding:24px; border-left:8px solid {risk_color}; background-color:#0b0d10; }}
-    h1 {{ font-size:20px; margin:0 0 8px 0; color:#f3f4f6; }}
-    .meta {{ font-size:13px; color:#94a3b8; }}
+    :root {{ color-scheme: light; }}
+    body {{ font-family: sans-serif; background-color:#f6f8fa; margin:0; padding:20px; color:#1f2328; }}
+    .container {{ max-width:760px; margin:0 auto; background-color:#ffffff; border:1px solid #d0d7de;
+                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(31,35,40,.06), 0 8px 24px rgba(31,35,40,.05); }}
+    .header {{ padding:24px; border-left:8px solid {risk_color}; background-color:#ffffff; border-bottom:1px solid #d0d7de; }}
+    h1 {{ font-size:20px; margin:0 0 8px 0; color:#1f2328; }}
+    .meta {{ font-size:13px; color:#6b7280; }}
     .badge {{ display:inline-block; padding:4px 12px; border-radius:16px;
               background:{risk_color}; color:white; font:bold 11px sans-serif;
               text-transform:uppercase; margin-top:8px; }}
-    .summary {{ padding:16px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
-                background-color:#241c10; margin:20px; border-radius:8px;
-                border-left:4px solid #f59e0b; }}
+    .summary {{ padding:16px 24px; font-size:14px; line-height:1.6; color:#57606a;
+                background-color:#fff8c5; margin:20px; border-radius:8px;
+                border-left:4px solid #9a6700; }}
     .form-section {{ padding:0 24px 16px; }}
-    .form-section h2 {{ font-size:16px; margin:16px 0 12px; color:#f3f4f6; }}
+    .form-section h2 {{ font-size:16px; margin:16px 0 12px; color:#1f2328; }}
     .buttons {{ padding:16px 24px 24px; display:flex; gap:12px; flex-wrap:wrap; }}
     .btn {{ padding:14px 28px; border:none; border-radius:6px; font-weight:bold;
             font-size:14px; cursor:pointer; }}
-    .btn-approve {{ background:#16a34a; color:white; }}
-    .btn-approve:hover {{ background:#15803d; }}
-    .btn-reject {{ background:#dc2626; color:white; }}
-    .btn-reject:hover {{ background:#b91c1c; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
+    .btn-approve {{ background:#1a7f37; color:white; }}
+    .btn-approve:hover {{ background:#137333; }}
+    .btn-reject {{ background:#cf222e; color:white; }}
+    .btn-reject:hover {{ background:#a40e26; }}
+    .footer {{ padding:16px; background-color:#f6f8fa; text-align:center; font-size:12px; color:#6b7280; }}
   </style>
 </head>
 <body>
@@ -1206,14 +1206,14 @@ def _render_review_page(
     </div>
 
     <div class="summary">
-      <strong style="color:#fbbf78;">📝 Resumen ejecutivo:</strong><br>
+      <strong style="color:#9a6700;">📝 Resumen ejecutivo:</strong><br>
       {_h.escape(plan.executive_summary)}
     </div>
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
         <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#94a3b8;margin:0 0 12px;">
+        <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">
           Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
           O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
         </p>
