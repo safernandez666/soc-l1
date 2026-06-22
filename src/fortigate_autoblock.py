@@ -162,6 +162,22 @@ def summarize(path: Path) -> dict:
     }
 
 
+def load_recent(path: Path, limit: int = 50) -> list[dict]:
+    """Últimas `limit` observaciones (más recientes primero)."""
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return list(reversed(out[-limit:]))
+
+
 if __name__ == "__main__":  # python -m src.fortigate_autoblock [--summary]
     from src.config import get_settings
 

@@ -6,6 +6,7 @@ import { CasePage } from "@/pages/CasePage"
 import { KpisPage } from "@/pages/KpisPage"
 import { ConfigPage } from "@/pages/ConfigPage"
 import { ReportPage } from "@/pages/ReportPage"
+import { FgtPage } from "@/pages/FgtPage"
 
 const router = createBrowserRouter(
   [
@@ -17,6 +18,7 @@ const router = createBrowserRouter(
         { path: "queue", element: <QueuePage /> },
         { path: "case/:rowid", element: <CasePage /> },
         { path: "kpis", element: <KpisPage /> },
+        { path: "fortigate", element: <FgtPage /> },
         { path: "config", element: <ConfigPage /> },
       ],
     },

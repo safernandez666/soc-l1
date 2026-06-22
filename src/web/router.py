@@ -154,6 +154,23 @@ async def api_metrics(request: Request, settings: SettingsDep) -> Response:
     return JSONResponse(metrics)
 
 
+@router.get("/api/fgt-observations")
+async def api_fgt_observations(request: Request, settings: SettingsDep) -> Response:
+    """Observación Fase 0 del auto-block FortiGate: resumen + últimas decisiones."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    from src import fortigate_autoblock
+
+    path = fortigate_autoblock._observation_path(settings)
+    return JSONResponse({
+        "summary": fortigate_autoblock.summarize(path),
+        "recent": fortigate_autoblock.load_recent(path, limit=50),
+        "enabled": settings.fortigate_autoblock_enabled,
+        "rules_count": len(settings.fortigate_auto_block_rules_set()),
+        "ttl_hours": settings.fortigate_block_ttl_hours,
+    })
+
+
 @router.get("/api/kpis")
 async def api_kpis(request: Request, settings: SettingsDep) -> Response:
     if not _authed(request, settings):

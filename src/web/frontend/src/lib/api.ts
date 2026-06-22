@@ -260,6 +260,33 @@ export interface ConfigResponse {
 
 export type ConfigUpdate = Record<string, string | number | boolean>
 
+export interface FgtObservationRecord {
+  ts: string
+  alert_id: string
+  rule_id: string | null
+  ip: string | null
+  reason: string
+  would_block: boolean
+  protected_match: string | null
+  host: string | null
+}
+
+export interface FgtObservations {
+  summary: {
+    total_observaciones: number
+    would_block: number
+    ips_distintas_que_bloquearia: number
+    ips_protegidas_evitadas: string[]
+    por_reason: Record<string, number>
+    por_regla: Record<string, number>
+    ventana: { desde: string | null; hasta: string | null }
+  }
+  recent: FgtObservationRecord[]
+  enabled: boolean
+  rules_count: number
+  ttl_hours: number
+}
+
 export const api = {
   session: () => get<Session>("/session"),
   metrics: () => get<Metrics>("/metrics"),
@@ -274,4 +301,5 @@ export const api = {
   config: () => get<ConfigResponse>("/config"),
   saveConfig: (updates: ConfigUpdate) =>
     post<{ ok: boolean; applied: string[] }>("/config", updates),
+  fgtObservations: () => get<FgtObservations>("/fgt-observations"),
 }
