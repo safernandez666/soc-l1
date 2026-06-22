@@ -22,6 +22,29 @@ logger = logging.getLogger("soc-l1")
 
 COOKIE_NAME = "soc_l1_session"
 
+# Rate-limit en memoria para /ui/login (password compartido → blanco de brute-force).
+# Ventana deslizante de intentos fallidos por IP. Single-process uvicorn, así que un
+# dict en memoria alcanza; no persiste entre restarts (aceptable para un throttle).
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 300
+_login_attempts: dict[str, list[float]] = {}
+
+
+def login_rate_limited(ip: str) -> bool:
+    """True si la IP superó el máximo de intentos fallidos en la ventana."""
+    now = time.time()
+    recent = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW_SECONDS]
+    _login_attempts[ip] = recent
+    return len(recent) >= _LOGIN_MAX_ATTEMPTS
+
+
+def record_login_failure(ip: str) -> None:
+    _login_attempts.setdefault(ip, []).append(time.time())
+
+
+def clear_login_attempts(ip: str) -> None:
+    _login_attempts.pop(ip, None)
+
 
 def _secret(settings: Settings) -> bytes:
     """Secreto para firmar. Usa dashboard_session_secret; si está vacío, deriva

@@ -20,13 +20,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from src.config import Settings
+from src.config import Settings, get_settings
 from src.models import NormalizedAlert
 from src.normalize import normalize
 from src.security import verify_wazuh_signature
@@ -45,12 +44,6 @@ def _spawn(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
-
-
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Cache singleton de settings (lee .env una sola vez)."""
-    return Settings()
 
 
 @asynccontextmanager
@@ -128,12 +121,38 @@ app = FastAPI(
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Headers de seguridad en todas las respuestas (dashboard + API).
+
+    El dashboard usa script/style inline, así que el CSP permite 'unsafe-inline'
+    para esos; igual restringe orígenes y bloquea framing (clickjacking).
+    """
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'",
+    )
+    return resp
+
+
 # ===== Health & ingest =====
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "soc-l1"}
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """La raíz redirige al dashboard; el SPA vive bajo /ui."""
+    return RedirectResponse(url="/ui", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @app.post("/webhook/wazuh-alert", status_code=status.HTTP_202_ACCEPTED)
