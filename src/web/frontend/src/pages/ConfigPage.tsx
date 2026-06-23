@@ -202,6 +202,19 @@ function SectionForm({
   )
 }
 
+// Etiquetas legibles para los toggles de dry-run por familia (valores crudos "",
+// "true", "false" en el .env). OJO: true = SIMULA (no ejecuta), false = EJECUTA.
+const DRYRUN_OPTION_LABELS: Record<string, string> = {
+  "": "Heredar master (DRY_RUN_MODE)",
+  true: "Simular — dry-run (NO ejecuta)",
+  false: "Ejecutar en vivo (acciona de verdad)",
+}
+
+function optionLabel(fieldName: string, value: string): string {
+  if (fieldName.startsWith("dry_run_")) return DRYRUN_OPTION_LABELS[value] ?? value
+  return value
+}
+
 function Field({
   field: f,
   value,
@@ -248,7 +261,7 @@ function Field({
         >
           {f.options.map((o) => (
             <option key={o} value={o} className="bg-background text-foreground">
-              {o}
+              {optionLabel(f.name, o)}
             </option>
           ))}
         </select>
