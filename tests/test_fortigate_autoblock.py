@@ -294,3 +294,51 @@ def test_webhook_fase0_observa_y_corta(fgt_alert: dict) -> None:
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
+
+
+# ===== Dedup por IP dentro de la ventana TTL =====
+
+
+def test_observe_dedup_misma_ip_una_sola_observacion(fgt_alert: dict, tmp_path: Path) -> None:
+    """Una ráfaga de la misma IP (Wazuh emite N alertas) se observa UNA sola vez:
+    la 2ª vuelve duplicate=True y el JSONL queda con 1 sola fila (UI sin duplicados)."""
+    from src.fortigate_autoblock import observe
+
+    alert = normalize(fgt_alert)
+    settings = _enforce_settings(tmp_path, fortigate_autoblock_enabled=False)
+
+    d1 = observe(alert, settings)
+    d2 = observe(alert, settings)
+
+    assert d1.should_block is True and d1.duplicate is False
+    assert d2.duplicate is True
+    lines = (tmp_path / "fgt_observations.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_enforce_dedup_no_rebloquea(fgt_alert: dict, tmp_path: Path) -> None:
+    """En Fase 1, la misma IP en ráfaga se bloquea UNA vez: el 2º enforce no llama a
+    quarantine_ip (el ban TTL sigue activo) y devuelve duplicate=True."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+    from src.models import FortigateActionResult
+
+    alert = normalize(fgt_alert)
+    settings = _enforce_settings(tmp_path)
+    result = FortigateActionResult(
+        ok=True, ip="203.0.113.66", action="quarantine_ip",
+        expires_at="2026-06-23T13:00:00+00:00", message="banned for 3600s",
+    )
+    factory, client = _mock_fgt_client(result)
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        o1 = await enforce(alert, settings)
+        o2 = await enforce(alert, settings)
+
+    client.quarantine_ip.assert_called_once_with("203.0.113.66", ttl_seconds=3600)
+    assert o1.ok is True and o1.decision.duplicate is False
+    assert o2.executed is False and o2.decision.duplicate is True
+    # JSONL: solo el primer bloqueo quedó registrado
+    lines = (tmp_path / "fgt_observations.jsonl").read_text().splitlines()
+    assert len(lines) == 1

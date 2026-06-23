@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -91,6 +91,7 @@ class AutoBlockDecision:
     rule_id: str | None
     reason: str  # would_block | no_rule_match | no_srcip | protected | invalid_ip
     protected_match: str | None = None  # CIDR protegido que matcheó (si reason=protected)
+    duplicate: bool = False  # True si la IP ya se observó/bloqueó dentro de la ventana TTL
 
     @property
     def should_block(self) -> bool:
@@ -159,7 +160,20 @@ def observe(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     if not decision.candidate:
         return decision
 
+    # Dedup por IP dentro de la ventana TTL: Wazuh emite una alerta por cada línea de
+    # log IPS, así que una ráfaga del mismo scanner llega como N alertas. Se observa UNA
+    # sola vez → evita filas duplicadas en la UI (y, en Fase 1, doble-quarantine).
+    if decision.should_block and decision.ip and recently_notified(settings, decision.ip):
+        logger.info(
+            "🔭 FGT-AUTOBLOCK OBSERVE | DEDUP ip=%s rule=%s alert=%s "
+            "(ya observada dentro del TTL, no re-registro)",
+            decision.ip, decision.rule_id, alert.alert_id,
+        )
+        return replace(decision, duplicate=True)
+
     _record(alert, decision, settings)
+    if decision.should_block and decision.ip:
+        mark_notified(settings, decision.ip)
     ttl_h = settings.fortigate_block_ttl_hours
     if decision.should_block:
         logger.info(
@@ -206,6 +220,19 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
 
     ttl_h = settings.fortigate_block_ttl_hours
 
+    # Dedup por IP dentro de la ventana TTL: si ya bloqueamos esta IP, el ban (TTL) sigue
+    # activo → no repetimos el quarantine. Evita machacar la API en ráfagas de scanner.
+    if decision.should_block and decision.ip and recently_notified(settings, decision.ip):
+        logger.info(
+            "🚫 FGT-AUTOBLOCK ENFORCE | DEDUP ip=%s rule=%s alert=%s "
+            "(ya bloqueada dentro del TTL, no re-ejecuto)",
+            decision.ip, decision.rule_id, alert.alert_id,
+        )
+        return EnforceOutcome(
+            replace(decision, duplicate=True), executed=False, ok=False,
+            message="dedup: ban activo dentro del TTL",
+        )
+
     # Candidata pero no bloqueable (protegida / sin srcip / IP inválida): registra y corta.
     if not decision.should_block or not decision.ip:
         _record(alert, decision, settings, executed=False, block_ok=False)
@@ -228,6 +255,7 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
     # Dry-run por familia (toggle fortigate / kill-switch maestro): simula, no ejecuta.
     if settings.dry_run_for("block_ip"):
         _record(alert, decision, settings, executed=False, block_ok=False)
+        mark_notified(settings, ip)  # dedup la ráfaga aunque sea simulado
         logger.warning(
             "🧪 FGT-AUTOBLOCK ENFORCE DRY-RUN | WOULD quarantine ip=%s rule=%s ttl=%sh "
             "alert=%s (dry_run_fortigate activo)",
@@ -256,6 +284,7 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
             r = await fg.quarantine_ip(ip, ttl_seconds=ttl_h * 3600)
         _record(alert, decision, settings, executed=True, block_ok=r.ok)
         if r.ok:
+            mark_notified(settings, ip)  # ban activo por TTL → dedup re-bloqueos
             logger.info(
                 "🚫 FGT-AUTOBLOCK ENFORCE | quarantine OK ip=%s rule=%s ttl=%sh alert=%s exp=%s",
                 ip, decision.rule_id, ttl_h, alert.alert_id, r.expires_at,

@@ -227,11 +227,7 @@ async def wazuh_webhook(
     # con email de confirmación, igual que el script viejo: bloquea + avisa, sin pasar
     # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
     if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
-        if (
-            fgt_outcome.ok
-            and fgt_decision.ip
-            and not fortigate_autoblock.recently_notified(settings, fgt_decision.ip)
-        ):
+        if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
             from src import mailer
 
             _spawn(
@@ -245,7 +241,6 @@ async def wazuh_webhook(
                     expires_at=fgt_outcome.expires_at,
                 )
             )
-            fortigate_autoblock.mark_notified(settings, fgt_decision.ip)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
@@ -273,7 +268,7 @@ async def wazuh_webhook(
             settings.fortigate_observe_email
             and fgt_decision.should_block
             and fgt_decision.ip
-            and not fortigate_autoblock.recently_notified(settings, fgt_decision.ip)
+            and not fgt_decision.duplicate
         ):
             from src import mailer
 
@@ -287,7 +282,6 @@ async def wazuh_webhook(
                     ttl_hours=settings.fortigate_block_ttl_hours,
                 )
             )
-            fortigate_autoblock.mark_notified(settings, fgt_decision.ip)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
