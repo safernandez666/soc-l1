@@ -13,10 +13,36 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import os
+from functools import lru_cache
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Mapeo action.type → familia de dry-run. Las acciones sin familia (notify_only,
+# escalate_l2) no tienen side-effect externo y nunca consultan el toggle.
+_ACTION_FAMILY: dict[str, str] = {
+    "disable_user": "ad",
+    "force_password_change": "ad",
+    "block_ip": "fortigate",
+    "scan_host": "defender",
+    "isolate_host": "defender",
+}
+
+
+def _parse_optional_bool(raw: str) -> bool | None:
+    """Parsea un toggle tri-estado: True/False explícito o None (= heredar/vacío).
+
+    Tolerante a "1/yes/on" y "0/no/off". Vacío o inválido → None (heredar el master).
+    """
+    token = (raw or "").strip().lower()
+    if token in ("true", "1", "yes", "on"):
+        return True
+    if token in ("false", "0", "no", "off"):
+        return False
+    return None
 
 
 def _parse_credentials_file(path: str) -> dict[str, str]:
@@ -151,6 +177,25 @@ class Settings(BaseSettings):
     fortigate_host: str = Field(default="")
     fortigate_token: str = Field(default="")
     fortigate_verify_ssl: bool = Field(default=False)
+
+    # ===== Auto-block FortiGate migrado desde custom-email-unified =====
+    # Ver docs/fortigate-autoblock-plan.md. Reglas IPS de alta confianza que disparan
+    # quarantine automático (las mismas 24 que hoy bloquea el integration de Wazuh).
+    # fortigate_autoblock_enabled=False → Fase 0 (solo OBSERVA y loguea qué bloquearía,
+    # no ejecuta). True → Fase 1 (ejecuta el quarantine en el ingest, fast-path).
+    fortigate_autoblock_enabled: bool = Field(default=False)
+    fortigate_auto_block_rules: str = Field(
+        default=(
+            "196201,196202,196203,196204,196205,196207,196208,196210,196212,196213,"
+            "196214,196215,196217,196218,196220,196221,196222,196223,196226,196227,"
+            "196228,196230,196100,196101,196112"
+        )
+    )
+    fortigate_block_ttl_hours: int = Field(default=1)
+    # Fase 0: mandar un email de OBSERVACIÓN ("esto bloquearía X") al detectar un
+    # candidato a auto-block, sin ejecutar nada. Temporal, para tener visibilidad por
+    # mail hasta el cutover a Fase 1 (ahí se apaga). Dedup por IP dentro de la ventana TTL.
+    fortigate_observe_email: bool = Field(default=False)
     # CIDRs que JAMÁS deben bloquearse aunque el Narrator lo recomiende y se apruebe.
     # Comma-separated. Default: redes privadas RFC1918 + loopback (defensa anti-pie en pala).
     protected_networks: str = Field(
@@ -208,6 +253,10 @@ class Settings(BaseSettings):
         description="URL pública del servicio (la que aparece en los emails). Ej: https://soc-l1.org.com",
     )
     approval_ttl_hours: int = Field(default=24)
+    approval_retention_days: int = Field(
+        default=30,
+        description="Días que se conservan los approvals terminales antes de purgarlos.",
+    )
     state_db_path: str = Field(default="/var/lib/soc-l1/state.db")
 
     # DB del Wazuh Health Squad (probes de cobertura/capacidad/higiene). Solo-lectura
@@ -232,15 +281,34 @@ class Settings(BaseSettings):
     dashboard_session_secret: str = Field(default="")
     dashboard_session_hours: int = Field(default=12)
 
+    # Línea base de medición: los contadores del panel y los KPIs solo cuentan casos
+    # con created_at >= este timestamp (ISO 8601). Vacío = sin corte (cuenta todo el
+    # histórico). Sirve para "arrancar de cero" sin borrar datos: lo viejo queda en la
+    # DB pero no se mide. Reversible: vaciar el campo restaura el histórico completo.
+    metrics_baseline_at: str = Field(default="")
+
     # Lista de cuentas "intocables" - el executor refusa disable_user/force_password
     # sobre estos sams sin importar si el approval se clickeó. Defensa en profundidad
     # para evitar que un Narrator agresivo + click accidental desactive cuentas críticas.
     # Formato: comma-separated, case-insensitive. Ejemplo: "jdoe,admin,svc-soar"
     protected_users: str = Field(default="")
 
-    # Si true, el executor logea las acciones pero NO ejecuta nada (todas no-op).
+    # Kill-switch MAESTRO. Si true, el executor logea las acciones pero NO ejecuta
+    # nada (todas no-op), SIN importar los overrides por familia de abajo. Es la red
+    # de seguridad global: una sola palanca apaga todo en una emergencia.
     # Útil mientras se valida que el Narrator hace recomendaciones sensatas.
     dry_run_mode: bool = Field(default=False)
+
+    # Overrides de dry-run POR FAMILIA de acción. Solo aplican cuando el master
+    # dry_run_mode=false (kill-switch duro: master prendido gana siempre).
+    # Valores: "" (heredar master) | "true" (simular) | "false" (ejecutar de verdad).
+    # Permite, p.ej., FortiGate ejecutando real mientras Defender sigue simulado.
+    #   ad        → disable_user, force_password_change
+    #   fortigate → block_ip (+ auto-block del fast-path)
+    #   defender  → scan_host, isolate_host
+    dry_run_ad: str = Field(default="")
+    dry_run_fortigate: str = Field(default="")
+    dry_run_defender: str = Field(default="")
 
     # Feature flags
     enable_triage: bool = Field(default=False)
@@ -281,3 +349,94 @@ class Settings(BaseSettings):
         return [
             cidr.strip() for cidr in self.protected_networks.split(",") if cidr.strip()
         ]
+
+    def fortigate_auto_block_rules_set(self) -> set[str]:
+        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1))."""
+        return {
+            r.strip() for r in self.fortigate_auto_block_rules.split(",") if r.strip()
+        }
+
+    def dry_run_for(self, action_type: str) -> bool:
+        """Resuelve si una acción concreta debe simularse (True) o ejecutarse (False).
+
+        Semántica de kill-switch DURO:
+          1. Si dry_run_mode (master) está prendido → True SIEMPRE (todo simula).
+          2. Si no, se mira el override de la familia: "true"/"false" gana; vacío o
+             inválido hereda el master (que acá vale False → ejecuta).
+
+        Acciones sin familia (notify_only/escalate_l2) caen al master (no aplica).
+        """
+        if self.dry_run_mode:
+            return True
+        family = _ACTION_FAMILY.get(action_type)
+        override = {
+            "ad": self.dry_run_ad,
+            "fortigate": self.dry_run_fortigate,
+            "defender": self.dry_run_defender,
+        }.get(family)
+        if override is not None:
+            parsed = _parse_optional_bool(override)
+            if parsed is not None:
+                return parsed
+        return self.dry_run_mode
+
+    def dry_run_state(self) -> dict[str, bool]:
+        """Estado efectivo de dry-run por familia (para loguear al arrancar).
+
+        True = simula, False = ejecuta de verdad. Útil para que en cada arranque se
+        vea de un vistazo qué está LIVE, sobre todo con el master apagado.
+        """
+        return {
+            "ad": self.dry_run_for("disable_user"),
+            "fortigate": self.dry_run_for("block_ip"),
+            "defender": self.dry_run_for("scan_host"),
+        }
+
+    @model_validator(mode="after")
+    def _check_secrets(self) -> "Settings":
+        """Falla el arranque (o avisa) ante secretos en default que abren agujeros.
+
+        El combo realmente explotable: panel /ui accesible (enabled + password) con
+        la cookie firmada por un secreto derivado del webhook secret default
+        'change-me' → cualquiera forja una sesión válida. Eso hard-failea. El resto
+        son WARNINGs para no bloquear entornos de dev.
+        """
+        log = logging.getLogger("soc-l1")
+        panel_reachable = self.dashboard_enabled and bool(self.dashboard_password)
+        weak_cookie_secret = (
+            not self.dashboard_session_secret and self.wazuh_webhook_secret == "change-me"
+        )
+        if panel_reachable and weak_cookie_secret:
+            raise ValueError(
+                "Config insegura: el panel /ui está habilitado pero la cookie de "
+                "sesión se firma con el webhook secret default 'change-me' "
+                "(forjable). Seteá DASHBOARD_SESSION_SECRET o WAZUH_WEBHOOK_SECRET."
+            )
+        if self.wazuh_webhook_secret == "change-me":
+            log.warning("config: WAZUH_WEBHOOK_SECRET está en el default 'change-me' — cambialo.")
+        if self.dashboard_enabled and not self.dashboard_session_secret:
+            log.warning(
+                "config: DASHBOARD_SESSION_SECRET vacío — la cookie se deriva del "
+                "webhook secret. Seteá un secreto dedicado."
+            )
+        return self
+
+
+# ===== Singleton de settings (lee .env una sola vez) =====
+#
+# Único get_settings de toda la app: main.py y src/web/router.py lo importan de
+# acá (antes cada uno tenía su propio @lru_cache, y un cambio en uno dejaba al
+# otro con valores viejos). reload_settings() limpia el cache para que el próximo
+# request/alerta tome el .env reescrito desde la UI de configuración, sin reiniciar.
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> "Settings":
+    """Cache singleton de settings (lee .env una sola vez)."""
+    return Settings()
+
+
+def reload_settings() -> "Settings":
+    """Invalida el cache y re-lee .env. Usar tras escribir .env desde la UI."""
+    get_settings.cache_clear()
+    return get_settings()

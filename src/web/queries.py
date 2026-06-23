@@ -95,8 +95,9 @@ def _period(first: datetime | None, last: datetime | None) -> dict[str, Any]:
 # ===== Métricas del panel =====
 
 
-def _metrics_sync(db_path: str) -> dict[str, Any]:
+def _metrics_sync(db_path: str, baseline_iso: str = "") -> dict[str, Any]:
     now = datetime.now(tz=timezone.utc)
+    baseline = _parse_dt(baseline_iso)
     try:
         conn = _connect_ro(db_path)
     except sqlite3.OperationalError:
@@ -119,6 +120,7 @@ def _metrics_sync(db_path: str) -> dict[str, Any]:
     mtta_samples: list[float] = []
     mttr_samples: list[float] = []
     per_day: Counter[str] = Counter()
+    per_day_closed: Counter[str] = Counter()
     oldest_pending: datetime | None = None
     n_decided = n_approvedish = 0
     # Volumen reciente
@@ -130,10 +132,14 @@ def _metrics_sync(db_path: str) -> dict[str, Any]:
     failed_actions: list[dict[str, Any]] = []
 
     for r in rows:
+        created = _parse_dt(r["created_at"])
+        # Línea base de medición: ignorar lo anterior al corte (no se borra, no se cuenta).
+        if baseline and (created is None or created < baseline):
+            continue
+
         st = r["status"] or "pending"
         status_counts[st] += 1
 
-        created = _parse_dt(r["created_at"])
         if created:
             per_day[created.date().isoformat()] += 1
             if created >= t24:
@@ -170,6 +176,11 @@ def _metrics_sync(db_path: str) -> dict[str, Any]:
         if executed and created:
             mttr_samples.append((executed - created).total_seconds())
 
+        # Día de "cierre" para la serie abierto/cerrado: decisión o, si no, ejecución.
+        closed_dt = decided or executed
+        if closed_dt:
+            per_day_closed[closed_dt.date().isoformat()] += 1
+
         if st in ("approved", "executed", "rejected"):
             n_decided += 1
         if st in ("approved", "executed"):
@@ -192,11 +203,13 @@ def _metrics_sync(db_path: str) -> dict[str, Any]:
                         "ts": r["executed_at"],
                     })
 
-    # Serie de los últimos 14 días (rellena días sin datos con 0)
+    # Series de los últimos 14 días (rellena días sin datos con 0)
     days: list[tuple[str, int]] = []
+    days_closed: list[tuple[str, int]] = []
     for i in range(13, -1, -1):
         d = (now.date().fromordinal(now.date().toordinal() - i)).isoformat()
         days.append((d, per_day.get(d, 0)))
+        days_closed.append((d, per_day_closed.get(d, 0)))
 
     def _avg(xs: list[float]) -> float | None:
         return sum(xs) / len(xs) if xs else None
@@ -228,6 +241,7 @@ def _metrics_sync(db_path: str) -> dict[str, Any]:
             (now - oldest_pending).total_seconds() if oldest_pending else None
         ),
         "per_day": days,
+        "per_day_closed": days_closed,
         # Volumen reciente
         "vol_24": vol_24, "vol_7": vol_7, "vol_30": vol_30, "trend_7d": trend_7d,
         # Tasa de éxito de acciones
@@ -255,6 +269,7 @@ def _empty_metrics() -> dict[str, Any]:
         "pending": 0,
         "oldest_pending_human": "—",
         "per_day": [],
+        "per_day_closed": [],
         "vol_24": 0, "vol_7": 0, "vol_30": 0, "trend_7d": None,
         "act_total": 0, "act_ok": 0, "act_success_rate": None, "failed_actions": [],
         "expired": 0, "expiry_rate": None,
@@ -265,8 +280,9 @@ def _empty_metrics() -> dict[str, Any]:
 # ===== KPIs (presentación): contención + salud de Wazuh =====
 
 
-def _containment_sync(db_path: str) -> dict[str, Any]:
-    """KPIs de contención/bloqueos acumulados desde state.db (todo el período)."""
+def _containment_sync(db_path: str, baseline_iso: str = "") -> dict[str, Any]:
+    """KPIs de contención/bloqueos acumulados desde state.db (desde el baseline)."""
+    baseline = _parse_dt(baseline_iso)
     try:
         conn = _connect_ro(db_path)
     except sqlite3.OperationalError:
@@ -277,6 +293,8 @@ def _containment_sync(db_path: str) -> dict[str, Any]:
             "SELECT created_at, plan_json, execution_result, alert_json "
             "FROM pending_approvals"
         ).fetchall()
+    if baseline:
+        rows = [r for r in rows if (_parse_dt(r["created_at"]) or datetime.min.replace(tzinfo=timezone.utc)) >= baseline]
 
     proposed: Counter[str] = Counter()      # contención propuesta por los agentes
     executed: Counter[str] = Counter()      # ejecutada (simulada bajo dry-run)
@@ -392,11 +410,13 @@ def _alert_volume_sync(cache_path: str) -> dict[str, Any]:
     return {"available": True, **data}
 
 
-def _kpis_sync(state_db_path: str, health_db_path: str, alert_cache_path: str) -> dict[str, Any]:
+def _kpis_sync(
+    state_db_path: str, health_db_path: str, alert_cache_path: str, baseline_iso: str = ""
+) -> dict[str, Any]:
     # health_db_path queda en la firma por compatibilidad; la sección "Salud de Wazuh"
     # se quitó del panel (la corrida de prueba contradecía la posture en vivo).
     return {
-        "containment": _containment_sync(state_db_path),
+        "containment": _containment_sync(state_db_path, baseline_iso),
         "alert_volume": _alert_volume_sync(alert_cache_path),
     }
 
@@ -430,7 +450,7 @@ async def _fortigate_blocks(settings: Settings) -> dict[str, Any]:
 
 
 def _list_cases_sync(
-    db_path: str, status: str | None, limit: int, offset: int
+    db_path: str, status: str | None, limit: int, offset: int, baseline_iso: str = ""
 ) -> tuple[list[dict[str, Any]], int]:
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -439,28 +459,75 @@ def _list_cases_sync(
     except sqlite3.OperationalError:
         return ([], 0)
 
+    # WHERE dinámico: status (opcional) + baseline de medición (opcional).
+    # created_at se guarda en ISO8601 con offset uniforme, así que el >= textual
+    # equivale al cronológico; las filas con created_at NULL quedan excluidas bajo baseline.
+    conds: list[str] = []
+    params: list[Any] = []
+    if status:
+        conds.append("status=?")
+        params.append(status)
+    if baseline_iso:
+        conds.append("created_at >= ?")
+        params.append(baseline_iso)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+
     with conn:
-        if status:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM pending_approvals WHERE status=?", (status,)
-            ).fetchone()[0]
-            rows = conn.execute(
-                "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-                "       executed_at, plan_json, alert_json, invgate_request_id "
-                "FROM pending_approvals WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (status, limit, offset),
-            ).fetchall()
-        else:
-            total = conn.execute("SELECT COUNT(*) FROM pending_approvals").fetchone()[0]
-            rows = conn.execute(
-                "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-                "       executed_at, plan_json, alert_json, invgate_request_id "
-                "FROM pending_approvals ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM pending_approvals{where}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
+            "       executed_at, plan_json, alert_json, invgate_request_id "
+            f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
 
     cases = [_summarize_row(dict(r)) for r in rows]
     return (cases, int(total))
+
+
+def _cases_in_range_sync(
+    db_path: str,
+    date_from: str | None,
+    date_to: str | None,
+    status: str | None,
+    risk: str | None,
+    cap: int = 2000,
+) -> list[dict[str, Any]]:
+    """Casos en un rango de fechas (para reportería). Lista completa (hasta `cap`).
+
+    Filtra fecha/estado en SQL; el riesgo (vive en plan_json) se post-filtra en Python.
+    No aplica baseline: el rango de fechas es el filtro explícito del reporte.
+    """
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return []
+    conds: list[str] = []
+    params: list[Any] = []
+    if status:
+        conds.append("status=?")
+        params.append(status)
+    if date_from:
+        conds.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        # si llega solo fecha (sin hora), cubrir hasta el fin del día
+        params.append(date_to if "T" in date_to else f"{date_to}T23:59:59")
+        conds.append("created_at <= ?")
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    with conn:
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
+            "       executed_at, plan_json, alert_json, invgate_request_id "
+            f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ?",
+            [*params, max(1, min(int(cap), 5000))],
+        ).fetchall()
+    cases = [_summarize_row(dict(r)) for r in rows]
+    if risk:
+        cases = [c for c in cases if c["risk_level"] == risk]
+    return cases
 
 
 def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
@@ -524,8 +591,8 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
 # ===== Wrappers async =====
 
 
-async def dashboard_metrics(db_path: str) -> dict[str, Any]:
-    return await asyncio.to_thread(_metrics_sync, db_path)
+async def dashboard_metrics(db_path: str, baseline_iso: str = "") -> dict[str, Any]:
+    return await asyncio.to_thread(_metrics_sync, db_path, baseline_iso)
 
 
 async def kpis_metrics(settings: Settings) -> dict[str, Any]:
@@ -536,6 +603,7 @@ async def kpis_metrics(settings: Settings) -> dict[str, Any]:
         settings.state_db_path,
         settings.wazuh_health_db_path,
         settings.alert_volume_cache_path,
+        settings.metrics_baseline_at,
     )
     posture, fortigate = await asyncio.gather(
         _wazuh_posture(settings), _fortigate_blocks(settings)
@@ -545,10 +613,28 @@ async def kpis_metrics(settings: Settings) -> dict[str, Any]:
     return base
 
 
+async def cases_in_range(
+    db_path: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    status: str | None = None,
+    risk: str | None = None,
+) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(
+        _cases_in_range_sync, db_path, date_from, date_to, status, risk
+    )
+
+
 async def list_cases(
-    db_path: str, status: str | None = None, limit: int = 50, offset: int = 0
+    db_path: str,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    baseline_iso: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
-    return await asyncio.to_thread(_list_cases_sync, db_path, status, limit, offset)
+    return await asyncio.to_thread(
+        _list_cases_sync, db_path, status, limit, offset, baseline_iso
+    )
 
 
 async def get_case(db_path: str, rowid: int) -> dict[str, Any] | None:

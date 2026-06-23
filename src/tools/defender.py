@@ -156,6 +156,22 @@ class DefenderClient:
 
     # ===== Public API =====
 
+    @staticmethod
+    def _machineaction_ok(body: dict[str, Any]) -> tuple[bool, str | None]:
+        """Valida la machineAction devuelta por MDE.
+
+        MDE responde 201 con un machineAction cuyo `status` arranca en
+        Pending/InProgress (eso es éxito: quedó encolada). Solo Failed/Cancelled
+        son fallo real. Sin `id` la respuesta es inesperada → no la damos por ok.
+        """
+        action_id = body.get("id")
+        status = body.get("status")
+        if action_id is None:
+            return False, "MDE no devolvió id de machineAction (respuesta inesperada)"
+        if status in ("Failed", "Cancelled"):
+            return False, f"machineAction status={status}"
+        return True, None
+
     async def resolve_machine_id(self, host: str) -> str | None:
         """Resuelve un hostname/FQDN al machineId de MDE.
 
@@ -212,6 +228,12 @@ class DefenderClient:
                 ok=False, action="run_av_scan", host=host, machine_id=machine_id,
                 message=str(e),
             )
+        ok, err = self._machineaction_ok(body)
+        if not ok:
+            return DefenderActionResult(
+                ok=False, action="run_av_scan", host=host, machine_id=machine_id,
+                message=err,
+            )
         return DefenderActionResult(
             ok=True, action="run_av_scan", host=host, machine_id=machine_id,
             action_id=body.get("id"),
@@ -236,6 +258,12 @@ class DefenderClient:
                 ok=False, action="isolate_machine", host=host, machine_id=machine_id,
                 message=str(e),
             )
+        ok, err = self._machineaction_ok(body)
+        if not ok:
+            return DefenderActionResult(
+                ok=False, action="isolate_machine", host=host, machine_id=machine_id,
+                message=err,
+            )
         return DefenderActionResult(
             ok=True, action="isolate_machine", host=host, machine_id=machine_id,
             action_id=body.get("id"),
@@ -254,6 +282,12 @@ class DefenderClient:
             return DefenderActionResult(
                 ok=False, action="unisolate_machine", host=host, machine_id=machine_id,
                 message=str(e),
+            )
+        ok, err = self._machineaction_ok(body)
+        if not ok:
+            return DefenderActionResult(
+                ok=False, action="unisolate_machine", host=host, machine_id=machine_id,
+                message=err,
             )
         return DefenderActionResult(
             ok=True, action="unisolate_machine", host=host, machine_id=machine_id,

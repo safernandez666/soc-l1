@@ -134,6 +134,34 @@ async def test_run_av_scan_403_returns_error(settings) -> None:
     assert "permission denied" in r.message.lower()
 
 
+@pytest.mark.asyncio
+async def test_run_av_scan_rejects_failed_status(settings) -> None:
+    """MDE puede devolver 201 con un machineAction status='Failed': no es éxito."""
+    with respx.mock as mock:
+        mock.post(TOKEN_URL).mock(return_value=_token_ok())
+        mock.post(f"{API}/api/machines/mid-123/runAntiVirusScan").mock(
+            return_value=httpx.Response(201, json={"id": "act-1", "status": "Failed"})
+        )
+        async with DefenderClient(settings) as dc:
+            r = await dc.run_av_scan("mid-123", comment="x")
+    assert r.ok is False
+    assert "Failed" in r.message
+
+
+@pytest.mark.asyncio
+async def test_isolate_machine_rejects_missing_id(settings) -> None:
+    """Respuesta sin `id` (machineAction) → respuesta inesperada, no se da por ok."""
+    with respx.mock as mock:
+        mock.post(TOKEN_URL).mock(return_value=_token_ok())
+        mock.post(f"{API}/api/machines/mid-9/isolate").mock(
+            return_value=httpx.Response(201, json={"unexpected": "shape"})
+        )
+        async with DefenderClient(settings) as dc:
+            r = await dc.isolate_machine("mid-9", comment="x")
+    assert r.ok is False
+    assert "inesperada" in r.message.lower()
+
+
 # ===== isolate_machine =====
 
 

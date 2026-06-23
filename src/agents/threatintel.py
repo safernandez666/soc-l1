@@ -23,9 +23,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents import Agent, RunContextWrapper, Runner, function_tool
 from pydantic import BaseModel, ConfigDict, Field
 
+from agents import Agent, RunContextWrapper, function_tool
+from src.agents import run_agent
 from src.config import Settings
 from src.models import (
     AbuseipdbReport,
@@ -434,5 +435,8 @@ async def threat_intel_alert(
     agent = build_threatintel_agent(model=model)
     ctx = ThreatIntelContext(settings=settings)
     user_input = _alert_to_prompt_input(alert)
-    result = await Runner.run(agent, input=user_input, context=ctx, max_turns=max_turns)
+    result = await run_agent(
+        agent, input=user_input, context=ctx, max_turns=max_turns,
+        timeout=120.0, label="threatintel",
+    )
     return result.final_output_as(ThreatIntelResult)

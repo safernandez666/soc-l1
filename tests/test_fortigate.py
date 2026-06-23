@@ -154,6 +154,21 @@ async def test_quarantine_ip_handles_auth_error(settings) -> None:
     assert "auth failed" in result.message.lower()
 
 
+@pytest.mark.asyncio
+async def test_quarantine_ip_rejects_status_error_on_200(settings) -> None:
+    """FortiOS devuelve HTTP 200 con status='error' ante fallos lógicos: no debe
+    reportarse como éxito."""
+    with respx.mock(base_url=BASE_URL) as mock:
+        mock.post("/api/v2/monitor/user/banned/add_users").mock(
+            return_value=httpx.Response(200, json={"status": "error", "http_status": 500})
+        )
+        async with FortigateClient(settings) as fg:
+            result = await fg.quarantine_ip("1.2.3.4")
+
+    assert result.ok is False
+    assert "error" in result.message.lower()
+
+
 # ===== Sanity / init =====
 
 

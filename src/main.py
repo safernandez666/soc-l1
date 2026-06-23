@@ -20,13 +20,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from src.config import Settings
+from src.config import Settings, get_settings
 from src.models import NormalizedAlert
 from src.normalize import normalize
 from src.security import verify_wazuh_signature
@@ -34,11 +33,17 @@ from src.trace import PipelineTrace
 
 logger = logging.getLogger("soc-l1")
 
+# Background tasks fire-and-forget: guardamos referencia fuerte para que el GC de
+# CPython no las recolecte (y cancele silenciosamente) antes de que terminen.
+_background_tasks: set[asyncio.Task] = set()
 
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Cache singleton de settings (lee .env una sola vez)."""
-    return Settings()
+
+def _spawn(coro) -> asyncio.Task:
+    """create_task anclado: retiene la referencia hasta que la task termina."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 @asynccontextmanager
@@ -78,13 +83,31 @@ async def lifespan(app: FastAPI):
         )
 
     # Init SQLite si Narrator está habilitado (es lo único que la usa)
+    sweeper: asyncio.Task | None = None
     if settings.enable_narrator:
         from src.state import init_db
 
         await init_db(settings.state_db_path)
+        sweeper = asyncio.create_task(_purge_sweeper(settings))
 
     yield
+    if sweeper is not None:
+        sweeper.cancel()
     logger.info("SOC L1 service shutting down")
+
+
+async def _purge_sweeper(settings: Settings) -> None:
+    """Housekeeping periódico: purga approvals viejos cada 6h (y una vez al boot)."""
+    from src.state import purge_old_approvals
+
+    while True:
+        try:
+            await purge_old_approvals(
+                settings.state_db_path, settings.approval_retention_days
+            )
+        except Exception:  # noqa: BLE001 - el sweeper nunca debe tumbar el servicio
+            logger.exception("purge sweeper falló (reintenta en el próximo ciclo)")
+        await asyncio.sleep(6 * 3600)
 
 
 app = FastAPI(
@@ -98,12 +121,38 @@ app = FastAPI(
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Headers de seguridad en todas las respuestas (dashboard + API).
+
+    El dashboard usa script/style inline, así que el CSP permite 'unsafe-inline'
+    para esos; igual restringe orígenes y bloquea framing (clickjacking).
+    """
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'",
+    )
+    return resp
+
+
 # ===== Health & ingest =====
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "soc-l1"}
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """La raíz redirige al dashboard; el SPA vive bajo /ui."""
+    return RedirectResponse(url="/ui", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @app.post("/webhook/wazuh-alert", status_code=status.HTTP_202_ACCEPTED)
@@ -158,8 +207,116 @@ async def wazuh_webhook(
         len(alert.files),
     )
 
+    # Auto-block FortiGate. Ver docs/fortigate-autoblock-plan.md. Best-effort.
+    fgt_decision = None
+    fgt_outcome = None
+    try:
+        from src import fortigate_autoblock
+
+        if settings.fortigate_autoblock_enabled:
+            # Fase 1: SOC-L1 ejecuta el quarantine (o lo simula si dry_run_fortigate/master).
+            fgt_outcome = await fortigate_autoblock.enforce(alert, settings)
+            fgt_decision = fgt_outcome.decision
+        else:
+            # Fase 0: solo observa qué bloquearía, sin tocar el firewall.
+            fgt_decision = fortigate_autoblock.observe(alert, settings)
+    except Exception:  # noqa: BLE001
+        logger.exception("fgt-autoblock falló para id=%s (sigo)", alert.alert_id)
+
+    # Fase 1 (enabled=True): SOC-L1 ya bloqueó (o simuló) en el ingest. Short-circuit
+    # con email de confirmación, igual que el script viejo: bloquea + avisa, sin pasar
+    # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
+    if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
+        if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
+            from src import mailer
+
+            _spawn(
+                mailer.send_fgt_block_email(
+                    settings,
+                    alert_id=alert.alert_id,
+                    ip=fgt_decision.ip,
+                    rule_id=fgt_decision.rule_id,
+                    host=alert.device.hostname,
+                    ttl_hours=settings.fortigate_block_ttl_hours,
+                    expires_at=fgt_outcome.expires_at,
+                )
+            )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "blocked_fgt_autoblock",
+                "alert_id": alert.alert_id,
+                "rule_id": fgt_decision.rule_id,
+                "blocked_ip": fgt_decision.ip,
+                "executed": fgt_outcome.executed,
+                "ok": fgt_outcome.ok,
+                "reason": fgt_decision.reason,
+            },
+        )
+
+    # Fase 0 (fortigate_autoblock_enabled=False): para las reglas candidatas, SOLO
+    # observa y corta acá — el integration custom-email-unified de Wazuh sigue siendo
+    # el que bloquea y notifica. Evita spamear aprobadores/tickets con cada alerta IPS.
+    if (
+        fgt_decision is not None
+        and fgt_decision.candidate
+        and not settings.fortigate_autoblock_enabled
+    ):
+        # Fase 0: email de observación ("bloquearía X"), sin ejecutar. Dedup por IP
+        # dentro de la ventana TTL. Flag temporal hasta el cutover a Fase 1.
+        if (
+            settings.fortigate_observe_email
+            and fgt_decision.should_block
+            and fgt_decision.ip
+            and not fgt_decision.duplicate
+        ):
+            from src import mailer
+
+            _spawn(
+                mailer.send_fgt_observation_email(
+                    settings,
+                    alert_id=alert.alert_id,
+                    ip=fgt_decision.ip,
+                    rule_id=fgt_decision.rule_id,
+                    host=alert.device.hostname,
+                    ttl_hours=settings.fortigate_block_ttl_hours,
+                )
+            )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "observed_fgt_autoblock",
+                "alert_id": alert.alert_id,
+                "rule_id": fgt_decision.rule_id,
+                "would_block": fgt_decision.ip,
+                "reason": fgt_decision.reason,
+            },
+        )
+
+    # Dedup: si Wazuh reenvía la misma alerta y ya tiene un approval pending,
+    # no relanzamos el pipeline (evita emails + tickets InvGate duplicados).
+    if settings.enable_narrator:
+        from src.state import has_pending_for_alert
+
+        try:
+            if await has_pending_for_alert(settings.state_db_path, alert.alert_id):
+                logger.info(
+                    "alert deduplicada | id=%s ya tiene un approval pending - skip pipeline",
+                    alert.alert_id,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={
+                        "status": "deduplicated",
+                        "alert_id": alert.alert_id,
+                        "source": alert.source,
+                    },
+                )
+        except Exception:  # noqa: BLE001 - dedup es best-effort, no bloquea el ingest
+            logger.exception("dedup check falló para alert id=%s (sigo)", alert.alert_id)
+
     if settings.enable_triage:
-        asyncio.create_task(_run_triage_in_background(alert, settings))
+        _spawn(_run_triage_in_background(alert, settings))
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -701,22 +858,22 @@ def _render_decision_page(
   <meta name="color-scheme" content="dark light">
   <title>SOC L1 · {s["title"]}</title>
   <style>
-    :root {{ color-scheme: dark light; }}
+    :root {{ color-scheme: light; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background-color:#0b0d10; margin:0; padding:40px 20px; color:#f3f4f6; }}
-    .container {{ max-width:560px; margin:0 auto; background-color:#14171c;
-                  border:1px solid #23272f; border-radius:12px; overflow:hidden;
-                  box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
+            background-color:#f6f8fa; margin:0; padding:40px 20px; color:#1f2328; }}
+    .container {{ max-width:560px; margin:0 auto; background-color:#ffffff;
+                  border:1px solid #d0d7de; border-radius:12px; overflow:hidden;
+                  box-shadow:0 1px 3px rgba(31,35,40,.06), 0 8px 24px rgba(31,35,40,.05); }}
     .banner {{ background:{s["banner"]}; color:white; padding:32px 24px; text-align:center; }}
     .icon {{ font-size:48px; line-height:1; margin-bottom:12px; }}
     .heading {{ font-size:22px; font-weight:bold; margin:0; }}
-    .body {{ padding:28px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
+    .body {{ padding:28px 24px; font-size:14px; line-height:1.6; color:#57606a;
              text-align:center; border-left:4px solid {s["accent"]}; margin:0 24px;
-             background-color:#1b1f26; border-radius:6px; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center;
-               font-size:12px; color:#94a3b8; }}
-    code {{ background-color:#23272f; padding:2px 6px; border-radius:3px;
-            font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#cbd5e1; }}
+             background-color:#f6f8fa; border-radius:6px; }}
+    .footer {{ padding:16px; background-color:#f6f8fa; text-align:center;
+               font-size:12px; color:#6b7280; }}
+    code {{ background-color:#eff2f5; padding:2px 6px; border-radius:3px;
+            font-family:'SF Mono',Monaco,monospace; font-size:12px; color:#1f2328; }}
   </style>
 </head>
 <body>
@@ -735,7 +892,7 @@ def _render_decision_page(
                      background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
         ✕ Cerrar pestaña
       </button>
-      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#94a3b8;">
+      <p id="cerrar-hint" style="display:none; margin:12px 0 0; font-size:13px; color:#6b7280;">
         Esta pestaña ya cumplió su función — podés cerrarla cuando quieras.
       </p>
     </div>
@@ -878,13 +1035,13 @@ async def _handle_decision(
 
     invgate_rid = row.get("invgate_request_id")
     if invgate_rid:
-        asyncio.create_task(
+        _spawn(
             _update_invgate_on_decision(settings, invgate_rid, decision, alert_id, ip)
         )
 
     if decision == "rejected":
         # row ya trae decided_at/decided_by_ip actualizados; sin ejecución.
-        asyncio.create_task(
+        _spawn(
             _send_closure_safely(settings, row, decision="rejected", execution_results=None)
         )
         return _render_decision_page(
@@ -920,7 +1077,7 @@ async def _handle_decision(
         skipped = 0
 
     # Lanzamos el executor en background para responder rápido al humano que clickeó
-    asyncio.create_task(
+    _spawn(
         _execute_approved_plan_in_background(
             settings, token, alert_id, plan, actions_to_run, invgate_rid
         )
@@ -953,7 +1110,7 @@ async def _handle_decision(
                 f"<br><br>({skipped} acción{'es' if skipped > 1 else ''} "
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
-        body += '<br><br><span style="font-size:12px;color:#94a3b8;">El resultado queda en logs y SQLite.</span>'
+        body += '<br><br><span style="font-size:12px;color:#6b7280;">El resultado queda en logs y SQLite.</span>'
     return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
 
 
@@ -971,7 +1128,7 @@ async def _execute_approved_plan_in_background(
         # Cierre: aprobado sin acciones → execution_results=[] (no None)
         row = await get_pending_approval(settings.state_db_path, token)
         if row:
-            asyncio.create_task(
+            _spawn(
                 _send_closure_safely(settings, row, decision="approved", execution_results=[])
             )
         return
@@ -989,7 +1146,7 @@ async def _execute_approved_plan_in_background(
             len(results) - ok_count,
         )
         if invgate_request_id:
-            asyncio.create_task(
+            _spawn(
                 _update_invgate_post_execution(
                     settings, invgate_request_id, alert_id, results
                 )
@@ -997,7 +1154,7 @@ async def _execute_approved_plan_in_background(
         # Cierre: re-leemos el row para tener executed_at + decided_at actualizados
         row = await get_pending_approval(settings.state_db_path, token)
         if row:
-            asyncio.create_task(
+            _spawn(
                 _send_closure_safely(
                     settings, row, decision="approved", execution_results=results
                 )
@@ -1033,7 +1190,7 @@ def _render_review_page(
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
         actions_html = (
-            "<p style='color:#94a3b8;font-style:italic;'>El plan no incluye acciones "
+            "<p style='color:#6b7280;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
     else:
@@ -1050,13 +1207,13 @@ def _render_review_page(
             }.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
-                                  background-color:#1b1f26;border-radius:6px;border-left:4px solid {action_color};
+                                  background-color:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {action_color};
                                   cursor:pointer;">
                   <input type="checkbox" name="action_idx" value="{i}" checked
                          style="margin-right:10px;transform:scale(1.3);vertical-align:middle;">
                   <strong style="font-family:monospace;color:{action_color};">{_h.escape(a.type)}</strong>
-                  → <code style="background-color:#1b2b3a;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
-                  <div style="margin:6px 0 0 30px;font-size:12px;color:#94a3b8;line-height:1.5;">
+                  → <code style="background-color:#ddf4ff;color:#0969da;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 30px;font-size:12px;color:#6b7280;line-height:1.5;">
                     {_h.escape(a.justification)}
                   </div>
                 </label>"""
@@ -1071,29 +1228,29 @@ def _render_review_page(
   <meta name="color-scheme" content="dark light">
   <title>SOC L1 · Revisar plan {alert_id}</title>
   <style>
-    :root {{ color-scheme: dark light; }}
-    body {{ font-family: sans-serif; background-color:#0b0d10; margin:0; padding:20px; color:#f3f4f6; }}
-    .container {{ max-width:760px; margin:0 auto; background-color:#14171c; border:1px solid #23272f;
-                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.4); }}
-    .header {{ padding:24px; border-left:8px solid {risk_color}; background-color:#0b0d10; }}
-    h1 {{ font-size:20px; margin:0 0 8px 0; color:#f3f4f6; }}
-    .meta {{ font-size:13px; color:#94a3b8; }}
+    :root {{ color-scheme: light; }}
+    body {{ font-family: sans-serif; background-color:#f6f8fa; margin:0; padding:20px; color:#1f2328; }}
+    .container {{ max-width:760px; margin:0 auto; background-color:#ffffff; border:1px solid #d0d7de;
+                  border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(31,35,40,.06), 0 8px 24px rgba(31,35,40,.05); }}
+    .header {{ padding:24px; border-left:8px solid {risk_color}; background-color:#ffffff; border-bottom:1px solid #d0d7de; }}
+    h1 {{ font-size:20px; margin:0 0 8px 0; color:#1f2328; }}
+    .meta {{ font-size:13px; color:#6b7280; }}
     .badge {{ display:inline-block; padding:4px 12px; border-radius:16px;
               background:{risk_color}; color:white; font:bold 11px sans-serif;
               text-transform:uppercase; margin-top:8px; }}
-    .summary {{ padding:16px 24px; font-size:14px; line-height:1.6; color:#cbd5e1;
-                background-color:#241c10; margin:20px; border-radius:8px;
-                border-left:4px solid #f59e0b; }}
+    .summary {{ padding:16px 24px; font-size:14px; line-height:1.6; color:#57606a;
+                background-color:#fff8c5; margin:20px; border-radius:8px;
+                border-left:4px solid #9a6700; }}
     .form-section {{ padding:0 24px 16px; }}
-    .form-section h2 {{ font-size:16px; margin:16px 0 12px; color:#f3f4f6; }}
+    .form-section h2 {{ font-size:16px; margin:16px 0 12px; color:#1f2328; }}
     .buttons {{ padding:16px 24px 24px; display:flex; gap:12px; flex-wrap:wrap; }}
     .btn {{ padding:14px 28px; border:none; border-radius:6px; font-weight:bold;
             font-size:14px; cursor:pointer; }}
-    .btn-approve {{ background:#16a34a; color:white; }}
-    .btn-approve:hover {{ background:#15803d; }}
-    .btn-reject {{ background:#dc2626; color:white; }}
-    .btn-reject:hover {{ background:#b91c1c; }}
-    .footer {{ padding:16px; background-color:#0b0d10; text-align:center; font-size:12px; color:#94a3b8; }}
+    .btn-approve {{ background:#1a7f37; color:white; }}
+    .btn-approve:hover {{ background:#137333; }}
+    .btn-reject {{ background:#cf222e; color:white; }}
+    .btn-reject:hover {{ background:#a40e26; }}
+    .footer {{ padding:16px; background-color:#f6f8fa; text-align:center; font-size:12px; color:#6b7280; }}
   </style>
 </head>
 <body>
@@ -1105,14 +1262,14 @@ def _render_review_page(
     </div>
 
     <div class="summary">
-      <strong style="color:#fbbf78;">📝 Resumen ejecutivo:</strong><br>
+      <strong style="color:#9a6700;">📝 Resumen ejecutivo:</strong><br>
       {_h.escape(plan.executive_summary)}
     </div>
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
         <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#94a3b8;margin:0 0 12px;">
+        <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">
           Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
           O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
         </p>
@@ -1425,6 +1582,7 @@ def _render_approvals_page(
 
 @app.get("/approvals")
 async def list_approvals_endpoint(
+    request: Request,
     settings: SettingsDep,
     status: str | None = None,
     limit: int = 50,
@@ -1433,6 +1591,9 @@ async def list_approvals_endpoint(
 ):
     """Cola de approvals (last N, paginada, filtrable por status).
 
+    Detrás del mismo login que /ui: expone tokens de approval y planes, así que
+    no puede ser anónimo (un token pending filtrado permitiría aprobar acciones).
+
     Query params:
       - status: pending | approved | rejected | expired | executed (opcional)
       - limit: 1-500 (default 50)
@@ -1440,18 +1601,25 @@ async def list_approvals_endpoint(
       - format: html (default) | json
     """
     from src.state import list_approvals
+    from src.web import auth
+
+    if not auth.session_valid(settings, request.cookies.get(auth.COOKIE_NAME)):
+        if format == "json":
+            return JSONResponse(content={"error": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/ui/login", status_code=303)
 
     rows, total = await list_approvals(
         settings.state_db_path, status=status, limit=limit, offset=offset
     )
 
     if format == "json":
-        # JSON: stripeamos plan_json para no devolver objetos masivos en el array
-        # (el caller puede pedir un approval individual si necesita el plan completo)
+        # JSON: stripeamos plan_json (objetos masivos) y token (credencial de
+        # aprobación single-use — nunca debe salir en la lista).
         clean_rows = []
         for r in rows:
             r = dict(r)
             r.pop("plan_json", None)
+            r.pop("token", None)
             clean_rows.append(r)
         return JSONResponse(content={
             "total": total,

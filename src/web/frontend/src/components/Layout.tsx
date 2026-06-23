@@ -1,0 +1,249 @@
+import { NavLink, Outlet } from "react-router-dom"
+import { useEffect, useState, type ReactNode } from "react"
+
+type NavItem = { to: string; label: string; end: boolean; icon: ReactNode }
+
+const NAV: NavItem[] = [
+  {
+    to: "/",
+    label: "Panel",
+    end: true,
+    // layout-dashboard
+    icon: (
+      <>
+        <rect width="7" height="9" x="3" y="3" rx="1" />
+        <rect width="7" height="5" x="14" y="3" rx="1" />
+        <rect width="7" height="9" x="14" y="12" rx="1" />
+        <rect width="7" height="5" x="3" y="16" rx="1" />
+      </>
+    ),
+  },
+  {
+    to: "/queue",
+    label: "Cola",
+    end: false,
+    // inbox
+    icon: (
+      <>
+        <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+        <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      </>
+    ),
+  },
+  {
+    to: "/kpis",
+    label: "KPIs",
+    end: false,
+    // activity (pulso)
+    icon: <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />,
+  },
+  {
+    to: "/fortigate",
+    label: "FortiGate",
+    end: false,
+    // firewall: muro de ladrillos + fuego
+    icon: (
+      <>
+        <path d="M12 2.5c.9 1.6 2.4 2.5 2.4 4.3a2.4 2.4 0 0 1-4.8 0c0-.8.3-1.4.8-2 .3.7.9.9 1.4.6-.5-.8-.3-1.8.2-2.9z" />
+        <path d="M3 10.5h18v10.5H3z" />
+        <path d="M3 15.75h18" />
+        <path d="M9.5 10.5v5.25" />
+        <path d="M14.5 10.5v5.25" />
+        <path d="M6.5 15.75V21" />
+        <path d="M12 15.75V21" />
+        <path d="M17.5 15.75V21" />
+      </>
+    ),
+  },
+  {
+    to: "/reportes",
+    label: "Reportes",
+    end: false,
+    // file-text
+    icon: (
+      <>
+        <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+        <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+        <path d="M16 13H8" />
+        <path d="M16 17H8" />
+        <path d="M10 9H8" />
+      </>
+    ),
+  },
+  {
+    to: "/config",
+    label: "Configuración",
+    end: false,
+    // sliders-horizontal
+    icon: (
+      <>
+        <line x1="21" x2="14" y1="4" y2="4" />
+        <line x1="10" x2="3" y1="4" y2="4" />
+        <line x1="21" x2="12" y1="12" y2="12" />
+        <line x1="8" x2="3" y1="12" y2="12" />
+        <line x1="21" x2="16" y1="20" y2="20" />
+        <line x1="12" x2="3" y1="20" y2="20" />
+        <line x1="14" x2="14" y1="2" y2="6" />
+        <line x1="8" x2="8" y1="10" y2="14" />
+        <line x1="16" x2="16" y1="18" y2="22" />
+      </>
+    ),
+  },
+]
+
+function NavIcon({ children }: { children: ReactNode }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-[18px] w-[18px] shrink-0"
+      aria-hidden
+    >
+      {children}
+    </svg>
+  )
+}
+
+export function Layout() {
+  const [collapsed, setCollapsed] = useState<boolean>(
+    () => localStorage.getItem("sidebar-collapsed") === "1"
+  )
+  const [mobileOpen, setMobileOpen] = useState(false)
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", collapsed ? "1" : "0")
+  }, [collapsed])
+
+  // El collapse solo aplica en desktop (md+); en mobile el sidebar es un drawer.
+  const hideOnCollapse = collapsed ? "md:hidden" : ""
+
+  return (
+    <div className="min-h-svh md:flex">
+      {/* Top-bar mobile con hamburguesa (oculto en desktop) */}
+      <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-sidebar-border bg-sidebar px-4 py-3 md:hidden">
+        <button
+          type="button"
+          onClick={() => setMobileOpen(true)}
+          aria-label="Abrir menú"
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+        >
+          <NavIcon>
+            <line x1="4" x2="20" y1="6" y2="6" />
+            <line x1="4" x2="20" y1="12" y2="12" />
+            <line x1="4" x2="20" y1="18" y2="18" />
+          </NavIcon>
+        </button>
+        <img
+          src="/ui/static/zebra-logo.svg"
+          alt="ZebraSecurity"
+          className="h-7 w-auto"
+        />
+        <span className="text-sm font-semibold">SOC-L1</span>
+      </header>
+
+      {/* Overlay mobile cuando el drawer está abierto */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={() => setMobileOpen(false)}
+          aria-hidden
+        />
+      )}
+
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-transform duration-200 md:z-auto md:translate-x-0 ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        } md:transition-[width] ${collapsed ? "md:w-16" : "md:w-60"}`}
+      >
+        <div
+          className={`flex items-center gap-3 py-4 ${
+            collapsed ? "px-5 md:justify-center md:px-0" : "px-5"
+          }`}
+        >
+          <img
+            src="/ui/static/zebra-logo.svg"
+            alt="ZebraSecurity"
+            className="h-9 w-auto shrink-0"
+          />
+          <div className={`leading-tight ${hideOnCollapse}`}>
+            <div className="text-base font-semibold">SOC-L1</div>
+            <div className="text-[11px] tracking-wide text-muted-foreground">
+              Zebra<span className="font-bold text-foreground">Security</span>
+            </div>
+          </div>
+        </div>
+
+        <nav className="flex flex-col gap-1 px-3 py-2">
+          {NAV.map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.end}
+              onClick={() => setMobileOpen(false)}
+              title={collapsed ? n.label : undefined}
+              className={({ isActive }) =>
+                `relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
+                  collapsed ? "md:justify-center md:px-0" : ""
+                } ${
+                  isActive
+                    ? "bg-sidebar-accent text-primary font-medium before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-0.5 before:rounded-full before:bg-primary"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                }`
+              }
+            >
+              <NavIcon>{n.icon}</NavIcon>
+              <span className={hideOnCollapse}>{n.label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="mt-auto flex flex-col gap-1 p-3">
+          {/* Toggle de collapse — solo desktop */}
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
+            title={collapsed ? "Expandir" : "Colapsar"}
+            className={`hidden items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground md:flex ${
+              collapsed ? "md:justify-center md:px-0" : ""
+            }`}
+          >
+            <NavIcon>
+              {collapsed ? (
+                <path d="m9 18 6-6-6-6" />
+              ) : (
+                <path d="m15 18-6-6 6-6" />
+              )}
+            </NavIcon>
+            <span className={hideOnCollapse}>Colapsar</span>
+          </button>
+
+          <a
+            href="/ui/logout"
+            title={collapsed ? "Salir" : undefined}
+            className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground ${
+              collapsed ? "md:justify-center md:px-0" : ""
+            }`}
+          >
+            <NavIcon>
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+            </NavIcon>
+            <span className={hideOnCollapse}>Salir</span>
+          </a>
+        </div>
+      </aside>
+
+      <main
+        className={`flex-1 px-4 py-6 transition-[margin] duration-200 md:px-6 md:py-8 ${
+          collapsed ? "md:ml-16" : "md:ml-60"
+        }`}
+      >
+        <div className="mx-auto max-w-6xl">
+          <Outlet />
+        </div>
+      </main>
+    </div>
+  )
+}

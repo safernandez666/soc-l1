@@ -98,6 +98,16 @@ def test_search_user_not_found(cfg: LdapConfig, mock_conn: Connection) -> None:
     assert user is None
 
 
+def test_search_user_escapes_ldap_injection(cfg: LdapConfig, mock_conn: Connection) -> None:
+    """Un sam con metacaracteres LDAP no debe alterar el filtro ni matchear a otro.
+
+    Sin escape_filter_chars, 'svc-soar)(objectClass=*' inyectaría una cláusula
+    extra y devolvería el usuario real; escapado, queda como literal → None.
+    """
+    user = ldap_tools.search_user(cfg, "svc-soar)(objectClass=*")
+    assert user is None
+
+
 def test_disable_user_sets_uac_bit(cfg: LdapConfig, mock_conn: Connection) -> None:
     result = ldap_tools.disable_user(cfg, "svc-soar")
     assert result.ok is True

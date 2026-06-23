@@ -16,7 +16,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agents import Agent, Runner
+from agents import Agent
+from src.agents import run_agent
 from src.agents.enricher import EnrichmentResult
 from src.agents.threatintel import ThreatIntelResult
 from src.agents.triage import TriageDecision
@@ -263,5 +264,5 @@ async def narrate_incident(
     """Corre el Narrator y devuelve el plan estructurado."""
     agent = build_narrator_agent(model=model)
     user_input = _bundle_to_prompt(alert, triage, enrichment, threat_intel)
-    result = await Runner.run(agent, input=user_input)
+    result = await run_agent(agent, input=user_input, timeout=90.0, label="narrator")
     return result.final_output_as(NarratorPlan)
