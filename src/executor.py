@@ -156,15 +156,18 @@ async def _execute_one(
     protected_users: set[str],
     protected_networks: list[str],
     protected_hosts: set[str],
-    dry_run: bool,
     settings: Settings | None,
 ) -> ExecutionResult:
     """Ejecuta una sola action según su type. Acciones AD requieren ldap_cfg != None.
 
     Antes de tocar AD, pasa por dos guardrails:
       1. PROTECTED_USERS: si action.target está en la lista (case-insensitive), refusa.
-      2. DRY_RUN: si está activo, devuelve ok=True sin ejecutar (audit pero no impacto).
+      2. DRY_RUN: resuelto POR FAMILIA vía settings.dry_run_for(action.type). El master
+         dry_run_mode prendido fuerza simulación en todas; apagado, manda el override
+         de la familia. Sin settings (tests) → ejecuta (dry_run=False).
     """
+    dry_run = settings.dry_run_for(action.type) if settings is not None else False
+
     if action.type == "notify_only":
         return ExecutionResult(
             action_type=action.type, target=action.target, ok=True, message="noted"
@@ -314,12 +317,10 @@ async def execute_plan(
     protected_users: set[str] = set()
     protected_networks: list[str] = []
     protected_hosts: set[str] = set()
-    dry_run = False
     if settings is not None:
         protected_users = settings.protected_users_set()
         protected_networks = settings.protected_networks_list()
         protected_hosts = settings.protected_hosts_set()
-        dry_run = settings.dry_run_mode
 
     if protected_users:
         logger.info(
@@ -336,14 +337,25 @@ async def execute_plan(
             "executor: PROTECTED_HOSTS activo (%d hosts): %s",
             len(protected_hosts), sorted(protected_hosts),
         )
-    if dry_run:
-        logger.warning("executor: DRY_RUN_MODE=true - ninguna acción AD/FortiGate se ejecuta de verdad")
+    if settings is not None:
+        state = settings.dry_run_state()
+        if settings.dry_run_mode:
+            logger.warning(
+                "executor: DRY_RUN_MODE=true (kill-switch maestro) - TODAS las acciones "
+                "AD/FortiGate/Defender simulan, sin importar overrides por familia"
+            )
+        else:
+            logger.warning(
+                "executor: DRY_RUN por familia → ad=%s fortigate=%s defender=%s "
+                "(true=simula, false=EJECUTA EN VIVO)",
+                state["ad"], state["fortigate"], state["defender"],
+            )
 
     results: list[ExecutionResult] = []
     for action in actions:
         r = await _execute_one(
             action, ldap_cfg, protected_users, protected_networks,
-            protected_hosts, dry_run, settings,
+            protected_hosts, settings,
         )
         logger.info(
             "EXEC | type=%s target=%s ok=%s msg=%s",

@@ -21,6 +21,30 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Mapeo action.type → familia de dry-run. Las acciones sin familia (notify_only,
+# escalate_l2) no tienen side-effect externo y nunca consultan el toggle.
+_ACTION_FAMILY: dict[str, str] = {
+    "disable_user": "ad",
+    "force_password_change": "ad",
+    "block_ip": "fortigate",
+    "scan_host": "defender",
+    "isolate_host": "defender",
+}
+
+
+def _parse_optional_bool(raw: str) -> bool | None:
+    """Parsea un toggle tri-estado: True/False explícito o None (= heredar/vacío).
+
+    Tolerante a "1/yes/on" y "0/no/off". Vacío o inválido → None (heredar el master).
+    """
+    token = (raw or "").strip().lower()
+    if token in ("true", "1", "yes", "on"):
+        return True
+    if token in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
 def _parse_credentials_file(path: str) -> dict[str, str]:
     """Parsea un archivo con líneas KEY=value (formato /root/.ad_wazuh_credentials).
 
@@ -162,9 +186,9 @@ class Settings(BaseSettings):
     fortigate_autoblock_enabled: bool = Field(default=False)
     fortigate_auto_block_rules: str = Field(
         default=(
-            "196201,196202,196203,196204,196207,196208,196210,196212,196213,196214,"
-            "196215,196217,196218,196220,196221,196222,196223,196226,196227,196228,"
-            "196230,196100,196101,196112"
+            "196201,196202,196203,196204,196205,196207,196208,196210,196212,196213,"
+            "196214,196215,196217,196218,196220,196221,196222,196223,196226,196227,"
+            "196228,196230,196100,196101,196112"
         )
     )
     fortigate_block_ttl_hours: int = Field(default=1)
@@ -269,9 +293,22 @@ class Settings(BaseSettings):
     # Formato: comma-separated, case-insensitive. Ejemplo: "jdoe,admin,svc-soar"
     protected_users: str = Field(default="")
 
-    # Si true, el executor logea las acciones pero NO ejecuta nada (todas no-op).
+    # Kill-switch MAESTRO. Si true, el executor logea las acciones pero NO ejecuta
+    # nada (todas no-op), SIN importar los overrides por familia de abajo. Es la red
+    # de seguridad global: una sola palanca apaga todo en una emergencia.
     # Útil mientras se valida que el Narrator hace recomendaciones sensatas.
     dry_run_mode: bool = Field(default=False)
+
+    # Overrides de dry-run POR FAMILIA de acción. Solo aplican cuando el master
+    # dry_run_mode=false (kill-switch duro: master prendido gana siempre).
+    # Valores: "" (heredar master) | "true" (simular) | "false" (ejecutar de verdad).
+    # Permite, p.ej., FortiGate ejecutando real mientras Defender sigue simulado.
+    #   ad        → disable_user, force_password_change
+    #   fortigate → block_ip (+ auto-block del fast-path)
+    #   defender  → scan_host, isolate_host
+    dry_run_ad: str = Field(default="")
+    dry_run_fortigate: str = Field(default="")
+    dry_run_defender: str = Field(default="")
 
     # Feature flags
     enable_triage: bool = Field(default=False)
@@ -317,6 +354,42 @@ class Settings(BaseSettings):
         """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1))."""
         return {
             r.strip() for r in self.fortigate_auto_block_rules.split(",") if r.strip()
+        }
+
+    def dry_run_for(self, action_type: str) -> bool:
+        """Resuelve si una acción concreta debe simularse (True) o ejecutarse (False).
+
+        Semántica de kill-switch DURO:
+          1. Si dry_run_mode (master) está prendido → True SIEMPRE (todo simula).
+          2. Si no, se mira el override de la familia: "true"/"false" gana; vacío o
+             inválido hereda el master (que acá vale False → ejecuta).
+
+        Acciones sin familia (notify_only/escalate_l2) caen al master (no aplica).
+        """
+        if self.dry_run_mode:
+            return True
+        family = _ACTION_FAMILY.get(action_type)
+        override = {
+            "ad": self.dry_run_ad,
+            "fortigate": self.dry_run_fortigate,
+            "defender": self.dry_run_defender,
+        }.get(family)
+        if override is not None:
+            parsed = _parse_optional_bool(override)
+            if parsed is not None:
+                return parsed
+        return self.dry_run_mode
+
+    def dry_run_state(self) -> dict[str, bool]:
+        """Estado efectivo de dry-run por familia (para loguear al arrancar).
+
+        True = simula, False = ejecuta de verdad. Útil para que en cada arranque se
+        vea de un vistazo qué está LIVE, sobre todo con el master apagado.
+        """
+        return {
+            "ad": self.dry_run_for("disable_user"),
+            "fortigate": self.dry_run_for("block_ip"),
+            "defender": self.dry_run_for("scan_host"),
         }
 
     @model_validator(mode="after")

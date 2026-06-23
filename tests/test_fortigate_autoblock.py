@@ -88,6 +88,173 @@ def test_allowlist_configurable(fgt_alert: dict) -> None:
     assert d.candidate is False
 
 
+# ===== Fase 1: enforce() ejecuta el quarantine real =====
+
+
+def _mock_fgt_client(quarantine_result):
+    """Devuelve (factory, client) para patchear FortigateClient como async ctx manager."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = AsyncMock()
+    client.quarantine_ip = AsyncMock(return_value=quarantine_result)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+    return factory, client
+
+
+def _enforce_settings(tmp_path: Path, **kw) -> Settings:
+    base = dict(
+        fortigate_autoblock_enabled=True,
+        fortigate_host="fg.test",
+        fortigate_token="t",
+        protected_networks="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8",
+        state_db_path=str(tmp_path / "state.db"),
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+@pytest.mark.asyncio
+async def test_enforce_ejecuta_quarantine_real(fgt_alert: dict, tmp_path: Path) -> None:
+    """should_block + no dry-run + configurado → llama quarantine_ip con ip+ttl correctos."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+    from src.models import FortigateActionResult
+
+    alert = normalize(fgt_alert)
+    settings = _enforce_settings(tmp_path)  # ttl default 1h
+    result = FortigateActionResult(
+        ok=True, ip="203.0.113.66", action="quarantine_ip",
+        expires_at="2026-06-23T13:00:00+00:00", message="banned for 3600s",
+    )
+    factory, client = _mock_fgt_client(result)
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(alert, settings)
+
+    client.quarantine_ip.assert_called_once_with("203.0.113.66", ttl_seconds=3600)
+    assert outcome.executed is True
+    assert outcome.ok is True
+    assert outcome.expires_at == "2026-06-23T13:00:00+00:00"
+    # registró en el JSONL con executed/block_ok
+    rec = json.loads((tmp_path / "fgt_observations.jsonl").read_text().splitlines()[-1])
+    assert rec["executed"] is True and rec["block_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_enforce_dry_run_fortigate_no_ejecuta(fgt_alert: dict, tmp_path: Path) -> None:
+    """dry_run_fortigate=true (master off) → simula, NO toca FortiGate."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+
+    alert = normalize(fgt_alert)
+    settings = _enforce_settings(tmp_path, dry_run_mode=False, dry_run_fortigate="true")
+    factory, client = _mock_fgt_client(None)
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(alert, settings)
+
+    factory.assert_not_called()
+    client.quarantine_ip.assert_not_called()
+    assert outcome.executed is False and outcome.ok is False
+    assert "DRY_RUN" in (outcome.message or "")
+
+
+@pytest.mark.asyncio
+async def test_enforce_master_kill_switch_no_ejecuta(fgt_alert: dict, tmp_path: Path) -> None:
+    """dry_run_mode=true (master) fuerza simulación aunque dry_run_fortigate=false."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+
+    alert = normalize(fgt_alert)
+    settings = _enforce_settings(tmp_path, dry_run_mode=True, dry_run_fortigate="false")
+    factory, client = _mock_fgt_client(None)
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(alert, settings)
+
+    client.quarantine_ip.assert_not_called()
+    assert outcome.executed is False and outcome.ok is False
+
+
+@pytest.mark.asyncio
+async def test_enforce_ip_protegida_no_ejecuta(fgt_alert: dict, tmp_path: Path) -> None:
+    """IP del atacante en red protegida → candidata pero NO bloquea."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+
+    raw = copy.deepcopy(fgt_alert)
+    raw["data"]["srcip"] = "10.99.0.42"
+    alert = normalize(raw)
+    settings = _enforce_settings(tmp_path)
+    factory, client = _mock_fgt_client(None)
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(alert, settings)
+
+    client.quarantine_ip.assert_not_called()
+    assert outcome.executed is False and outcome.ok is False
+    assert outcome.decision.reason == "protected"
+
+
+@pytest.mark.asyncio
+async def test_webhook_fase1_bloquea_y_corta(fgt_alert: dict, tmp_path: Path) -> None:
+    """En Fase 1, una alerta candidata bloquea y corta: 202 'blocked_fgt_autoblock'."""
+    import hashlib
+    import hmac
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from src.config import get_settings
+    from src.main import app
+    from src.models import FortigateActionResult
+
+    TEST_SECRET = "test-secret-32-chars-or-more-abc"
+
+    def _override() -> Settings:
+        return Settings(
+            wazuh_webhook_secret=TEST_SECRET,
+            webhook_allowed_ips="127.0.0.1,testclient",
+            fortigate_autoblock_enabled=True,  # Fase 1
+            fortigate_host="fg.test",
+            fortigate_token="t",
+            protected_networks="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8",
+            state_db_path=str(tmp_path / "state.db"),
+            smtp_host="",  # sin SMTP → no manda email, no rompe
+        )
+
+    result = FortigateActionResult(
+        ok=True, ip="203.0.113.66", action="quarantine_ip",
+        expires_at="2026-06-23T13:00:00+00:00", message="banned",
+    )
+    factory, client = _mock_fgt_client(result)
+
+    app.dependency_overrides[get_settings] = _override
+    get_settings.cache_clear()
+    try:
+        body = json.dumps(fgt_alert).encode()
+        sig = "sha256=" + hmac.new(TEST_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        with patch("src.fortigate_autoblock.FortigateClient", factory):
+            with TestClient(app) as c:
+                r = c.post(
+                    "/webhook/wazuh-alert",
+                    content=body,
+                    headers={"X-Wazuh-Signature": sig, "Content-Type": "application/json"},
+                )
+        assert r.status_code == 202
+        data = r.json()
+        assert data["status"] == "blocked_fgt_autoblock"
+        assert data["blocked_ip"] == "203.0.113.66"
+        assert data["ok"] is True
+        client.quarantine_ip.assert_called_once_with("203.0.113.66", ttl_seconds=3600)
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+
 def test_webhook_fase0_observa_y_corta(fgt_alert: dict) -> None:
     """En Fase 0, una alerta candidata se observa y corta: 202 'observed_fgt_autoblock',
     sin lanzar el pipeline (no email/ticket)."""

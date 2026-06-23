@@ -938,6 +938,87 @@ async def send_fgt_observation_email(
         logger.exception("mailer: send FGT-OBSERVE failed | ip=%s alert=%s", ip, alert_id)
 
 
+async def send_fgt_block_email(
+    settings: Settings,
+    *,
+    alert_id: str,
+    ip: str,
+    rule_id: str | None,
+    host: str | None,
+    ttl_hours: int,
+    expires_at: str | None = None,
+) -> None:
+    """Fase 1: confirma que SOC-L1 BLOQUEÓ la IP en FortiGate (quarantine con TTL).
+
+    Reemplaza al aviso de Fase 0. El caller ya hizo el dedup por IP; esto solo arma y manda.
+    """
+    if not settings.smtp_host or not settings.smtp_to_approvers:
+        logger.warning(
+            "mailer: SMTP no configurado - skip email FGT-BLOCK para ip=%s", ip
+        )
+        return
+
+    h = html.escape
+    subject = f"[SOC L1][FortiGate · BLOQUEADO] {ip}"
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.smtp_from
+    msg["To"] = settings.smtp_to_approvers
+
+    text = (
+        f"SOC-L1 · FortiGate auto-block (Fase 1 — EJECUTADO)\n\n"
+        f"IP bloqueada:     {ip}\n"
+        f"Regla IPS:        {rule_id or '—'}\n"
+        f"Host/origen:      {host or '—'}\n"
+        f"Alerta:           {alert_id}\n"
+        f"TTL del ban:      {ttl_hours}h (quarantine con TTL)\n"
+        f"Expira:           {expires_at or '—'}\n\n"
+        f"SOC-L1 aplicó un quarantine (banned users con TTL) sobre la IP origen en "
+        f"FortiGate. El ban se libera solo al vencer el TTL.\n"
+    )
+    msg.set_content(text)
+
+    rows = "".join(
+        f'<tr><td style="padding:6px 12px;color:#6b7280;font-size:13px;white-space:nowrap;">{h(k)}</td>'
+        f'<td style="padding:6px 12px;color:#1f2328;font-size:13px;font-family:monospace;">{h(v)}</td></tr>'
+        for k, v in (
+            ("IP bloqueada", ip),
+            ("Regla IPS", rule_id or "—"),
+            ("Host / origen", host or "—"),
+            ("Alerta", alert_id),
+            ("TTL del ban", f"{ttl_hours}h"),
+            ("Expira", expires_at or "—"),
+        )
+    )
+    body_html = f"""<!doctype html><html><body style="margin:0;background:#f6f8fa;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden;">
+    <tr><td style="background:#b42318;color:#ffffff;padding:18px 24px;font-weight:bold;font-size:15px;">
+      🚫 FortiGate · IP BLOQUEADA (auto-block)
+    </td></tr>
+    <tr><td style="padding:20px 24px 8px;color:#1f2328;font-size:14px;line-height:1.6;">
+      SOC-L1 detectó una alerta IPS de alta confianza y <strong>bloqueó la IP origen</strong>
+      en FortiGate (quarantine con TTL). El ban se libera solo al vencer el TTL.
+    </td></tr>
+    <tr><td style="padding:4px 12px 12px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
+    </td></tr>
+    <tr><td style="background:#f6f8fa;padding:14px 24px;text-align:center;color:#6b7280;font-size:12px;">
+      SOC L1 · ZebraSecurity — FortiGate Auto-Block
+    </td></tr>
+  </table>
+</body></html>"""
+    msg.add_alternative(body_html, subtype="html")
+
+    try:
+        await asyncio.to_thread(_send_sync, settings, msg)
+        logger.info(
+            "mailer: email FGT-BLOCK enviado | ip=%s rule=%s alert=%s to=%s",
+            ip, rule_id, alert_id, settings.smtp_to_approvers,
+        )
+    except Exception:
+        logger.exception("mailer: send FGT-BLOCK failed | ip=%s alert=%s", ip, alert_id)
+
+
 # ===== Email de cierre de caso (post-decisión) con timeline por agente =====
 
 # stage del PipelineTrace → (badge style, label legible)

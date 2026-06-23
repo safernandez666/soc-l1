@@ -208,19 +208,60 @@ async def wazuh_webhook(
     )
 
     # Auto-block FortiGate. Ver docs/fortigate-autoblock-plan.md. Best-effort.
+    fgt_decision = None
+    fgt_outcome = None
     try:
         from src import fortigate_autoblock
 
-        fgt_decision = fortigate_autoblock.observe(alert, settings)
+        if settings.fortigate_autoblock_enabled:
+            # Fase 1: SOC-L1 ejecuta el quarantine (o lo simula si dry_run_fortigate/master).
+            fgt_outcome = await fortigate_autoblock.enforce(alert, settings)
+            fgt_decision = fgt_outcome.decision
+        else:
+            # Fase 0: solo observa qué bloquearía, sin tocar el firewall.
+            fgt_decision = fortigate_autoblock.observe(alert, settings)
     except Exception:  # noqa: BLE001
-        logger.exception("fgt-autoblock observe falló para id=%s (sigo)", alert.alert_id)
-        fgt_decision = None
+        logger.exception("fgt-autoblock falló para id=%s (sigo)", alert.alert_id)
+
+    # Fase 1 (enabled=True): SOC-L1 ya bloqueó (o simuló) en el ingest. Short-circuit
+    # con email de confirmación, igual que el script viejo: bloquea + avisa, sin pasar
+    # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
+    if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
+        if (
+            fgt_outcome.ok
+            and fgt_decision.ip
+            and not fortigate_autoblock.recently_notified(settings, fgt_decision.ip)
+        ):
+            from src import mailer
+
+            _spawn(
+                mailer.send_fgt_block_email(
+                    settings,
+                    alert_id=alert.alert_id,
+                    ip=fgt_decision.ip,
+                    rule_id=fgt_decision.rule_id,
+                    host=alert.device.hostname,
+                    ttl_hours=settings.fortigate_block_ttl_hours,
+                    expires_at=fgt_outcome.expires_at,
+                )
+            )
+            fortigate_autoblock.mark_notified(settings, fgt_decision.ip)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "blocked_fgt_autoblock",
+                "alert_id": alert.alert_id,
+                "rule_id": fgt_decision.rule_id,
+                "blocked_ip": fgt_decision.ip,
+                "executed": fgt_outcome.executed,
+                "ok": fgt_outcome.ok,
+                "reason": fgt_decision.reason,
+            },
+        )
 
     # Fase 0 (fortigate_autoblock_enabled=False): para las reglas candidatas, SOLO
     # observa y corta acá — el integration custom-email-unified de Wazuh sigue siendo
     # el que bloquea y notifica. Evita spamear aprobadores/tickets con cada alerta IPS.
-    # En Fase 1 (enabled=True) este short-circuit se quita: SOC-L1 ejecuta el quarantine
-    # en el ingest y deja correr el pipeline para enriquecer/ticket/mail.
     if (
         fgt_decision is not None
         and fgt_decision.candidate

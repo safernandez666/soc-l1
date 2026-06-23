@@ -392,3 +392,57 @@ async def test_isolate_host_executes_when_configured() -> None:
         results = await execute_plan(actions, ldap_cfg=None, settings=settings)
     mock_fn.assert_called_once()
     assert results[0]["ok"] is True
+
+
+# ===== DRY_RUN granular: familias independientes en un mismo plan =====
+
+
+@pytest.mark.asyncio
+async def test_dry_run_per_family_fortigate_live_defender_simulated() -> None:
+    """El caso del cutover: en un mismo plan, FortiGate EJECUTA y Defender SIMULA.
+
+    master off, dry_run_fortigate=false (live), dry_run_defender=true (simula).
+    """
+    from src.executor import ExecutionResult
+    settings = Settings(
+        openai_api_key="x",
+        fortigate_host="fg.test", fortigate_token="t",
+        defender_tenant_id="t", defender_client_id="ci", defender_client_secret="cs",
+        dry_run_mode=False,
+        dry_run_fortigate="false",
+        dry_run_defender="true",
+        protected_networks="", protected_hosts="",
+    )
+    actions = [
+        ProposedAction(type="block_ip", target="203.0.113.45", justification="x"),
+        ProposedAction(type="scan_host", target="desktop-1", justification="x"),
+    ]
+    with patch("src.executor._exec_block_ip", new_callable=AsyncMock) as mock_block, \
+         patch("src.executor._exec_defender_action", new_callable=AsyncMock) as mock_def:
+        mock_block.return_value = ExecutionResult(
+            action_type="block_ip", target="203.0.113.45", ok=True, message="banned",
+        )
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+
+    mock_block.assert_called_once()       # FortiGate ejecutó de verdad
+    mock_def.assert_not_called()           # Defender simuló (no llamó a MDE)
+    assert results[0]["ok"] is True and "banned" in results[0]["message"]
+    assert results[1]["ok"] is True and "DRY_RUN" in results[1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_master_kill_switch_overrides_family_live_setting() -> None:
+    """master=true fuerza simulación aunque dry_run_fortigate=false (kill-switch duro)."""
+    settings = Settings(
+        openai_api_key="x",
+        fortigate_host="fg.test", fortigate_token="t",
+        dry_run_mode=True,            # master prendido
+        dry_run_fortigate="false",    # intenta ejecutar, pero el master gana
+        protected_networks="",
+    )
+    actions = [ProposedAction(type="block_ip", target="203.0.113.45", justification="x")]
+    with patch("src.executor._exec_block_ip", new_callable=AsyncMock) as mock_block:
+        results = await execute_plan(actions, ldap_cfg=None, settings=settings)
+    mock_block.assert_not_called()
+    assert results[0]["ok"] is True
+    assert "DRY_RUN" in results[0]["message"]

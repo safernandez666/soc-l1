@@ -121,6 +121,20 @@ SECTIONS: tuple[Section, ...] = (
         CfgField("protected_hosts", "Hosts protegidos (coma)", "csv",
                  "Nunca se aíslan en Defender."),
     )),
+    # NOTA: el master DRY_RUN_MODE (kill-switch global) NO es editable desde la UI a
+    # propósito — es la red de seguridad y se toca solo por .env. Acá solo los overrides
+    # por familia, que únicamente aplican cuando el master está apagado.
+    Section("ejecucion", "Ejecución (Dry-Run por familia)", (
+        CfgField("dry_run_ad", "AD (disable/reset)", "str",
+                 "Vacío = heredar master · true = simular · false = ejecutar en vivo.",
+                 ("", "true", "false")),
+        CfgField("dry_run_fortigate", "FortiGate (block_ip)", "str",
+                 "Vacío = heredar master · true = simular · false = ejecutar en vivo.",
+                 ("", "true", "false")),
+        CfgField("dry_run_defender", "Defender (scan/isolate)", "str",
+                 "Vacío = heredar master · true = simular · false = ejecutar en vivo.",
+                 ("", "true", "false")),
+    )),
 )
 
 # field name -> CfgField (allowlist de lo editable)

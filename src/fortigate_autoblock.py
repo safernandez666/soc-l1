@@ -22,6 +22,7 @@ from pathlib import Path
 from src.config import Settings
 from src.executor import _ip_in_protected_networks
 from src.models import NormalizedAlert
+from src.tools.fortigate import FortigateClient, FortigateError
 
 logger = logging.getLogger("soc-l1")
 
@@ -116,8 +117,19 @@ def evaluate(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     return AutoBlockDecision(True, ip, rule_id, "would_block")
 
 
-def _record(alert: NormalizedAlert, decision: AutoBlockDecision, settings: Settings) -> None:
-    """Append best-effort de la decisión a un JSONL, para resumir la observación."""
+def _record(
+    alert: NormalizedAlert,
+    decision: AutoBlockDecision,
+    settings: Settings,
+    *,
+    executed: bool | None = None,
+    block_ok: bool | None = None,
+) -> None:
+    """Append best-effort de la decisión a un JSONL, para resumir la observación.
+
+    En Fase 0 (observe) executed/block_ok quedan None. En Fase 1 (enforce) registran
+    si se intentó el quarantine real y si salió ok, para auditoría del cutover.
+    """
     try:
         rec = {
             "ts": datetime.now(tz=UTC).isoformat(),
@@ -128,6 +140,8 @@ def _record(alert: NormalizedAlert, decision: AutoBlockDecision, settings: Setti
             "would_block": decision.should_block,
             "protected_match": decision.protected_match,
             "host": alert.device.hostname,
+            "executed": executed,
+            "block_ok": block_ok,
         }
         path = _observation_path(settings)
         with path.open("a", encoding="utf-8") as f:
@@ -166,6 +180,100 @@ def observe(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
             decision.reason, decision.rule_id, alert.alert_id,
         )
     return decision
+
+
+@dataclass(frozen=True)
+class EnforceOutcome:
+    """Resultado de enforce(): la decisión + qué pasó al intentar ejecutar el block."""
+
+    decision: AutoBlockDecision
+    executed: bool  # True si se intentó el quarantine real (no dry-run, FortiGate configurado)
+    ok: bool  # True si el quarantine se aplicó con éxito
+    message: str | None = None
+    expires_at: str | None = None
+
+
+async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
+    """Fase 1: evalúa y, si corresponde, EJECUTA el quarantine en FortiGate.
+
+    Respeta el toggle dry_run_for("block_ip") (kill-switch maestro / familia fortigate)
+    y el guardrail PROTECTED_NETWORKS (vía evaluate). Solo actúa sobre reglas candidatas.
+    Best-effort: nunca rompe el ingest; los errores quedan capturados en el outcome.
+    """
+    decision = evaluate(alert, settings)
+    if not decision.candidate:
+        return EnforceOutcome(decision, executed=False, ok=False)
+
+    ttl_h = settings.fortigate_block_ttl_hours
+
+    # Candidata pero no bloqueable (protegida / sin srcip / IP inválida): registra y corta.
+    if not decision.should_block or not decision.ip:
+        _record(alert, decision, settings, executed=False, block_ok=False)
+        if decision.reason == "protected":
+            logger.info(
+                "🛡️ FGT-AUTOBLOCK ENFORCE | candidata pero IP PROTEGIDA, NO bloqueo | "
+                "ip=%s matchea=%s rule=%s alert=%s",
+                alert.network.src_ip_external or alert.network.src_ip_internal,
+                decision.protected_match, decision.rule_id, alert.alert_id,
+            )
+        else:
+            logger.info(
+                "🔭 FGT-AUTOBLOCK ENFORCE | candidata sin acción (%s) | rule=%s alert=%s",
+                decision.reason, decision.rule_id, alert.alert_id,
+            )
+        return EnforceOutcome(decision, executed=False, ok=False)
+
+    ip = decision.ip
+
+    # Dry-run por familia (toggle fortigate / kill-switch maestro): simula, no ejecuta.
+    if settings.dry_run_for("block_ip"):
+        _record(alert, decision, settings, executed=False, block_ok=False)
+        logger.warning(
+            "🧪 FGT-AUTOBLOCK ENFORCE DRY-RUN | WOULD quarantine ip=%s rule=%s ttl=%sh "
+            "alert=%s (dry_run_fortigate activo)",
+            ip, decision.rule_id, ttl_h, alert.alert_id,
+        )
+        return EnforceOutcome(
+            decision, executed=False, ok=False,
+            message="DRY_RUN: quarantine simulado (FortiGate intacto)",
+        )
+
+    # FortiGate sin configurar: no rompe, pero deja registro y avisa.
+    if not settings.fortigate_host or not settings.fortigate_token:
+        _record(alert, decision, settings, executed=True, block_ok=False)
+        logger.error(
+            "FGT-AUTOBLOCK ENFORCE | FortiGate NO configurado, no bloqueé ip=%s alert=%s",
+            ip, alert.alert_id,
+        )
+        return EnforceOutcome(
+            decision, executed=True, ok=False,
+            message="FortiGate no configurado - quarantine no ejecutado",
+        )
+
+    # Ejecución real del quarantine (banned/TTL).
+    try:
+        async with FortigateClient(settings) as fg:
+            r = await fg.quarantine_ip(ip, ttl_seconds=ttl_h * 3600)
+        _record(alert, decision, settings, executed=True, block_ok=r.ok)
+        if r.ok:
+            logger.info(
+                "🚫 FGT-AUTOBLOCK ENFORCE | quarantine OK ip=%s rule=%s ttl=%sh alert=%s exp=%s",
+                ip, decision.rule_id, ttl_h, alert.alert_id, r.expires_at,
+            )
+        else:
+            logger.error(
+                "FGT-AUTOBLOCK ENFORCE | quarantine FALLÓ ip=%s rule=%s alert=%s msg=%s",
+                ip, decision.rule_id, alert.alert_id, r.message,
+            )
+        return EnforceOutcome(
+            decision, executed=True, ok=r.ok, message=r.message, expires_at=r.expires_at,
+        )
+    except FortigateError as e:
+        _record(alert, decision, settings, executed=True, block_ok=False)
+        logger.exception(
+            "FGT-AUTOBLOCK ENFORCE | error de API al bloquear ip=%s alert=%s", ip, alert.alert_id
+        )
+        return EnforceOutcome(decision, executed=True, ok=False, message=str(e))
 
 
 def summarize(path: Path) -> dict:
