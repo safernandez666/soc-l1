@@ -1,0 +1,44 @@
+{
+  "agent": { "name": "seg-vs85-prod01", "id": "000" },
+  "manager": { "name": "seg-vs85-prod01" },
+  "data": {
+    "devid": "FG100FTK21002473",
+    "msg": "SSL tunnel established",
+    "reason": "login successfully",
+    "level": "information",
+    "eventtime": "1782358699029010920",
+    "type": "event",
+    "vd": "root",
+    "logdesc": "SSL VPN tunnel up",
+    "srccountry": "Argentina",
+    "subtype": "vpn",
+    "dstuser": "mbaez",
+    "remip": "186.158.30.106",
+    "tunnelid": "940665562",
+    "action": "tunnel-up",
+    "devname": "FG-100F-VEL",
+    "logid": "0101039424",
+    "time": "00:38:19",
+    "tunneltype": "ssl-web",
+    "dst_host": "N/A",
+    "group": "VPN"
+  },
+  "rule": {
+    "firedtimes": 1,
+    "mail": false,
+    "level": 8,
+    "pci_dss": ["10.2.5"],
+    "description": "FGT VPN: Usuario monitoreado mbaez conectado fuera de horario laboral",
+    "groups": ["fortigate", "custom", "bruteforce", "fortigate_vpn_monitored_user"],
+    "mitre": {
+      "technique": ["Valid Accounts"],
+      "id": ["T1078"],
+      "tactic": ["Defense Evasion", "Persistence", "Privilege Escalation", "Initial Access"]
+    },
+    "id": "196104"
+  },
+  "location": "192.168.32.1",
+  "decoder": { "name": "fortigate-firewall-v5" },
+  "id": "1782358720.2745373",
+  "timestamp": "2026-06-25T00:38:40.445-0300"
+}

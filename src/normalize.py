@@ -159,12 +159,19 @@ def _parse_wazuh_native(
         internal_ip=data.get("srcip"),
     )
     users: list[User] = []
-    sam = data.get("srcuser") or data.get("user") or src.get("user")
+    # `dstuser` cubre los logs SSL-VPN de FortiGate, donde el usuario autenticado
+    # viene en data.dstuser (no en srcuser/user). Va al final para no pisar el
+    # actor real en alertas que sí traen srcuser/user.
+    sam = (
+        data.get("srcuser") or data.get("user") or data.get("dstuser") or src.get("user")
+    )
     if sam:
         users.append(User(sam=sam, domain=None, role="event_user"))
+    # `remip` es la IP del cliente en VPN SSL de FortiGate (no hay srcip). Es la IP
+    # externa que el ThreatIntel chequea contra AbuseIPDB.
     network = Network(
         src_ip_internal=None,
-        src_ip_external=data.get("srcip"),
+        src_ip_external=data.get("srcip") or data.get("remip"),
         dst_ip=data.get("dstip"),
     )
     threat = Threat(provider="Wazuh native")
