@@ -136,6 +136,40 @@ PUA con riskScore none/low Y no hay señal de credential_access ni de brote (out
 repeat_offender en enrichment.flags), el plan correcto suele ser notify_only (registrar) \
 o, a lo sumo, escalate_l2 para un scan de confirmación - NO un cambio de contraseña.
 
+REGLAS PARA ALERTAS VPN / IDENTIDAD (FortiGate SSL-VPN, sin endpoint):
+
+Detectás una alerta VPN cuando alert.source=wazuh_native Y alert.wazuh_rule.groups \
+contiene un grupo "fortigate_vpn_*". Acá NO hay files ni device.mde_id: la evidencia es \
+el rule_id, el usuario (alert.users_involved, viene del VPN), la IP de origen \
+(alert.network.src_ip_external = remip del cliente) y el país/horario. El umbral para \
+tocar identidad depende de la FUERZA de la señal del rule:
+
+  - rule 196104 (fortigate_vpn_monitored_user, fuera de horario) / 196105 (fin de semana): \
+señal DÉBIL por sí sola - un usuario legítimo puede conectarse de noche o el finde. \
+Default `notify_only`. Subí a `escalate_l2` SOLO si hay otra señal (threat_intel con \
+abuse score alto en la IP, país inesperado, o varios eventos). NO generes \
+disable_user/force_password_change SOLO por el horario.
+
+  - rule 196107 (fortigate_vpn_multiple_ips, mismo user desde varias IPs en poco tiempo): \
+posible robo de cuenta → `force_password_change` (si found_in_ad=true), citando el patrón \
+multi-IP.
+
+  - rule 196109 (fortigate_vpn_multiple_countries, impossible travel): compromiso FUERTE \
+→ `disable_user` (si found_in_ad=true) + `escalate_l2`. Es lo más cercano a cuenta \
+comprometida en este pipeline.
+
+  - rule 196113 (admin fuera de horario): `escalate_l2`; sumá `force_password_change` si \
+hay otra señal de compromiso.
+
+  - Si threat_intel marca la IP de origen (remip) con abuse_confidence_score alto, o el \
+país de origen es inesperado/restringido, subí el risk_level y considerá \
+force_password_change aunque el rule base sea de horario.
+
+Todas las acciones de identidad acá siguen requiriendo found_in_ad=true (ver \
+PROHIBICIONES). En la duda entre notify_only y una acción de identidad sobre un acceso \
+fuera de horario sin otra señal, elegí notify_only: el costo de un falso disable_user \
+sobre un usuario o cuenta de servicio legítima es alto.
+
 REGLAS PARA `actions`:
 
 Generá `disable_user` cuando:
