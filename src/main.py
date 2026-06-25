@@ -1187,24 +1187,65 @@ def _render_review_page(
     """Página HTML con form: 1 checkbox por acción + 2 botones (Aprobar selección, Rechazar todo)."""
     import html as _h
 
+    _action_color = {
+        "disable_user": "#dc2626",
+        "force_password_change": "#ea580c",
+        "block_ip": "#7f1d1d",
+        "scan_host": "#0891b2",
+        "isolate_host": "#9333ea",
+        "notify_only": "#38bdf8",
+        "escalate_l2": "#a16207",
+    }
+
+    # Plan solo-informativo: todas las acciones son notify_only → no hay nada que
+    # ejecutar, así que ofrecemos un botón único "Acuso recibo" en vez de aprobar/
+    # rechazar. Internamente se procesa como approve (el executor registra "noted").
+    ack_only = bool(plan.actions) and all(a.type == "notify_only" for a in plan.actions)
+
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         actions_html = (
             "<p style='color:#6b7280;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
+        help_text = ""
+        buttons_html = (
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Cerrar (rechazar)</button>"
+        )
+    elif ack_only:
+        # Solo notify_only: tarjetas read-only + hidden inputs para mandar los índices.
+        section_title = "Notificación (solo registro)"
+        cards, hidden = [], []
+        for i, a in enumerate(plan.actions):
+            color = _action_color.get(a.type, "#475569")
+            hidden.append(f'<input type="hidden" name="action_idx" value="{i}">')
+            cards.append(
+                f"""<div style="padding:14px 16px;margin-bottom:8px;background-color:#f6f8fa;
+                              border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {color};">
+                  <strong style="font-family:monospace;color:{color};">{_h.escape(a.type)}</strong>
+                  → <code style="background-color:#ddf4ff;color:#0969da;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 0;font-size:12px;color:#6b7280;line-height:1.5;">
+                    {_h.escape(a.justification)}
+                  </div>
+                </div>"""
+            )
+        actions_html = "\n".join(hidden) + "\n" + "\n".join(cards)
+        help_text = (
+            "<p style='font-size:13px;color:#6b7280;margin:0 0 12px;'>Este caso es "
+            "<strong>solo informativo</strong> (notify_only): no hay ninguna acción que "
+            "ejecutar. Acusá recibo para dejarlo registrado y cerrarlo.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Acuso recibo y cerrar</button>"
+        )
     else:
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         rows_html = []
         for i, a in enumerate(plan.actions):
-            action_color = {
-                "disable_user": "#dc2626",
-                "force_password_change": "#ea580c",
-                "block_ip": "#7f1d1d",
-                "scan_host": "#0891b2",
-                "isolate_host": "#9333ea",
-                "notify_only": "#38bdf8",
-                "escalate_l2": "#a16207",
-            }.get(a.type, "#475569")
+            action_color = _action_color.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
                                   background-color:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {action_color};
@@ -1219,6 +1260,17 @@ def _render_review_page(
                 </label>"""
             )
         actions_html = "\n".join(rows_html)
+        help_text = (
+            "<p style='font-size:12px;color:#6b7280;margin:0 0 12px;'>Desmarcá las que NO "
+            "querés ejecutar y clickeá <strong>Aprobar selección</strong>. O clickeá "
+            "<strong>Rechazar todo</strong> si ninguna debe correr.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Aprobar selección</button>\n"
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Rechazar todo</button>"
+        )
 
     page = f"""<!DOCTYPE html>
 <html>
@@ -1268,21 +1320,13 @@ def _render_review_page(
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
-        <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">
-          Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
-          O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
-        </p>
+        <h2>{section_title}</h2>
+        {help_text}
         {actions_html}
       </div>
 
       <div class="buttons">
-        <button type="submit" name="decision" value="approve" class="btn btn-approve">
-          ✅ Aprobar selección
-        </button>
-        <button type="submit" name="decision" value="reject" class="btn btn-reject">
-          ❌ Rechazar todo
-        </button>
+        {buttons_html}
       </div>
     </form>
 
