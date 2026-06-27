@@ -174,6 +174,9 @@ async def api_fgt_observations(request: Request, settings: SettingsDep) -> Respo
     path = fortigate_autoblock._observation_path(settings)
     return JSONResponse({
         "summary": fortigate_autoblock.summarize(path),
+        "tickets": fortigate_autoblock.summarize_tickets(
+            fortigate_autoblock._ticket_path(settings)
+        ),
         "recent": fortigate_autoblock.load_recent(path, limit=50),
         "enabled": settings.fortigate_autoblock_enabled,
         "rules_count": len(settings.fortigate_auto_block_rules_set()),

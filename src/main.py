@@ -892,6 +892,20 @@ async def _fgt_block_ticket_and_notify(
             decision.ip, alert.alert_id,
         )
 
+    # Registro para la vista FortiGate (creados / cerrados / abiertos esperando cierre).
+    if request_id is not None:
+        from src import fortigate_autoblock
+
+        fortigate_autoblock.record_ticket(
+            settings,
+            alert_id=alert.alert_id,
+            ip=decision.ip,
+            rule_id=decision.rule_id,
+            request_id=request_id,
+            created=True,
+            closed=closed,
+        )
+
     from src import mailer
 
     await mailer.send_fgt_block_email(

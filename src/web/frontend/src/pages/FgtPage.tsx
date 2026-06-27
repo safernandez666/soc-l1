@@ -57,6 +57,11 @@ function fmtTs(ts: string | null): string {
 
 function Body({ d }: { d: FgtObservations }) {
   const s = d.summary
+  // Defensivo: si el backend todavía no expone tickets (ventana de deploy), no rompe.
+  const tickets = d.tickets ?? { creados: 0, cerrados: 0, abiertos: 0, ultimo_ts: null }
+  const ejecutados = s.ejecutados ?? 0
+  const ejecutadosFallidos = s.ejecutados_fallidos ?? 0
+  const ipsBloqueadas = s.ips_distintas_bloqueadas ?? 0
   const window =
     s.ventana.desde && s.ventana.hasta
       ? `${fmtTs(s.ventana.desde)} → ${fmtTs(s.ventana.hasta)}`
@@ -88,18 +93,61 @@ function Body({ d }: { d: FgtObservations }) {
       {/* Stats */}
       <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Observaciones" value={s.total_observaciones} />
+        {d.enabled ? (
+          <Stat
+            label="Bloqueos ejecutados"
+            value={ejecutados}
+            hint={
+              ejecutadosFallidos > 0
+                ? `${ejecutadosFallidos} fallidos`
+                : "aplicados en FortiGate"
+            }
+            accent={ejecutados > 0}
+          />
+        ) : (
+          <Stat label="Bloquearía" value={s.would_block} accent={s.would_block > 0} />
+        )}
         <Stat
-          label={d.enabled ? "Bloqueos" : "Bloquearía"}
-          value={s.would_block}
-          accent={s.would_block > 0}
+          label={d.enabled ? "IPs bloqueadas" : "IPs distintas"}
+          value={d.enabled ? ipsBloqueadas : s.ips_distintas_que_bloquearia}
         />
-        <Stat label="IPs distintas" value={s.ips_distintas_que_bloquearia} />
         <Stat
           label="IPs protegidas evitadas"
           value={s.ips_protegidas_evitadas.length}
-          hint={s.ips_protegidas_evitadas.length ? "el script viejo las bloquearía" : undefined}
+          hint={s.ips_protegidas_evitadas.length ? "no se bloquearon (guardrail)" : undefined}
           accent={s.ips_protegidas_evitadas.length > 0}
         />
+      </section>
+
+      {/* Tickets InvGate (closed-loop con auditoría) */}
+      <section className="space-y-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+            Tickets InvGate
+          </h2>
+          {tickets.abiertos > 0 && (
+            <Badge
+              variant="outline"
+              style={{ borderColor: "var(--zs-warn)", color: "var(--zs-warn)" }}
+            >
+              {tickets.abiertos} esperan cierre
+            </Badge>
+          )}
+        </div>
+        <div className="grid grid-cols-3 gap-4">
+          <Stat label="Creados" value={tickets.creados} />
+          <Stat
+            label="Cerrados"
+            value={tickets.cerrados}
+            accent={tickets.cerrados > 0}
+          />
+          <Stat
+            label="Abiertos"
+            value={tickets.abiertos}
+            hint={tickets.abiertos > 0 ? "cierre pend. (permiso API / 403)" : undefined}
+            accent={tickets.abiertos > 0}
+          />
+        </div>
       </section>
 
       {s.total_observaciones === 0 && (
