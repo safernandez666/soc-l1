@@ -228,17 +228,12 @@ async def wazuh_webhook(
     # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
     if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
         if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
-            from src import mailer
-
+            # Closed-loop con auditoría: crea+cierra ticket InvGate del bloqueo y manda
+            # el email de confirmación con el número de ticket + lo que quedó registrado.
+            # El dedup por IP (mark_notified en enforce) garantiza 1 ticket por IP/ventana.
             _spawn(
-                mailer.send_fgt_block_email(
-                    settings,
-                    alert_id=alert.alert_id,
-                    ip=fgt_decision.ip,
-                    rule_id=fgt_decision.rule_id,
-                    host=alert.device.hostname,
-                    ttl_hours=settings.fortigate_block_ttl_hours,
-                    expires_at=fgt_outcome.expires_at,
+                _fgt_block_ticket_and_notify(
+                    settings, alert, fgt_decision, fgt_outcome
                 )
             )
         return JSONResponse(
@@ -805,6 +800,112 @@ async def _update_invgate_post_execution(
             "invgate: post_execution comment failed | ticket=%s alert=%s",
             request_id, alert_id,
         )
+
+
+def _build_fgt_block_ticket(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> tuple[str, str]:
+    """Arma (title, description) del ticket InvGate para un auto-block FortiGate.
+
+    El MISMO texto se inyecta en el ticket y se muestra en el email de bloqueo,
+    para que el analista vea exactamente qué quedó registrado en InvGate.
+    """
+    ttl_h = settings.fortigate_block_ttl_hours
+    title = (
+        f"[SOC-L1][FortiGate] IP bloqueada {decision.ip} — "
+        f"regla IPS {decision.rule_id or '—'}"
+    )
+    description = (
+        "SOC-L1 detectó una alerta IPS de alta confianza y bloqueó automáticamente "
+        "la IP origen en FortiGate (quarantine con TTL). El ataque ya está contenido "
+        "— no requiere acción humana.\n\n"
+        f"IP bloqueada:   {decision.ip}\n"
+        f"Regla IPS:      {decision.rule_id or '—'}\n"
+        f"Host / origen:  {alert.device.hostname or '—'}\n"
+        f"Alerta:         {alert.alert_id}\n"
+        f"TTL del ban:    {ttl_h}h\n"
+        f"Expira:         {outcome.expires_at or '—'}\n\n"
+        "Acción ejecutada: quarantine_ip (banned users con TTL) en FortiGate.\n"
+        "El ban se libera solo al vencer el TTL.\n\n"
+        "Ticket creado y cerrado automáticamente por SOC-L1: la amenaza ya fue "
+        "contenida. Queda como registro de auditoría del bloqueo."
+    )
+    return title, description
+
+
+async def _fgt_block_ticket_and_notify(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> None:
+    """Crea+cierra ticket InvGate del auto-block y manda el email de bloqueo con el ticket.
+
+    Closed-loop con auditoría: el bloqueo en FortiGate ya pasó (best-effort, nunca rompe
+    el ingest). El cierre (PUT /incident.solution.accept) puede dar HTTP 403 si la cuenta
+    de API no tiene permiso de cierre; en ese caso el ticket queda ABIERTO y el email lo
+    refleja. Si InvGate no está configurado, manda el email igual sin número de ticket.
+    """
+    title, description = _build_fgt_block_ticket(settings, alert, decision, outcome)
+
+    request_id: int | None = None
+    closed = False
+    try:
+        from src.tools.invgate import InvgateClient, is_configured, priority_id_from_risk
+
+        if is_configured(settings):
+            async with InvgateClient(settings) as client:
+                created = await client.create_incident(
+                    title=title,
+                    description=description,
+                    priority_id=priority_id_from_risk("high"),
+                )
+                if created.ok and created.request_id is not None:
+                    request_id = created.request_id
+                    # Comentario de cierre: deja claro que el caso ya está contenido,
+                    # aunque el close (accept solution) falle por permisos (403).
+                    await client.add_comment(
+                        request_id,
+                        f"Caso contenido automáticamente por SOC-L1 auto-block. "
+                        f"IP {decision.ip} en quarantine en FortiGate hasta "
+                        f"{outcome.expires_at or 'vencimiento del TTL'}. "
+                        f"Se cierra el ticket: no requiere acción humana.",
+                    )
+                    close_res = await client.close_incident(request_id)
+                    closed = close_res.ok
+                    if not closed:
+                        logger.warning(
+                            "🎫 INVGATE close FGT-block FAILED | ticket=%s ip=%s "
+                            "error=%s (queda abierto)",
+                            request_id, decision.ip, close_res.error,
+                        )
+        else:
+            logger.info(
+                "🎫 INVGATE no configurado - skip ticket auto-block ip=%s", decision.ip
+            )
+    except Exception:  # noqa: BLE001 - ticket es best-effort, nunca rompe el flujo
+        logger.exception(
+            "invgate: ticket auto-block falló | ip=%s alert=%s",
+            decision.ip, alert.alert_id,
+        )
+
+    from src import mailer
+
+    await mailer.send_fgt_block_email(
+        settings,
+        alert_id=alert.alert_id,
+        ip=decision.ip,
+        rule_id=decision.rule_id,
+        host=alert.device.hostname,
+        ttl_hours=settings.fortigate_block_ttl_hours,
+        expires_at=outcome.expires_at,
+        invgate_request_id=request_id,
+        invgate_closed=closed,
+        invgate_description=description,
+    )
 
 
 # ===== Approval endpoints =====
