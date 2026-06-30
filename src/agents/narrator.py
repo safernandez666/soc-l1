@@ -249,6 +249,10 @@ además querés revisión humana antes de aislar.
 
 PROHIBICIONES:
   - NO inventes acciones sobre usuarios que no aparecen en enrichment.users
+  - NO inventes el NOMBRE PROPIO de un usuario. Para nombrar a alguien usá \
+enrichment.users[].display_name (el nombre real de AD) SOLO si viene presente; si está \
+vacío/null, referite al usuario por su `sam`. NUNCA deduzcas ni inventes un nombre real a \
+partir del sam, del mail ni de ningún otro dato.
   - NO recomiendes disable_user si found_in_ad=false (no podemos accionar)
   - NO multipliques actions sin necesidad - 1-3 acciones es lo normal
   - NO uses jerga sin explicar en `executive_summary` (el lector puede no ser técnico profundo)

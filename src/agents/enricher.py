@@ -109,6 +109,7 @@ class EnrichedUser(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sam: str
     found_in_ad: bool
+    display_name: str | None = None  # nombre real de AD (displayName); backfilled, no LLM
     enabled: bool | None = None
     locked_out: bool | None = None
     department: str | None = None
@@ -508,4 +509,23 @@ async def enrich_alert(
         agent, input=user_input, context=ctx, max_turns=max_turns,
         timeout=120.0, label="enricher",
     )
-    return result.final_output_as(EnrichmentResult)
+    enrichment = result.final_output_as(EnrichmentResult)
+    _backfill_display_names(enrichment, ctx)
+    return enrichment
+
+
+def _backfill_display_names(enrichment: EnrichmentResult, ctx: EnricherContext) -> None:
+    """Sobreescribe display_name de cada user con el valor REAL de AD (no el del LLM).
+
+    El LLM tiende a alucinar nombres propios a partir del sam. La verdad está en el
+    cache de la tool ldap_search_user (clave `ldap:<sam>`), que guardó el `displayName`
+    crudo de AD. Reconciliamos contra ese cache para que el email/narrator usen el
+    nombre real (o None si AD no lo trae), nunca uno inventado.
+    """
+    for user in enrichment.users:
+        cached = ctx._call_cache.get(f"ldap:{user.sam}")
+        # Solo confiamos en el cache si hubo un hit real (found=true). Si no, sin nombre.
+        if cached and cached.get("found"):
+            user.display_name = cached.get("display_name")
+        else:
+            user.display_name = None

@@ -206,7 +206,9 @@ def _build_text_body(
                 if getattr(u, "found_in_ad", False):
                     st = "enabled" if getattr(u, "enabled", None) else "DISABLED"
                     lk = " locked" if getattr(u, "locked_out", None) else ""
-                    lines.append(f"  AD {getattr(u, 'sam', '?')}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
+                    ad_name = getattr(u, "display_name", None)
+                    name_part = f" ({ad_name})" if ad_name else ""
+                    lines.append(f"  AD {getattr(u, 'sam', '?')}{name_part}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
                 else:
                     lines.append(f"  AD {getattr(u, 'sam', '?')}: no en AD")
             if flags:
@@ -431,6 +433,10 @@ def _enrichment_section(enrichment: "EnrichmentResult | None") -> str:
             )
             continue
         bits = [f"<code>{_esc(getattr(u, 'sam', '?'))}</code>"]
+        # Nombre real de AD (displayName). Es deterministico (backfilled), no inventado.
+        ad_name = getattr(u, "display_name", None)
+        if ad_name:
+            bits.append(f"<strong>{_esc(ad_name)}</strong>")
         enabled = getattr(u, "enabled", None)
         if enabled is True:
             bits.append(_badge("habilitada", "success"))
@@ -1016,17 +1022,8 @@ async def send_fgt_block_email(
         )
     )
 
-    # Badge de ticket en el header (verde si se cerró, ámbar si quedó abierto por 403).
-    if invgate_request_id:
-        badge_style = "success" if invgate_closed else "warning"
-        badge_label = (
-            f"TICKET #{invgate_request_id} CERRADO"
-            if invgate_closed
-            else f"TICKET #{invgate_request_id} ABIERTO"
-        )
-        ticket_badge_html = f'<div style="padding:0 24px 4px;">{_badge(badge_label, badge_style)}</div>'
-    else:
-        ticket_badge_html = ""
+    # El número y estado del ticket InvGate ya viajan en la fila "Ticket InvGate" de la
+    # tabla y en el bloque de contenido; no repetimos un badge amarillo en el header.
 
     # Bloque con el texto exacto que se inyectó en el ticket InvGate.
     if invgate_request_id and invgate_description:
@@ -1049,7 +1046,6 @@ async def send_fgt_block_email(
       SOC-L1 detectó una alerta IPS de alta confianza y <strong>bloqueó la IP origen</strong>
       en FortiGate (quarantine con TTL). El ban se libera solo al vencer el TTL.
     </td></tr>
-    {ticket_badge_html}
     <tr><td style="padding:4px 12px 12px;">
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
     </td></tr>{ticket_body_html}
