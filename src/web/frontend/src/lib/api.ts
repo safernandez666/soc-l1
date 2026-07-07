@@ -275,11 +275,20 @@ export interface FgtObservations {
   summary: {
     total_observaciones: number
     would_block: number
+    ejecutados: number
+    ejecutados_fallidos: number
     ips_distintas_que_bloquearia: number
+    ips_distintas_bloqueadas: number
     ips_protegidas_evitadas: string[]
     por_reason: Record<string, number>
     por_regla: Record<string, number>
     ventana: { desde: string | null; hasta: string | null }
+  }
+  tickets: {
+    creados: number
+    cerrados: number
+    abiertos: number
+    ultimo_ts: string | null
   }
   recent: FgtObservationRecord[]
   enabled: boolean

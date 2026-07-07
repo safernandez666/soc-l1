@@ -65,5 +65,12 @@ def test_system_prompt_mentions_conservative_default() -> None:
     assert "lateral_movement" in SYSTEM_PROMPT.lower()
 
 
+def test_system_prompt_no_cierra_alertas_vpn() -> None:
+    """Guard: las alertas VPN/identidad (fortigate_vpn_*, T1078) van a analyze,
+    no auto_close_benign, aunque no tengan file evidence ni categoría crítica."""
+    assert "fortigate_vpn_" in SYSTEM_PROMPT
+    assert "T1078" in SYSTEM_PROMPT
+
+
 # Nota: tests de integración real (que llaman al LLM) van en tests/integration/
 # Se corren con OPENAI_API_KEY seteada. Por ahora ese path queda manual.

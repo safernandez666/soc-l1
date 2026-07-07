@@ -228,17 +228,12 @@ async def wazuh_webhook(
     # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
     if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
         if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
-            from src import mailer
-
+            # Closed-loop con auditoría: crea+cierra ticket InvGate del bloqueo y manda
+            # el email de confirmación con el número de ticket + lo que quedó registrado.
+            # El dedup por IP (mark_notified en enforce) garantiza 1 ticket por IP/ventana.
             _spawn(
-                mailer.send_fgt_block_email(
-                    settings,
-                    alert_id=alert.alert_id,
-                    ip=fgt_decision.ip,
-                    rule_id=fgt_decision.rule_id,
-                    host=alert.device.hostname,
-                    ttl_hours=settings.fortigate_block_ttl_hours,
-                    expires_at=fgt_outcome.expires_at,
+                _fgt_block_ticket_and_notify(
+                    settings, alert, fgt_decision, fgt_outcome
                 )
             )
         return JSONResponse(
@@ -807,6 +802,126 @@ async def _update_invgate_post_execution(
         )
 
 
+def _build_fgt_block_ticket(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> tuple[str, str]:
+    """Arma (title, description) del ticket InvGate para un auto-block FortiGate.
+
+    El MISMO texto se inyecta en el ticket y se muestra en el email de bloqueo,
+    para que el analista vea exactamente qué quedó registrado en InvGate.
+    """
+    ttl_h = settings.fortigate_block_ttl_hours
+    title = (
+        f"[SOC-L1][FortiGate] IP bloqueada {decision.ip} — "
+        f"regla IPS {decision.rule_id or '—'}"
+    )
+    description = (
+        "SOC-L1 detectó una alerta IPS de alta confianza y bloqueó automáticamente "
+        "la IP origen en FortiGate (quarantine con TTL). El ataque ya está contenido "
+        "— no requiere acción humana.\n\n"
+        f"IP bloqueada:   {decision.ip}\n"
+        f"Regla IPS:      {decision.rule_id or '—'}\n"
+        f"Host / origen:  {alert.device.hostname or '—'}\n"
+        f"Alerta:         {alert.alert_id}\n"
+        f"TTL del ban:    {ttl_h}h\n"
+        f"Expira:         {outcome.expires_at or '—'}\n\n"
+        "Acción ejecutada: quarantine_ip (banned users con TTL) en FortiGate.\n"
+        "El ban se libera solo al vencer el TTL.\n\n"
+        "Ticket creado y cerrado automáticamente por SOC-L1: la amenaza ya fue "
+        "contenida. Queda como registro de auditoría del bloqueo."
+    )
+    return title, description
+
+
+async def _fgt_block_ticket_and_notify(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> None:
+    """Crea+cierra ticket InvGate del auto-block y manda el email de bloqueo con el ticket.
+
+    Closed-loop con auditoría: el bloqueo en FortiGate ya pasó (best-effort, nunca rompe
+    el ingest). El cierre (PUT /incident.solution.accept) puede dar HTTP 403 si la cuenta
+    de API no tiene permiso de cierre; en ese caso el ticket queda ABIERTO y el email lo
+    refleja. Si InvGate no está configurado, manda el email igual sin número de ticket.
+    """
+    title, description = _build_fgt_block_ticket(settings, alert, decision, outcome)
+
+    request_id: int | None = None
+    closed = False
+    try:
+        from src.tools.invgate import InvgateClient, is_configured, priority_id_from_risk
+
+        if is_configured(settings):
+            async with InvgateClient(settings) as client:
+                created = await client.create_incident(
+                    title=title,
+                    description=description,
+                    priority_id=priority_id_from_risk("high"),
+                )
+                if created.ok and created.request_id is not None:
+                    request_id = created.request_id
+                    # Comentario de cierre: deja claro que el caso ya está contenido,
+                    # aunque el close (accept solution) falle por permisos (403).
+                    await client.add_comment(
+                        request_id,
+                        f"Caso contenido automáticamente por SOC-L1 auto-block. "
+                        f"IP {decision.ip} en quarantine en FortiGate hasta "
+                        f"{outcome.expires_at or 'vencimiento del TTL'}. "
+                        f"Se cierra el ticket: no requiere acción humana.",
+                    )
+                    close_res = await client.close_incident(request_id)
+                    closed = close_res.ok
+                    if not closed:
+                        logger.warning(
+                            "🎫 INVGATE close FGT-block FAILED | ticket=%s ip=%s "
+                            "error=%s (queda abierto)",
+                            request_id, decision.ip, close_res.error,
+                        )
+        else:
+            logger.info(
+                "🎫 INVGATE no configurado - skip ticket auto-block ip=%s", decision.ip
+            )
+    except Exception:  # noqa: BLE001 - ticket es best-effort, nunca rompe el flujo
+        logger.exception(
+            "invgate: ticket auto-block falló | ip=%s alert=%s",
+            decision.ip, alert.alert_id,
+        )
+
+    # Registro para la vista FortiGate (creados / cerrados / abiertos esperando cierre).
+    if request_id is not None:
+        from src import fortigate_autoblock
+
+        fortigate_autoblock.record_ticket(
+            settings,
+            alert_id=alert.alert_id,
+            ip=decision.ip,
+            rule_id=decision.rule_id,
+            request_id=request_id,
+            created=True,
+            closed=closed,
+        )
+
+    from src import mailer
+
+    await mailer.send_fgt_block_email(
+        settings,
+        alert_id=alert.alert_id,
+        ip=decision.ip,
+        rule_id=decision.rule_id,
+        host=alert.device.hostname,
+        ttl_hours=settings.fortigate_block_ttl_hours,
+        expires_at=outcome.expires_at,
+        invgate_request_id=request_id,
+        invgate_closed=closed,
+        invgate_description=description,
+    )
+
+
 # ===== Approval endpoints =====
 
 
@@ -1187,24 +1302,65 @@ def _render_review_page(
     """Página HTML con form: 1 checkbox por acción + 2 botones (Aprobar selección, Rechazar todo)."""
     import html as _h
 
+    _action_color = {
+        "disable_user": "#dc2626",
+        "force_password_change": "#ea580c",
+        "block_ip": "#7f1d1d",
+        "scan_host": "#0891b2",
+        "isolate_host": "#9333ea",
+        "notify_only": "#38bdf8",
+        "escalate_l2": "#a16207",
+    }
+
+    # Plan solo-informativo: todas las acciones son notify_only → no hay nada que
+    # ejecutar, así que ofrecemos un botón único "Acuso recibo" en vez de aprobar/
+    # rechazar. Internamente se procesa como approve (el executor registra "noted").
+    ack_only = bool(plan.actions) and all(a.type == "notify_only" for a in plan.actions)
+
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         actions_html = (
             "<p style='color:#6b7280;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
+        help_text = ""
+        buttons_html = (
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Cerrar (rechazar)</button>"
+        )
+    elif ack_only:
+        # Solo notify_only: tarjetas read-only + hidden inputs para mandar los índices.
+        section_title = "Notificación (solo registro)"
+        cards, hidden = [], []
+        for i, a in enumerate(plan.actions):
+            color = _action_color.get(a.type, "#475569")
+            hidden.append(f'<input type="hidden" name="action_idx" value="{i}">')
+            cards.append(
+                f"""<div style="padding:14px 16px;margin-bottom:8px;background-color:#f6f8fa;
+                              border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {color};">
+                  <strong style="font-family:monospace;color:{color};">{_h.escape(a.type)}</strong>
+                  → <code style="background-color:#ddf4ff;color:#0969da;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 0;font-size:12px;color:#6b7280;line-height:1.5;">
+                    {_h.escape(a.justification)}
+                  </div>
+                </div>"""
+            )
+        actions_html = "\n".join(hidden) + "\n" + "\n".join(cards)
+        help_text = (
+            "<p style='font-size:13px;color:#6b7280;margin:0 0 12px;'>Este caso es "
+            "<strong>solo informativo</strong> (notify_only): no hay ninguna acción que "
+            "ejecutar. Acusá recibo para dejarlo registrado y cerrarlo.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Acuso recibo y cerrar</button>"
+        )
     else:
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         rows_html = []
         for i, a in enumerate(plan.actions):
-            action_color = {
-                "disable_user": "#dc2626",
-                "force_password_change": "#ea580c",
-                "block_ip": "#7f1d1d",
-                "scan_host": "#0891b2",
-                "isolate_host": "#9333ea",
-                "notify_only": "#38bdf8",
-                "escalate_l2": "#a16207",
-            }.get(a.type, "#475569")
+            action_color = _action_color.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
                                   background-color:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {action_color};
@@ -1219,6 +1375,17 @@ def _render_review_page(
                 </label>"""
             )
         actions_html = "\n".join(rows_html)
+        help_text = (
+            "<p style='font-size:12px;color:#6b7280;margin:0 0 12px;'>Desmarcá las que NO "
+            "querés ejecutar y clickeá <strong>Aprobar selección</strong>. O clickeá "
+            "<strong>Rechazar todo</strong> si ninguna debe correr.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Aprobar selección</button>\n"
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Rechazar todo</button>"
+        )
 
     page = f"""<!DOCTYPE html>
 <html>
@@ -1268,21 +1435,13 @@ def _render_review_page(
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
-        <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">
-          Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
-          O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
-        </p>
+        <h2>{section_title}</h2>
+        {help_text}
         {actions_html}
       </div>
 
       <div class="buttons">
-        <button type="submit" name="decision" value="approve" class="btn btn-approve">
-          ✅ Aprobar selección
-        </button>
-        <button type="submit" name="decision" value="reject" class="btn btn-reject">
-          ❌ Rechazar todo
-        </button>
+        {buttons_html}
       </div>
     </form>
 

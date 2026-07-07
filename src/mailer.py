@@ -206,7 +206,9 @@ def _build_text_body(
                 if getattr(u, "found_in_ad", False):
                     st = "enabled" if getattr(u, "enabled", None) else "DISABLED"
                     lk = " locked" if getattr(u, "locked_out", None) else ""
-                    lines.append(f"  AD {getattr(u, 'sam', '?')}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
+                    ad_name = getattr(u, "display_name", None)
+                    name_part = f" ({ad_name})" if ad_name else ""
+                    lines.append(f"  AD {getattr(u, 'sam', '?')}{name_part}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
                 else:
                     lines.append(f"  AD {getattr(u, 'sam', '?')}: no en AD")
             if flags:
@@ -431,6 +433,10 @@ def _enrichment_section(enrichment: "EnrichmentResult | None") -> str:
             )
             continue
         bits = [f"<code>{_esc(getattr(u, 'sam', '?'))}</code>"]
+        # Nombre real de AD (displayName). Es deterministico (backfilled), no inventado.
+        ad_name = getattr(u, "display_name", None)
+        if ad_name:
+            bits.append(f"<strong>{_esc(ad_name)}</strong>")
         enabled = getattr(u, "enabled", None)
         if enabled is True:
             bits.append(_badge("habilitada", "success"))
@@ -947,10 +953,15 @@ async def send_fgt_block_email(
     host: str | None,
     ttl_hours: int,
     expires_at: str | None = None,
+    invgate_request_id: int | None = None,
+    invgate_closed: bool = False,
+    invgate_description: str | None = None,
 ) -> None:
     """Fase 1: confirma que SOC-L1 BLOQUEÓ la IP en FortiGate (quarantine con TTL).
 
     Reemplaza al aviso de Fase 0. El caller ya hizo el dedup por IP; esto solo arma y manda.
+    Si se creó un ticket InvGate, incluye el número, su estado (cerrado/abierto) y el texto
+    exacto que quedó registrado en el ticket (`invgate_description`).
     """
     if not settings.smtp_host or not settings.smtp_to_approvers:
         logger.warning(
@@ -959,12 +970,29 @@ async def send_fgt_block_email(
         return
 
     h = html.escape
-    subject = f"[SOC L1][FortiGate · BLOQUEADO] {ip}"
+    # Estado del ticket para subject/cuerpo: cerrado vs abierto (close pudo dar 403).
+    if invgate_request_id:
+        ticket_state = "cerrado" if invgate_closed else "abierto"
+        ticket_value = f"#{invgate_request_id} ({ticket_state})"
+    else:
+        ticket_value = "—"
+    ticket_tag = f" · ticket #{invgate_request_id}" if invgate_request_id else ""
+
+    subject = f"[SOC L1][FortiGate · BLOQUEADO] {ip}{ticket_tag}"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
 
+    ticket_text = (
+        f"Ticket InvGate:   {ticket_value}\n" if invgate_request_id else ""
+    )
+    ticket_block_text = (
+        f"\n--- Contenido del ticket InvGate #{invgate_request_id} ---\n"
+        f"{invgate_description}\n"
+        if invgate_request_id and invgate_description
+        else ""
+    )
     text = (
         f"SOC-L1 · FortiGate auto-block (Fase 1 — EJECUTADO)\n\n"
         f"IP bloqueada:     {ip}\n"
@@ -972,9 +1000,11 @@ async def send_fgt_block_email(
         f"Host/origen:      {host or '—'}\n"
         f"Alerta:           {alert_id}\n"
         f"TTL del ban:      {ttl_hours}h (quarantine con TTL)\n"
-        f"Expira:           {expires_at or '—'}\n\n"
+        f"Expira:           {expires_at or '—'}\n"
+        f"{ticket_text}\n"
         f"SOC-L1 aplicó un quarantine (banned users con TTL) sobre la IP origen en "
         f"FortiGate. El ban se libera solo al vencer el TTL.\n"
+        f"{ticket_block_text}"
     )
     msg.set_content(text)
 
@@ -988,8 +1018,25 @@ async def send_fgt_block_email(
             ("Alerta", alert_id),
             ("TTL del ban", f"{ttl_hours}h"),
             ("Expira", expires_at or "—"),
+            ("Ticket InvGate", ticket_value),
         )
     )
+
+    # El número y estado del ticket InvGate ya viajan en la fila "Ticket InvGate" de la
+    # tabla y en el bloque de contenido; no repetimos un badge amarillo en el header.
+
+    # Bloque con el texto exacto que se inyectó en el ticket InvGate.
+    if invgate_request_id and invgate_description:
+        ticket_body_html = f"""
+    <tr><td style="padding:8px 24px 4px;color:#57606a;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;">
+      Contenido registrado en el ticket InvGate #{h(str(invgate_request_id))}
+    </td></tr>
+    <tr><td style="padding:0 24px 16px;">
+      <pre style="margin:0;padding:14px 16px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;color:#1f2328;font-size:12px;line-height:1.5;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{h(invgate_description)}</pre>
+    </td></tr>"""
+    else:
+        ticket_body_html = ""
+
     body_html = f"""<!doctype html><html><body style="margin:0;background:#f6f8fa;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden;">
     <tr><td style="background:#b42318;color:#ffffff;padding:18px 24px;font-weight:bold;font-size:15px;">
@@ -1001,7 +1048,7 @@ async def send_fgt_block_email(
     </td></tr>
     <tr><td style="padding:4px 12px 12px;">
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
-    </td></tr>
+    </td></tr>{ticket_body_html}
     <tr><td style="background:#f6f8fa;padding:14px 24px;text-align:center;color:#6b7280;font-size:12px;">
       SOC L1 · ZebraSecurity — FortiGate Auto-Block
     </td></tr>
@@ -1012,8 +1059,8 @@ async def send_fgt_block_email(
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
         logger.info(
-            "mailer: email FGT-BLOCK enviado | ip=%s rule=%s alert=%s to=%s",
-            ip, rule_id, alert_id, settings.smtp_to_approvers,
+            "mailer: email FGT-BLOCK enviado | ip=%s rule=%s alert=%s ticket=%s to=%s",
+            ip, rule_id, alert_id, invgate_request_id or "n/a", settings.smtp_to_approvers,
         )
     except Exception:
         logger.exception("mailer: send FGT-BLOCK failed | ip=%s alert=%s", ip, alert_id)

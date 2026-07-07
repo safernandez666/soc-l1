@@ -135,6 +135,30 @@ def test_wazuh_native_ssh_brute_force_minimal() -> None:
     assert a.threat.provider == "Wazuh native"
 
 
+@pytest.fixture
+def fgt_vpn_offhours() -> dict:
+    return json.loads((FIXTURES / "fortigate_vpn_offhours.json").read_text())
+
+
+def test_fortigate_vpn_offhours_user_from_dstuser(fgt_vpn_offhours: dict) -> None:
+    """VPN SSL de FortiGate (rule 196104): el usuario autenticado viene en
+    data.dstuser (no srcuser/user) y la IP del cliente en data.remip (no srcip).
+    Sin esto el Enricher no resuelve el user en AD y el Narrator no puede proponer
+    acción de identidad."""
+    a = normalize(fgt_vpn_offhours)
+    assert a.source == "wazuh_native"
+    assert a.wazuh_rule.id == "196104"
+    assert a.wazuh_rule.level == 8
+    assert a.severity_source == "medium"  # level 8 → medium
+    # usuario monitoreado resuelto desde dstuser
+    assert len(a.users_involved) == 1
+    assert a.users_involved[0].sam == "mbaez"
+    assert a.users_involved[0].role == "event_user"
+    # IP del cliente VPN desde remip
+    assert a.network.src_ip_external == "186.158.30.106"
+    assert "fortigate_vpn_monitored_user" in a.wazuh_rule.groups
+
+
 def test_unwrap_raw_without_source_envelope() -> None:
     """Si el integrator manda sin _source envelope, también funciona."""
     raw = {

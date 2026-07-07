@@ -32,6 +32,11 @@ def _observation_path(settings: Settings) -> Path:
     return Path(settings.state_db_path).with_name("fgt_observations.jsonl")
 
 
+def _ticket_path(settings: Settings) -> Path:
+    """JSONL de tickets InvGate generados por el auto-block (closed-loop auditoría)."""
+    return Path(settings.state_db_path).with_name("fgt_tickets.jsonl")
+
+
 def _notify_state_path(settings: Settings) -> Path:
     """JSON {ip: last_notified_iso} para deduplicar el email de observación por IP."""
     return Path(settings.state_db_path).with_name("fgt_notified.json")
@@ -311,9 +316,12 @@ def summarize(path: Path) -> dict:
 
     total = 0
     would_block = 0
+    ejecutados = 0  # Fase 1: bloqueo real aplicado (executed=True & block_ok=True)
+    ejecutados_fallidos = 0  # Fase 1: se intentó el bloqueo pero falló (block_ok=False)
     by_reason: Counter[str] = Counter()
     by_rule: Counter[str] = Counter()
     block_ips: set[str] = set()
+    blocked_ips: set[str] = set()  # IPs efectivamente bloqueadas en FortiGate
     protected_ips: set[str] = set()
     first_ts = last_ts = None
     if path.exists():
@@ -338,14 +346,98 @@ def summarize(path: Path) -> dict:
                     block_ips.add(r["ip"])
             elif r.get("reason") == "protected" and r.get("ip"):
                 protected_ips.add(r["ip"])
+            # Fase 1: distingue lo que SOC-L1 bloqueó DE VERDAD de lo que "bloquearía".
+            if r.get("executed"):
+                if r.get("block_ok"):
+                    ejecutados += 1
+                    if r.get("ip"):
+                        blocked_ips.add(r["ip"])
+                else:
+                    ejecutados_fallidos += 1
     return {
         "total_observaciones": total,
         "would_block": would_block,
+        "ejecutados": ejecutados,
+        "ejecutados_fallidos": ejecutados_fallidos,
         "ips_distintas_que_bloquearia": len(block_ips),
+        "ips_distintas_bloqueadas": len(blocked_ips),
         "ips_protegidas_evitadas": sorted(protected_ips),
         "por_reason": dict(by_reason),
         "por_regla": dict(by_rule),
         "ventana": {"desde": first_ts, "hasta": last_ts},
+    }
+
+
+def record_ticket(
+    settings: Settings,
+    *,
+    alert_id: str,
+    ip: str | None,
+    rule_id: str | None,
+    request_id: int | None,
+    created: bool,
+    closed: bool,
+) -> None:
+    """Append best-effort del resultado del ticket InvGate del auto-block.
+
+    Alimenta el resumen de tickets de la vista FortiGate (creados / cerrados /
+    abiertos esperando cierre). Nunca rompe el flujo de notificación.
+    """
+    try:
+        rec = {
+            "ts": datetime.now(tz=UTC).isoformat(),
+            "alert_id": alert_id,
+            "ip": ip,
+            "rule_id": rule_id,
+            "request_id": request_id,
+            "created": created,
+            "closed": closed,
+        }
+        with _ticket_path(settings).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - registro best-effort, nunca rompe el flujo
+        logger.exception("fgt-autoblock: no pude registrar el ticket InvGate")
+
+
+def summarize_tickets(path: Path) -> dict:
+    """Resumen de tickets InvGate del auto-block: creados / cerrados / abiertos.
+
+    Deduplica por request_id (un ticket que se reintenta cerrar no infla el conteo).
+    `abiertos` = creados que todavía NO se pudieron cerrar (típicamente HTTP 403 hasta
+    que la cuenta de API tenga permiso de cierre).
+    """
+    created_ids: set[int] = set()
+    closed_ids: set[int] = set()
+    creados_sin_id = 0  # InvGate respondió OK pero sin request_id (raro)
+    last_ts = None
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = r.get("ts")
+            if ts:
+                last_ts = max(last_ts or ts, ts)
+            rid = r.get("request_id")
+            if r.get("created"):
+                if isinstance(rid, int):
+                    created_ids.add(rid)
+                else:
+                    creados_sin_id += 1
+            if r.get("closed") and isinstance(rid, int):
+                closed_ids.add(rid)
+    creados = len(created_ids) + creados_sin_id
+    cerrados = len(closed_ids)
+    abiertos = len(created_ids - closed_ids) + creados_sin_id
+    return {
+        "creados": creados,
+        "cerrados": cerrados,
+        "abiertos": abiertos,
+        "ultimo_ts": last_ts,
     }
 
 
