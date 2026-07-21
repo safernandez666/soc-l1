@@ -200,26 +200,36 @@ class InvgateClient:
         return result
 
     async def add_comment(
-        self, request_id: int, body: str, *, internal: bool = False
+        self, request_id: int, body: str, *, internal: bool = False,
+        is_solution: bool = False,
     ) -> InvgateTicketResult:
         """POST /incident.comment — agrega un comentario a un ticket existente.
 
         internal: True → nota interna (customer_visible=0), False → público.
+        is_solution: True → marca el comentario como SOLUCIÓN propuesta del incidente.
+            InvGate no cierra por un PUT de status: primero hay que proponer una
+            solución (este flag) y después aceptarla (close_incident). OJO: proponer
+            solución requiere permiso de "resolver" en la cuenta de API — sin él la
+            API responde 409 "User #N is not allowed to solve the request".
         """
         if not is_configured(self._settings):
             return self._missing_config_result()
         if self._client is None:
             return self._not_initialized_result()
 
+        payload = {
+            "request_id": request_id,
+            "author_id": self._settings.invgate_creator_id,
+            "comment": body,
+            "customer_visible": 0 if internal else 1,
+        }
+        if is_solution:
+            payload["is_solution"] = 1
+
         try:
             resp = await self._client.post(
                 "/incident.comment",
-                json={
-                    "request_id": request_id,
-                    "author_id": self._settings.invgate_creator_id,
-                    "comment": body,
-                    "customer_visible": 0 if internal else 1,
-                },
+                json=payload,
             )
         except httpx.HTTPError as e:
             logger.error("invgate: add_comment HTTP error: %s", e)
@@ -239,22 +249,49 @@ class InvgateClient:
         return result
 
     async def close_incident(
-        self, request_id: int, rating: int = 5
+        self, request_id: int, rating: int = 5,
+        *, solution_comment: str | None = "Cierre automático SOC-L1: caso contenido, "
+        "no requiere acción humana.",
     ) -> InvgateTicketResult:
-        """PUT /incident.solution.accept — cierra el ticket aceptando la solución.
+        """Cierra el ticket: propone una solución y la acepta (workflow InvGate).
 
-        InvGate no tiene un PUT genérico de status; los cambios de estado usan
-        endpoints dedicados. Para cerrar: /incident.solution.accept (rating 1-5).
+        InvGate NO tiene endpoint de cierre directo. La secuencia oficial es:
+          1. POST /incident.comment con is_solution=1  → propone la solución.
+          2. PUT  /incident.solution.accept (id, rating) → la acepta = cierra.
+
+        Dos detalles que causaban fallas:
+          - El accept exige el parámetro `id` (NO `request_id`) y en QUERY STRING, no
+            en el body. Mandarlo como `request_id`/body daba HTTP 428 "El parámetro id
+            es requerido en PUT".
+          - Sin solución propuesta, el accept devuelve status=ERROR (no hay qué aceptar).
+
+        REQUISITO DE PERMISO: proponer/aceptar solución necesita que la cuenta de API
+        tenga permiso de "resolver solicitud". Sin él, el paso 1 responde 409 "User #N
+        is not allowed to solve the request" y el ticket queda ABIERTO (best-effort: el
+        comentario de auditoría que se postea aparte igual queda registrado).
         """
         if not is_configured(self._settings):
             return self._missing_config_result()
         if self._client is None:
             return self._not_initialized_result()
 
+        # Paso 1: proponer la solución. Si falla (p.ej. 409 sin permiso), no tiene
+        # sentido intentar el accept: devolvemos el error tal cual.
+        if solution_comment:
+            sol = await self.add_comment(request_id, solution_comment, is_solution=True)
+            if not sol.ok:
+                logger.warning(
+                    "🎫 INVGATE propose-solution FAILED | request_id=%s error=%s "
+                    "(ticket queda abierto)",
+                    request_id, sol.error,
+                )
+                return sol
+
+        # Paso 2: aceptar la solución = cerrar.
         try:
             resp = await self._client.put(
                 "/incident.solution.accept",
-                json={"request_id": request_id, "rating": rating},
+                params={"id": request_id, "rating": rating},
             )
         except httpx.HTTPError as e:
             logger.error("invgate: close_incident HTTP error: %s", e)
