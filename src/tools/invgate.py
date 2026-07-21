@@ -200,36 +200,29 @@ class InvgateClient:
         return result
 
     async def add_comment(
-        self, request_id: int, body: str, *, internal: bool = False,
-        is_solution: bool = False,
+        self, request_id: int, body: str, *, internal: bool = False
     ) -> InvgateTicketResult:
         """POST /incident.comment — agrega un comentario a un ticket existente.
 
         internal: True → nota interna (customer_visible=0), False → público.
-        is_solution: True → marca el comentario como SOLUCIÓN propuesta del incidente.
-            InvGate no cierra por un PUT de status: primero hay que proponer una
-            solución (este flag) y después aceptarla (close_incident). OJO: proponer
-            solución requiere permiso de "resolver" en la cuenta de API — sin él la
-            API responde 409 "User #N is not allowed to solve the request".
+
+        NOTA: InvGate permite COMENTAR por API pero NO cerrar/resolver (ver
+        close_incident). Por eso el auto-block sólo comenta y deja el ticket abierto.
         """
         if not is_configured(self._settings):
             return self._missing_config_result()
         if self._client is None:
             return self._not_initialized_result()
 
-        payload = {
-            "request_id": request_id,
-            "author_id": self._settings.invgate_creator_id,
-            "comment": body,
-            "customer_visible": 0 if internal else 1,
-        }
-        if is_solution:
-            payload["is_solution"] = 1
-
         try:
             resp = await self._client.post(
                 "/incident.comment",
-                json=payload,
+                json={
+                    "request_id": request_id,
+                    "author_id": self._settings.invgate_creator_id,
+                    "comment": body,
+                    "customer_visible": 0 if internal else 1,
+                },
             )
         except httpx.HTTPError as e:
             logger.error("invgate: add_comment HTTP error: %s", e)
@@ -249,62 +242,27 @@ class InvgateClient:
         return result
 
     async def close_incident(
-        self, request_id: int, rating: int = 5,
-        *, solution_comment: str | None = "Cierre automático SOC-L1: caso contenido, "
-        "no requiere acción humana.",
+        self, request_id: int, rating: int = 5
     ) -> InvgateTicketResult:
-        """Cierra el ticket: propone una solución y la acepta (workflow InvGate).
+        """NO-OP intencional: InvGate NO permite cerrar/resolver tickets por API.
 
-        InvGate NO tiene endpoint de cierre directo. La secuencia oficial es:
-          1. POST /incident.comment con is_solution=1  → propone la solución.
-          2. PUT  /incident.solution.accept (id, rating) → la acepta = cierra.
+        Hecho confirmado de la plataforma (no es un permiso otorgable): la cuenta de
+        API puede CREAR y COMENTAR, pero cualquier intento de resolver responde
+        409 "User #N is not allowed to solve the request", y `incident.solution.accept`
+        sin solución propuesta devuelve status=ERROR. Por eso los tickets del auto-block
+        quedan ABIERTOS a propósito, como registro de auditoría; el cierre, si se
+        requiere, es manual en InvGate.
 
-        Dos detalles que causaban fallas:
-          - El accept exige el parámetro `id` (NO `request_id`) y en QUERY STRING, no
-            en el body. Mandarlo como `request_id`/body daba HTTP 428 "El parámetro id
-            es requerido en PUT".
-          - Sin solución propuesta, el accept devuelve status=ERROR (no hay qué aceptar).
-
-        REQUISITO DE PERMISO: proponer/aceptar solución necesita que la cuenta de API
-        tenga permiso de "resolver solicitud". Sin él, el paso 1 responde 409 "User #N
-        is not allowed to solve the request" y el ticket queda ABIERTO (best-effort: el
-        comentario de auditoría que se postea aparte igual queda registrado).
+        Se mantiene el método (en vez de borrarlo) para que quede documentado y para no
+        romper llamadores futuros: devuelve ok=False sin pegarle a la API.
         """
-        if not is_configured(self._settings):
-            return self._missing_config_result()
-        if self._client is None:
-            return self._not_initialized_result()
-
-        # Paso 1: proponer la solución. Si falla (p.ej. 409 sin permiso), no tiene
-        # sentido intentar el accept: devolvemos el error tal cual.
-        if solution_comment:
-            sol = await self.add_comment(request_id, solution_comment, is_solution=True)
-            if not sol.ok:
-                logger.warning(
-                    "🎫 INVGATE propose-solution FAILED | request_id=%s error=%s "
-                    "(ticket queda abierto)",
-                    request_id, sol.error,
-                )
-                return sol
-
-        # Paso 2: aceptar la solución = cerrar.
-        try:
-            resp = await self._client.put(
-                "/incident.solution.accept",
-                params={"id": request_id, "rating": rating},
-            )
-        except httpx.HTTPError as e:
-            logger.error("invgate: close_incident HTTP error: %s", e)
-            return InvgateTicketResult(ok=False, request_id=request_id, error=f"http error: {e}")
-
-        result = self._parse_response(resp)
-        if result.request_id is None:
-            result = result.model_copy(update={"request_id": request_id})
-        if result.ok:
-            logger.info("🎫 INVGATE close_incident ok | request_id=%s", request_id)
-        else:
-            logger.warning(
-                "🎫 INVGATE close_incident FAILED | request_id=%s error=%s",
-                request_id, result.error,
-            )
-        return result
+        logger.info(
+            "🎫 INVGATE close_incident SKIP | request_id=%s "
+            "(InvGate no permite cerrar por API - ticket queda abierto)",
+            request_id,
+        )
+        return InvgateTicketResult(
+            ok=False,
+            request_id=request_id,
+            error="InvGate no permite cerrar tickets por API (sólo comentar)",
+        )

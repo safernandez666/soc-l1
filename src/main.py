@@ -890,23 +890,19 @@ async def _fgt_block_ticket_and_notify(
                 )
                 if created.ok and created.request_id is not None:
                     request_id = created.request_id
-                    # Comentario de cierre: deja claro que el caso ya está contenido,
-                    # aunque el close (accept solution) falle por permisos (403).
+                    # Comentario de auditoría. InvGate NO permite cerrar por API
+                    # (sólo comentar), así que el ticket queda ABIERTO a propósito
+                    # como registro; el cierre real, si se quiere, es manual. No se
+                    # intenta close_incident (siempre daría 409 "not allowed to solve").
                     await client.add_comment(
                         request_id,
                         f"Caso contenido automáticamente por SOC-L1 auto-block. "
                         f"IP {decision.ip} en quarantine en FortiGate hasta "
                         f"{outcome.expires_at or 'vencimiento del TTL'}. "
-                        f"Se cierra el ticket: no requiere acción humana.",
+                        f"No requiere acción humana. "
+                        f"(El ticket queda abierto: InvGate no permite cerrar por API.)",
                     )
-                    close_res = await client.close_incident(request_id)
-                    closed = close_res.ok
-                    if not closed:
-                        logger.warning(
-                            "🎫 INVGATE close FGT-block FAILED | ticket=%s ip=%s "
-                            "error=%s (queda abierto)",
-                            request_id, decision.ip, close_res.error,
-                        )
+                    # closed queda False: cierre manual en InvGate si corresponde.
         else:
             logger.info(
                 "🎫 INVGATE no configurado - skip ticket auto-block ip=%s", decision.ip
