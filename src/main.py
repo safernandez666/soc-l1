@@ -277,6 +277,20 @@ async def wazuh_webhook(
                     ttl_hours=settings.fortigate_block_ttl_hours,
                 )
             )
+            # Espejo por Teams (Fase 0 observe). Fire-and-forget.
+            if settings.teams_webhook_url:
+                from src.teams import send_teams_observation
+
+                _spawn(
+                    send_teams_observation(
+                        settings,
+                        alert_id=alert.alert_id,
+                        ip=fgt_decision.ip,
+                        rule_id=fgt_decision.rule_id,
+                        host=alert.device.hostname,
+                        ttl_hours=settings.fortigate_block_ttl_hours,
+                    )
+                )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
@@ -679,6 +693,17 @@ async def _run_narrator_and_request_approval(
             enrichment=enrichment,
             threat_intel=threat_intel,
         )
+
+        # Notificación Teams (Fase 1): tarjeta con botones a /review y /approve.
+        # Fire-and-forget — nunca aborta el pipeline.
+        if settings.teams_webhook_url:
+            try:
+                from src.teams import send_teams_approval_request
+
+                await send_teams_approval_request(settings, alert, plan, token)
+            except Exception:
+                logger.exception("teams: approval_request falló para alert=%s",
+                                 alert.alert_id)
     except Exception:
         logger.exception("narrator/approval failed for alert id=%s", alert.alert_id)
 
@@ -920,6 +945,26 @@ async def _fgt_block_ticket_and_notify(
         invgate_closed=closed,
         invgate_description=description,
     )
+
+    # Espejo por Teams (Fase 1): el auto-block cortocircuita antes del Narrator, así
+    # que no pasa por los hooks de approval/closure. Fire-and-forget, nunca propaga.
+    if settings.teams_webhook_url:
+        try:
+            from src.teams import send_teams_block
+
+            await send_teams_block(
+                settings,
+                alert_id=alert.alert_id,
+                ip=decision.ip,
+                rule_id=decision.rule_id,
+                host=alert.device.hostname,
+                ttl_hours=settings.fortigate_block_ttl_hours,
+                expires_at=outcome.expires_at,
+                invgate_request_id=request_id,
+                invgate_closed=closed,
+            )
+        except Exception:
+            logger.exception("teams: fgt_block falló para alert=%s", alert.alert_id)
 
 
 # ===== Approval endpoints =====
