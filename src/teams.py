@@ -258,8 +258,9 @@ async def send_teams_block(
     ticket = f"#{invgate_request_id}" if invgate_request_id else None
     ticket_state = None
     if invgate_request_id:
-        # InvGate no cierra por API: el ticket queda abierto como registro de auditoría.
-        ticket_state = "cerrado" if invgate_closed else "abierto (registro — cierre manual)"
+        # Auto-block sin human-in-the-loop: el ticket se abre y se cierra en el acto.
+        # Best-effort: si el cierre falló (estado no soluble / API), queda abierto.
+        ticket_state = "cerrado" if invgate_closed else "abierto (cierre pendiente)"
 
     body = [
         _title_block("🚫 SOC-L1 · IP bloqueada automáticamente", "attention"),

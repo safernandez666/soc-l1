@@ -952,19 +952,23 @@ async def _fgt_block_ticket_and_notify(
                 )
                 if created.ok and created.request_id is not None:
                     request_id = created.request_id
-                    # Comentario de auditoría. InvGate NO permite cerrar por API
-                    # (sólo comentar), así que el ticket queda ABIERTO a propósito
-                    # como registro; el cierre real, si se quiere, es manual. No se
-                    # intenta close_incident (siempre daría 409 "not allowed to solve").
-                    await client.add_comment(
+                    # Cierre automático (permiso de resolver habilitado 2026-07-23):
+                    # el auto-block es sin human-in-the-loop y la amenaza ya está
+                    # contenida, así que el ticket se abre Y se cierra en el acto.
+                    # close_incident propone la solución (pública, con el detalle del
+                    # bloqueo) y la acepta. Best-effort: si el cierre falla (409 /
+                    # estado no soluble), el ticket queda abierto como registro y
+                    # closed=False; el flujo nunca aborta por esto.
+                    closed_res = await client.close_incident(
                         request_id,
-                        f"Caso contenido automáticamente por SOC-L1 auto-block. "
-                        f"IP {decision.ip} en quarantine en FortiGate hasta "
-                        f"{outcome.expires_at or 'vencimiento del TTL'}. "
-                        f"No requiere acción humana. "
-                        f"(El ticket queda abierto: InvGate no permite cerrar por API.)",
+                        solution_comment=(
+                            f"Caso contenido automáticamente por SOC-L1 auto-block. "
+                            f"IP {decision.ip} en quarantine en FortiGate hasta "
+                            f"{outcome.expires_at or 'vencimiento del TTL'}. "
+                            f"No requiere acción humana."
+                        ),
                     )
-                    # closed queda False: cierre manual en InvGate si corresponde.
+                    closed = closed_res.ok
         else:
             logger.info(
                 "🎫 INVGATE no configurado - skip ticket auto-block ip=%s", decision.ip
@@ -1058,7 +1062,7 @@ def _decision_meta_html(alert_id: str) -> str:
 
 
 def _render_decision_page(
-    state_key: str, body_html: str, meta_html: str = ""
+    state_key: str, body_html: str, meta_html: str = "", extra_action_html: str = ""
 ) -> HTMLResponse:
     """Render página de decisión con el design system de soc-l1.
 
@@ -1066,6 +1070,8 @@ def _render_decision_page(
     body_html: contenido del cuerpo (puede contener <code>, <strong>, etc.)
     meta_html: bloque opcional (alert_id + hora) que se muestra prominente en el
         banner, para que el operador distinga ESTA decisión de una pestaña vieja.
+    extra_action_html: acción opcional (p.ej. link "Cerrar ticket InvGate") que se
+        muestra ARRIBA del botón "Cerrar pestaña". Se inyecta tal cual (ya escapado).
     """
     s = _PAGE_STATES.get(state_key, _PAGE_STATES["error"])
     page = f"""<!DOCTYPE html>
@@ -1105,6 +1111,7 @@ def _render_decision_page(
       <div class="body">{body_html}</div>
     </div>
     <div style="text-align:center; padding: 4px 24px 20px;">
+      {extra_action_html}
       <button onclick="cerrarPestana()"
               style="padding:12px 28px; border:none; border-radius:6px; cursor:pointer;
                      background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
@@ -1136,6 +1143,24 @@ def _render_decision_page(
 </html>
 """
     return HTMLResponse(content=page)
+
+
+def _close_ticket_action_html(token: str, invgate_rid: int | None) -> str:
+    """Link "Cerrar ticket InvGate #N" para las páginas de decisión man-in-the-loop.
+
+    Sólo aparece si el caso tiene ticket InvGate. En los casos con aprobación humana el
+    cierre NO es automático (a diferencia del auto-block): se le da al analista la OPCIÓN
+    de cerrarlo desde la misma página de decisión.
+    """
+    if not invgate_rid:
+        return ""
+    return (
+        f'<a href="/close-ticket/{token}" '
+        'style="display:inline-block; padding:12px 28px; border-radius:6px; '
+        'background:#0969da; color:white; font:bold 14px sans-serif; '
+        'text-decoration:none; margin:0 0 12px;">'
+        f'🎫 Cerrar ticket InvGate #{invgate_rid}</a><br>'
+    )
 
 
 async def _send_closure_safely(
@@ -1268,6 +1293,7 @@ async def _handle_decision(
             f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
             "y timestamp para audit.",
             meta_html=_decision_meta_html(alert_id),
+            extra_action_html=_close_ticket_action_html(token, invgate_rid),
         )
 
     # approved → ejecutar plan
@@ -1329,7 +1355,10 @@ async def _handle_decision(
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
         body += '<br><br><span style="font-size:12px;color:#6b7280;">El resultado queda en logs y SQLite.</span>'
-    return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
+    return _render_decision_page(
+        "approved", body, meta_html=_decision_meta_html(alert_id),
+        extra_action_html=_close_ticket_action_html(token, invgate_rid),
+    )
 
 
 async def _execute_approved_plan_in_background(
@@ -1390,6 +1419,78 @@ async def approve_plan(request: Request, settings: SettingsDep, token: str) -> H
 @app.get("/reject/{token}")
 async def reject_plan(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
     return await _handle_decision(request, settings, token, "rejected")
+
+
+@app.get("/close-ticket/{token}")
+async def close_ticket(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
+    """Cierra el ticket InvGate de un caso man-in-the-loop, a pedido del analista.
+
+    A diferencia del auto-block (que abre y cierra solo), los casos con aprobación humana
+    dejan el ticket abierto y ofrecen ESTA opción de cierre en la página de decisión.
+    Best-effort: si InvGate rechaza el cierre (estado no soluble, etc.), la página lo
+    informa y el ticket puede cerrarse manualmente en InvGate.
+    """
+    import html as _h
+
+    from src.state import get_pending_approval
+
+    ip = request.client.host if request.client else None
+    row = await get_pending_approval(settings.state_db_path, token)
+    if row is None:
+        return _render_decision_page(
+            "not_found",
+            "Este link no corresponde a ningún caso. Puede haber sido manipulado "
+            "o pertenecer a otro entorno.",
+        )
+
+    alert_id = row.get("alert_id", "?")
+    invgate_rid = row.get("invgate_request_id")
+    if not invgate_rid:
+        return _render_decision_page(
+            "already",
+            f"El caso <code>{_h.escape(str(alert_id))}</code> no tiene ticket InvGate "
+            "asociado, así que no hay nada que cerrar.",
+            meta_html=_decision_meta_html(alert_id),
+        )
+
+    logger.info(
+        "INVGATE_CLOSE_REQUEST | alert=%s ticket=%s ip=%s", alert_id, invgate_rid, ip
+    )
+
+    close_ok = False
+    close_err = "InvGate no configurado"
+    try:
+        from src.tools.invgate import InvgateClient, is_configured
+
+        if is_configured(settings):
+            async with InvgateClient(settings) as client:
+                res = await client.close_incident(
+                    invgate_rid,
+                    solution_comment=(
+                        f"Cierre solicitado por el analista ({ip or 'IP desconocida'}) "
+                        f"desde la página de decisión SOC-L1. Caso {alert_id} resuelto."
+                    ),
+                )
+            close_ok = res.ok
+            close_err = res.error or ""
+    except Exception:
+        logger.exception("invgate: close-ticket falló | ticket=%s", invgate_rid)
+        close_err = "excepción interna (ver logs)"
+
+    if close_ok:
+        return _render_decision_page(
+            "approved",
+            f"Ticket InvGate <strong>#{invgate_rid}</strong> cerrado correctamente "
+            f"para la alerta <code>{_h.escape(str(alert_id))}</code>.",
+            meta_html=_decision_meta_html(alert_id),
+        )
+    return _render_decision_page(
+        "error",
+        f"No se pudo cerrar el ticket <strong>#{invgate_rid}</strong> por API "
+        f"({_h.escape(close_err or 'error desconocido')}). "
+        "Se puede cerrar manualmente en InvGate.",
+        meta_html=_decision_meta_html(alert_id),
+    )
 
 
 # ===== Review (granular approval) =====
