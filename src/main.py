@@ -46,6 +46,53 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
+# Reglas AD de cambio de cuenta (altas/bajas/grupos) que SOC-L1 espeja por Teams.
+# El correo lo sigue mandando el integration custom-email-unified de Wazuh; acá solo
+# agregamos la tarjeta de Teams (informativa, sin triage/aprobación) y cortamos el
+# ingest — estos eventos no van al Narrator ni generan ticket.
+_AD_ACCOUNT_CHANGE_RULES = frozenset(
+    {"100080", "100081", "100082", "100083", "100084", "100085"}
+)
+
+
+def _is_ad_account_change(alert: NormalizedAlert) -> bool:
+    return (alert.wazuh_rule.id or "") in _AD_ACCOUNT_CHANGE_RULES
+
+
+def _ad_eventdata(alert: NormalizedAlert) -> dict:
+    """Extrae win.system.eventID + win.eventdata.{target,subject}UserName del raw.
+
+    Los eventos Windows AD traen el detalle en data.win (que el normalizer no
+    desarma); lo leemos acá para la tarjeta de Teams.
+    """
+    win = ((alert.raw or {}).get("data") or {}).get("win") or {}
+    event_id = (win.get("system") or {}).get("eventID")
+    eventdata = win.get("eventdata") or {}
+    return {
+        "event_id": str(event_id) if event_id is not None else None,
+        "target_user": eventdata.get("targetUserName"),
+        "subject_user": eventdata.get("subjectUserName"),
+    }
+
+
+async def _notify_ad_account_change(alert: NormalizedAlert, settings: Settings) -> None:
+    """Espejo Teams de un cambio de cuenta AD. Fire-and-forget (nunca propaga)."""
+    from src.teams import send_teams_account_change
+
+    ev = _ad_eventdata(alert)
+    await send_teams_account_change(
+        settings,
+        alert_id=alert.alert_id,
+        severity=alert.severity_source,
+        rule_id=alert.wazuh_rule.id,
+        rule_desc=alert.wazuh_rule.description,
+        event_id=ev["event_id"],
+        target_user=ev["target_user"],
+        subject_user=ev["subject_user"],
+        host=alert.device.hostname,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -206,6 +253,21 @@ async def wazuh_webhook(
         len(alert.users_involved),
         len(alert.files),
     )
+
+    # Cambio de cuenta AD (alta/baja/grupo, reglas 100080-100085): SOC-L1 solo lo
+    # espeja por Teams y corta. El correo con el detalle lo sigue mandando el
+    # integration custom-email-unified de Wazuh — no pasa por triage/Narrator.
+    if _is_ad_account_change(alert):
+        if settings.teams_webhook_url:
+            _spawn(_notify_ad_account_change(alert, settings))
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "ad_account_change_notified",
+                "alert_id": alert.alert_id,
+                "rule_id": alert.wazuh_rule.id,
+            },
+        )
 
     # Auto-block FortiGate. Ver docs/fortigate-autoblock-plan.md. Best-effort.
     fgt_decision = None

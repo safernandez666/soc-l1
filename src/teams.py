@@ -322,6 +322,53 @@ async def send_teams_observation(
     await _post_card(settings, _card(body), kind="fgt_observation", alert_id=alert_id)
 
 
+# ---------------------------------------------------------------------------
+# Tarjeta 5 — cambio de cuenta AD (informativa, espejo del email de Wazuh)
+# ---------------------------------------------------------------------------
+async def send_teams_account_change(
+    settings: Settings,
+    *,
+    alert_id: str,
+    severity: str | None,
+    rule_id: str | None,
+    rule_desc: str | None,
+    event_id: str | None,
+    target_user: str | None,
+    subject_user: str | None,
+    host: str | None,
+) -> None:
+    """Notifica por Teams un cambio de cuenta en Active Directory (alta/baja/grupo).
+
+    Informativa, sin botones: el correo con el detalle lo sigue mandando el
+    integration custom-email-unified de Wazuh (reglas 100080-100085). Esta card
+    solo lo espeja en Teams — SOC-L1 no triagea ni pide aprobación para estos
+    eventos, corta en el ingest y notifica.
+    """
+    if not is_configured(settings):
+        return
+
+    color = _RISK_COLOR.get((severity or "").lower(), "accent")
+    body = [
+        _title_block("👤 SOC-L1 · Cambio de cuenta en Active Directory", color),
+        _text(rule_desc or "Evento de Active Directory", weight="Bolder"),
+        _facts([
+            ("Usuario", target_user),
+            ("Realizado por", subject_user),
+            ("Controlador de dominio", host),
+            ("Event ID", event_id),
+            ("Regla Wazuh", rule_id),
+            ("Severidad", severity.capitalize() if severity else None),
+        ]),
+        _text(
+            "Notificación informativa de identidad. El correo con el detalle completo "
+            "lo sigue enviando Wazuh. Sin acción automática de SOC-L1.",
+            spacing="Medium", is_subtle=True,
+        ),
+    ]
+
+    await _post_card(settings, _card(body), kind="ad_account_change", alert_id=alert_id)
+
+
 async def send_teams_closure(
     settings: Settings,
     alert: NormalizedAlert,
