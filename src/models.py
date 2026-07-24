@@ -252,3 +252,6 @@ class InvgateTicketResult(BaseModel):
     request_id: int | None = None
     info: str | None = None
     error: str | None = None
+    # status_id real del ticket tras la operación (cuando se pudo verificar por
+    # read-back en close_incident). None si no se leyó o la lectura falló.
+    status_id: int | None = None
