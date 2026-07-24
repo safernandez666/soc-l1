@@ -90,7 +90,17 @@ export interface Session {
 
 // ===== Cola (espejo de queries._summarize_row + api_queue) =====
 
-export interface CaseSummary {
+export type InvgateState = "sin_ticket" | "sin_verificar" | "resuelto" | "abierto"
+
+export interface InvgateFields {
+  invgate_request_id: number | null
+  invgate_status_id: number | null
+  invgate_resolved: boolean | null
+  invgate_checked_at: string | null
+  invgate_state: InvgateState
+}
+
+export interface CaseSummary extends InvgateFields {
   rowid: number
   alert_id: string
   status: StatusKey
@@ -98,11 +108,17 @@ export interface CaseSummary {
   decided_at: string | null
   decided_by_ip: string | null
   executed_at: string | null
-  invgate_request_id: string | null
   risk_level: string
   title: string
   host: string
   n_actions: number
+}
+
+export interface InvgateReconcile {
+  counts: Record<InvgateState, number>
+  total_with_ticket: number
+  open_cases: CaseSummary[]
+  last_checked: string | null
 }
 
 export interface QueuePage {
@@ -156,7 +172,7 @@ export interface ExecResult {
   message?: string | null
 }
 
-export interface CaseDetail {
+export interface CaseDetail extends InvgateFields {
   rowid: number
   alert_id: string
   status: StatusKey
@@ -165,7 +181,6 @@ export interface CaseDetail {
   decided_by_ip: string | null
   decided_by_ua: string | null
   executed_at: string | null
-  invgate_request_id: string | null
   selected_actions: number[] | null
   plan: Plan
   alert: Alert
@@ -340,4 +355,5 @@ export const api = {
   fgtObservations: () => get<FgtObservations>("/fgt-observations"),
   reports: (f: ReportFilters) => get<ReportsResponse>(`/reports?${reportQs(f)}`),
   reportsCsvUrl: (f: ReportFilters) => `${BASE}/reports.csv?${reportQs(f)}`,
+  invgate: () => get<InvgateReconcile>("/invgate"),
 }

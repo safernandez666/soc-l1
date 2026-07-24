@@ -131,15 +131,19 @@ async def lifespan(app: FastAPI):
 
     # Init SQLite si Narrator está habilitado (es lo único que la usa)
     sweeper: asyncio.Task | None = None
+    invgate_sweeper: asyncio.Task | None = None
     if settings.enable_narrator:
         from src.state import init_db
 
         await init_db(settings.state_db_path)
         sweeper = asyncio.create_task(_purge_sweeper(settings))
+        invgate_sweeper = asyncio.create_task(_invgate_reconcile_sweeper(settings))
 
     yield
     if sweeper is not None:
         sweeper.cancel()
+    if invgate_sweeper is not None:
+        invgate_sweeper.cancel()
     logger.info("SOC L1 service shutting down")
 
 
@@ -155,6 +159,21 @@ async def _purge_sweeper(settings: Settings) -> None:
         except Exception:  # noqa: BLE001 - el sweeper nunca debe tumbar el servicio
             logger.exception("purge sweeper falló (reintenta en el próximo ciclo)")
         await asyncio.sleep(6 * 3600)
+
+
+async def _invgate_reconcile_sweeper(settings: Settings) -> None:
+    """Reconcilia el estado real de los tickets InvGate cada 30 min (y al boot).
+
+    InvGate = fuente de verdad: releemos y persistimos el estado en state.db para
+    que el dashboard muestre la realidad, no nuestra suposición al cerrar."""
+    from src.invgate_sync import reconcile_invgate
+
+    while True:
+        try:
+            await reconcile_invgate(settings)
+        except Exception:  # noqa: BLE001 - nunca debe tumbar el servicio
+            logger.exception("invgate reconcile falló (reintenta en el próximo ciclo)")
+        await asyncio.sleep(30 * 60)
 
 
 app = FastAPI(

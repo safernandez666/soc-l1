@@ -7,6 +7,7 @@ import { KpisPage } from "@/pages/KpisPage"
 import { ConfigPage } from "@/pages/ConfigPage"
 import { ReportPage } from "@/pages/ReportPage"
 import { FgtPage } from "@/pages/FgtPage"
+import { InvgatePage } from "@/pages/InvgatePage"
 import { ReportsPage } from "@/pages/ReportsPage"
 import { ConsolidatedReportPage } from "@/pages/ConsolidatedReportPage"
 
@@ -21,6 +22,7 @@ const router = createBrowserRouter(
         { path: "case/:rowid", element: <CasePage /> },
         { path: "kpis", element: <KpisPage /> },
         { path: "fortigate", element: <FgtPage /> },
+        { path: "invgate", element: <InvgatePage /> },
         { path: "reportes", element: <ReportsPage /> },
         { path: "config", element: <ConfigPage /> },
       ],

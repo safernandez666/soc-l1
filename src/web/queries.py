@@ -478,7 +478,8 @@ def _list_cases_sync(
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-            "       executed_at, plan_json, alert_json, invgate_request_id "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
@@ -520,7 +521,8 @@ def _cases_in_range_sync(
     with conn:
         rows = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-            "       executed_at, plan_json, alert_json, invgate_request_id "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ?",
             [*params, max(1, min(int(cap), 5000))],
         ).fetchall()
@@ -528,6 +530,29 @@ def _cases_in_range_sync(
     if risk:
         cases = [c for c in cases if c["risk_level"] == risk]
     return cases
+
+
+def _invgate_state(r: dict[str, Any]) -> dict[str, Any]:
+    """Estado del ticket InvGate según el snapshot de reconciliación (fuente de
+    verdad). ``state``: sin_ticket | sin_verificar | resuelto | abierto."""
+    rid = r.get("invgate_request_id")
+    if rid is None:
+        state = "sin_ticket"
+    elif r.get("invgate_checked_at") is None:
+        state = "sin_verificar"
+    elif r.get("invgate_resolved"):
+        state = "resuelto"
+    else:
+        state = "abierto"
+    return {
+        "invgate_request_id": rid,
+        "invgate_status_id": r.get("invgate_status_id"),
+        "invgate_resolved": (
+            None if r.get("invgate_resolved") is None else bool(r.get("invgate_resolved"))
+        ),
+        "invgate_checked_at": r.get("invgate_checked_at"),
+        "invgate_state": state,
+    }
 
 
 def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
@@ -543,11 +568,11 @@ def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
         "decided_at": r.get("decided_at"),
         "decided_by_ip": r.get("decided_by_ip"),
         "executed_at": r.get("executed_at"),
-        "invgate_request_id": r.get("invgate_request_id"),
         "risk_level": plan.get("risk_level") or "unknown",
         "title": alert.get("title") or "(no title)",
         "host": device.get("hostname") or device.get("fqdn") or "—",
         "n_actions": len(plan.get("actions") or []),
+        **_invgate_state(r),
     }
 
 
@@ -563,7 +588,8 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
             "       decided_by_ua, selected_actions, executed_at, execution_result, "
-            "       plan_json, alert_json, timeline_json, invgate_request_id "
+            "       plan_json, alert_json, timeline_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             "FROM pending_approvals WHERE rowid=?",
             (rowid,),
         ).fetchone()
@@ -579,12 +605,12 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
         "decided_by_ip": r["decided_by_ip"],
         "decided_by_ua": r["decided_by_ua"],
         "executed_at": r["executed_at"],
-        "invgate_request_id": r["invgate_request_id"],
         "selected_actions": _loads(r["selected_actions"]),
         "plan": _loads(r["plan_json"]) or {},
         "alert": _loads(r["alert_json"]) or {},
         "timeline": _loads(r["timeline_json"]) or [],
         "execution_result": _loads(r["execution_result"]) or [],
+        **_invgate_state(r),
     }
 
 
@@ -639,3 +665,53 @@ async def list_cases(
 
 async def get_case(db_path: str, rowid: int) -> dict[str, Any] | None:
     return await asyncio.to_thread(_get_case_sync, db_path, rowid)
+
+
+# ===== Reconciliación InvGate (vista "tickets abiertos") =====
+
+
+def _invgate_reconcile_sync(db_path: str) -> dict[str, Any]:
+    """Resumen de reconciliación InvGate + lista de casos con ticket ABIERTO.
+
+    InvGate es la fuente de verdad: el snapshot lo escribe el sweeper. La lista
+    prioriza la discrepancia que importa — casos cuyo lado nuestro ya terminó
+    (executed/rejected/expired) pero cuyo ticket sigue abierto en InvGate."""
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return {"counts": {}, "open_cases": [], "last_checked": None}
+    with conn:
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
+            "FROM pending_approvals WHERE invgate_request_id IS NOT NULL"
+        ).fetchall()
+
+    counts = {"resuelto": 0, "abierto": 0, "sin_verificar": 0}
+    open_cases: list[dict[str, Any]] = []
+    last_checked: str | None = None
+    for row in rows:
+        c = _summarize_row(dict(row))
+        st = c["invgate_state"]
+        counts[st] = counts.get(st, 0) + 1
+        if c["invgate_checked_at"] and (not last_checked or c["invgate_checked_at"] > last_checked):
+            last_checked = c["invgate_checked_at"]
+        if st in ("abierto", "sin_verificar"):
+            open_cases.append(c)
+    # Los ya-terminales de nuestro lado primero (la discrepancia real), luego por fecha.
+    _terminal = {"executed", "rejected", "expired"}
+    open_cases.sort(
+        key=lambda c: (c["status"] not in _terminal, c["created_at"] or ""),
+    )
+    return {
+        "counts": counts,
+        "total_with_ticket": len(rows),
+        "open_cases": open_cases,
+        "last_checked": last_checked,
+    }
+
+
+async def invgate_reconcile_view(db_path: str) -> dict[str, Any]:
+    """Datos para la vista de reconciliación InvGate del dashboard."""
+    return await asyncio.to_thread(_invgate_reconcile_sync, db_path)

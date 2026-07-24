@@ -286,6 +286,16 @@ async def api_queue(
     )
 
 
+@router.get("/api/invgate")
+async def api_invgate(request: Request, settings: SettingsDep) -> Response:
+    """Reconciliación InvGate: InvGate como fuente de verdad. Resumen + casos con
+    ticket abierto (snapshot escrito por el sweeper periódico)."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    data = await queries.invgate_reconcile_view(settings.state_db_path)
+    return JSONResponse(data)
+
+
 @router.get("/api/case/{rowid}")
 async def api_case(request: Request, settings: SettingsDep, rowid: int) -> Response:
     if not _authed(request, settings):
