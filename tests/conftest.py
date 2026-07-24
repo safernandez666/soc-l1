@@ -1,7 +1,8 @@
 """Configuración global de pytest.
 
 Objetivo nº1: la suite NUNCA debe disparar side-effects reales (mail, tickets InvGate,
-escritura en la state.db de prod), aunque se corra por error en el box de producción.
+notificaciones Teams, escritura en la state.db de prod), aunque se corra por error en el
+box de producción.
 
 Por qué hace falta ser agresivo: el webhook responde 202 y procesa el pipeline en una
 **tarea background** que sobrevive al teardown del test. Si la hermeticidad fuera solo
@@ -32,6 +33,7 @@ from src.config import LdapConfig, Settings, get_settings
 # --- Capa 1: guardas os.environ (corren al importar el conftest, antes de los tests) ---
 os.environ["SMTP_HOST"] = ""          # mailer hace skip si no hay host → sin mails
 os.environ["HOST_INVGATE"] = ""       # sin cliente InvGate → sin tickets
+os.environ["TEAMS_WEBHOOK_URL"] = ""  # sin webhook → teams.post() es no-op (sin spam a Teams)
 os.environ["STATE_DB_PATH"] = os.path.join(  # nunca la state.db de prod
     tempfile.gettempdir(), "soc-l1-pytest-state.db"
 )
