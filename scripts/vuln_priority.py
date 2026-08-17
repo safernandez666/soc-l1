@@ -664,6 +664,38 @@ def load_previous_snapshot(directory: str = HISTORICAL_DIR) -> tuple[dict, str]:
     return data, latest
 
 
+def save_snapshot(counts: dict[str, dict], directory: str = HISTORICAL_DIR) -> str:
+    """Escribe el snapshot semanal, en el mismo formato que weekly_comparison.py.
+
+    Hasta el 2026-08-17 esto lo hacía el script viejo y acá solo se leía. Al
+    desactivarlo en el cutover nadie escribía más snapshots, así que la
+    comparativa semana contra semana se habría congelado en la última que
+    dejó el script viejo. El formato se mantiene idéntico para que ambos
+    scripts puedan leer los archivos del otro si hiciera falta revertir.
+    """
+    if not counts:
+        return ""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(directory, f"snapshot_{ts}.csv")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"# Snapshot generado: {datetime.now().isoformat()}\n")
+            fh.write(f"# Total hosts: {len(counts)}\n")
+            fh.write("Host,Critical,High,Medium,Low,Total\n")
+            for host in sorted(counts):
+                v = counts[host]
+                total = v["Critical"] + v["High"] + v["Medium"] + v["Low"]
+                fh.write(
+                    f"{host},{v['Critical']},{v['High']},{v['Medium']},{v['Low']},{total}\n"
+                )
+    except OSError as exc:
+        logger.warning("No se pudo escribir el snapshot en %s: %s", path, exc)
+        return ""
+    logger.info("Snapshot guardado: %s (%s hosts)", os.path.basename(path), len(counts))
+    return path
+
+
 def compare_hosts(current: dict[str, dict], previous: dict[str, dict]) -> dict:
     """Compara conteos por host. El foco es Critical+High, igual que el reporte original."""
     zero = dict.fromkeys(SEVERITIES, 0)
@@ -1307,6 +1339,8 @@ def main() -> int:
     ap.add_argument("--smtp-debug", action="store_true", help="Mostrar la conversación SMTP completa")
     ap.add_argument("--historical-dir", default=HISTORICAL_DIR,
                     help=f"Directorio de snapshots semanales, solo lectura (default {HISTORICAL_DIR})")
+    ap.add_argument("--no-snapshot", action="store_true",
+                    help="No escribir el snapshot semanal (por defecto sí se escribe)")
     ap.add_argument("--no-compliance", action="store_true",
                     help="Omitir la sección de cumplimiento de parches por host")
     ap.add_argument("--db", default=STATE_DB, help=f"Ruta de la base de ciclo de vida (default {STATE_DB})")
@@ -1371,6 +1405,10 @@ def main() -> int:
     host_counts = compute_host_counts(active)
     previous_hosts, prev_file = load_previous_snapshot(args.historical_dir)
     comp = compare_hosts(host_counts, previous_hosts)
+    # El snapshot se escribe DESPUÉS de comparar: load_previous_snapshot() excluye
+    # los del día, pero escribir antes dejaría la comparativa a merced de ese orden.
+    if not args.dry_run and not args.no_snapshot:
+        save_snapshot(host_counts, args.historical_dir)
     logger.info(
         "Cumplimiento: %s hosts | criticas %s (%+d) | altas %s (%+d) | SLA %.0f%%",
         comp["total_hosts"], comp["critical_now"], comp["critical_delta"],
