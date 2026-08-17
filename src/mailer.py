@@ -21,9 +21,11 @@ import smtplib
 import ssl
 from datetime import datetime
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid, parseaddr
 from typing import TYPE_CHECKING, Any
 
 from src.agents.narrator import NarratorPlan
+from src import report_theme as _theme
 from src.config import Settings
 from src.models import NormalizedAlert
 
@@ -795,8 +797,24 @@ def _build_message(
     return msg
 
 
+def _stamp_headers(settings: Settings, msg: EmailMessage) -> None:
+    """Agrega Date y Message-ID si faltan.
+
+    El stdlib no los pone y smtplib tampoco: sin ellos varios filtros antispam
+    penalizan el mensaje (verificado contra el Exchange de Grupo Alemana, donde
+    los reportes en HTML caían en No Deseado). Ver src/report_theme.py.
+    """
+    if "Date" not in msg:
+        msg["Date"] = formatdate(localtime=True)
+    if "Message-ID" not in msg:
+        addr = parseaddr(settings.smtp_from or "")[1] or ""
+        domain = addr.split("@")[-1] if "@" in addr else None
+        msg["Message-ID"] = make_msgid(domain=domain) if domain else make_msgid()
+
+
 def _send_sync(settings: Settings, msg: EmailMessage) -> None:
     """Conexión SMTP sincrónica con STARTTLS opcional. Corre bajo to_thread."""
+    _stamp_headers(settings, msg)
     if settings.smtp_use_starttls:
         ctx = ssl.create_default_context()
         if not settings.smtp_ssl_verify:
@@ -932,7 +950,7 @@ async def send_fgt_observation_email(
     </td></tr>
   </table>
 </body></html>"""
-    msg.add_alternative(body_html, subtype="html")
+    msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
@@ -1037,24 +1055,64 @@ async def send_fgt_block_email(
     else:
         ticket_body_html = ""
 
-    body_html = f"""<!doctype html><html><body style="margin:0;background:#f6f8fa;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden;">
-    <tr><td style="background:#b42318;color:#ffffff;padding:18px 24px;font-weight:bold;font-size:15px;">
-      🚫 FortiGate · IP BLOQUEADA (auto-block)
-    </td></tr>
-    <tr><td style="padding:20px 24px 8px;color:#1f2328;font-size:14px;line-height:1.6;">
-      SOC-L1 detectó una alerta IPS de alta confianza y <strong>bloqueó la IP origen</strong>
-      en FortiGate (quarantine con TTL). El ban se libera solo al vencer el TTL.
-    </td></tr>
-    <tr><td style="padding:4px 12px 12px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
-    </td></tr>{ticket_body_html}
-    <tr><td style="background:#f6f8fa;padding:14px 24px;text-align:center;color:#6b7280;font-size:12px;">
-      SOC L1 · ZebraSecurity — FortiGate Auto-Block
-    </td></tr>
-  </table>
-</body></html>"""
-    msg.add_alternative(body_html, subtype="html")
+    # Detalle en el sistema de diseño compartido (ver src/report_theme.py):
+    # tablas para el layout, inline CSS, y el rojo de alerta solo en el encabezado.
+    detalle_rows = "".join(
+        _theme.table_row(
+            [
+                (h(k), "left", f"color:{_theme.C_MUTED};white-space:nowrap;"),
+                (f'<code style="font-size:12px;">{h(v)}</code>', "left", "font-weight:bold;"),
+            ],
+            idx,
+        )
+        for idx, (k, v) in enumerate(
+            (
+                ("IP bloqueada", ip),
+                ("Regla IPS", rule_id or "—"),
+                ("Host / origen", host or "—"),
+                ("Alerta", alert_id),
+                ("TTL del ban", f"{ttl_hours}h"),
+                ("Expira", expires_at or "—"),
+                ("Ticket InvGate", ticket_value),
+            ),
+            1,
+        )
+    )
+
+    cuerpo = _theme.section(
+        "Acci&oacute;n ejecutada",
+        "Bloqueo autom&aacute;tico aplicado en FortiGate",
+        _theme.notice(
+            "SOC-L1 detect&oacute; una alerta IPS de alta confianza y <strong>bloque&oacute; la IP origen</strong> "
+            "en FortiGate mediante quarantine con TTL. El ban se libera solo al vencer el TTL.",
+            accent=_theme.C_CRIT,
+            bg="#fdf1f2",
+        )
+        + _theme.table_open(
+            [("Dato", "150", "left"), ("Valor", None, "left")]
+        )
+        + detalle_rows
+        + _theme.TABLE_CLOSE,
+    )
+
+    if invgate_request_id and invgate_description:
+        cuerpo += _theme.section(
+            f"Contenido registrado en el ticket InvGate #{h(str(invgate_request_id))}",
+            "",
+            f'''<pre style="margin:0;padding:14px 16px;background:#f6f8fa;border:1px solid {_theme.C_BORDER};'''
+            f'''border-radius:8px;color:{_theme.C_TEXT};font-size:12px;line-height:1.5;white-space:pre-wrap;'''
+            f'''font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{h(invgate_description)}</pre>''',
+        )
+
+    body_html = _theme.document(
+        org="Grupo Alemana",
+        title="FortiGate &middot; IP BLOQUEADA",
+        subtitle=f"Auto-block ejecutado &nbsp;&middot;&nbsp; {h(ip)}",
+        body=cuerpo,
+        footer="SOC L1 &middot; ZebraSecurity &mdash; FortiGate Auto-Block",
+        doc_title=f"FortiGate - IP bloqueada {ip}",
+    )
+    msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
