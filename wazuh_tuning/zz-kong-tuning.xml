@@ -1,0 +1,57 @@
+<!--
+  Tuning de ruido Kong — SOC-L1 / 2026-08-26
+  ==========================================
+  Suprime falsos positivos de las reglas de correlación de Kong cuyo origen es el
+  propio banco de pruebas de la POC. Análisis sobre 30 días de wazuh-alerts-*:
+
+    - rule 100241 (high request rate, level 7): 226 hits, **226 desde 172.18.0.1**
+      y CERO desde Internet. 172.18.0.1 es la gateway del bridge de Docker en
+      seg-vs85-prod02: son las pruebas de carga de la POC (3.000 requests a ~10/s
+      y los tests de rate limiting). Es 100% falso positivo.
+    - rule 100207 (enumeración por múltiples 404, level 8): 192 hits, 164 desde
+      Internet (verdaderos positivos: escaneo real tras publicar el gateway el
+      24/08) y 28 desde el bridge de Docker (las mismas pruebas).
+
+  Estrategia: reglas hijas (if_sid) a level 0 que suprimen SOLO cuando el origen es
+  la gateway del bridge de Docker. Todo lo demás —incluido cualquier origen de la
+  LAN— sigue disparando la regla padre con su nivel original.
+
+  POR QUÉ NO SE TOCA 100206 (404, level 4), que es la de más volumen (2.066 hits):
+  es el sustrato de 100207 vía `if_matched_sid`. Bajarla a level 0 se llevaría
+  puesta la detección de enumeración, que es justamente la que aporta valor. Además
+  está en level 4: no notifica a nadie. Si el volumen molesta en el dashboard, eso
+  se filtra en el dashboard, no en el ruleset.
+
+  POR QUÉ SOLO EL BRIDGE DE DOCKER Y NO TODA LA RED PRIVADA: un escaneo o una tasa
+  anómala desde un host interno de la LAN es un indicador legítimo de movimiento
+  lateral. Suprimir 192.168.0.0/16 entero apagaría esa detección para ahorrar cero
+  alertas (hoy la LAN genera 0 en ambas reglas).
+
+  Deploy: ./deploy.sh con la opcion de archivo zz-kong-tuning.xml (ver README-DEPLOY.md).
+  Nota: los comentarios XML no admiten doble guion, por eso la opcion va en prosa.
+-->
+<group name="kong,tuning,">
+
+  <!-- ===== 100241 high request rate (padre level 7) ===== -->
+  <!-- La gateway del bridge de Docker es el origen de las pruebas de carga de la
+       POC. 226 de 226 alertas vinieron de acá. Si en el futuro un contenedor
+       comprometido escanea desde esa misma IP se pierde esta alerta puntual, pero
+       100207 (enumeración) sigue activa para ese caso desde otros orígenes. -->
+  <rule id="100341" level="0">
+    <if_sid>100241</if_sid>
+    <srcip>172.18.0.0/16</srcip>
+    <description>Kong: alta tasa desde el bridge de Docker - prueba de carga de la POC, suprimido (tuning)</description>
+    <group>kong,tuning,</group>
+  </rule>
+
+  <!-- ===== 100207 enumeración por 404 (padre level 8) ===== -->
+  <!-- Mismo origen, mismas pruebas: 28 de 192. Los 164 restantes vienen de Internet
+       y NO se tocan: son escaneo real y es la detección que queremos conservar. -->
+  <rule id="100307" level="0">
+    <if_sid>100207</if_sid>
+    <srcip>172.18.0.0/16</srcip>
+    <description>Kong: enumeracion desde el bridge de Docker - prueba de la POC, suprimido (tuning)</description>
+    <group>kong,tuning,</group>
+  </rule>
+
+</group>
