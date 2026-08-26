@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — Deploy del tuning de reglas AD de Wazuh (100123 DCSync / 100126 audit policy).
+# deploy.sh — Deploy de un tuning de reglas de Wazuh (elegido con TUNING_FILE).
 #
-# Copia custom-ad-tuning.xml a la ruleset del manager, VALIDA el ruleset antes de aplicar
+# Copia el XML a la ruleset del manager, VALIDA el ruleset antes de aplicar
 # (si no valida, NO reinicia y revierte solo), reinicia wazuh-manager y verifica.
 #
 # Uso:
@@ -106,7 +106,7 @@ do_deploy(){
     err "Falló la validación con el tuning nuevo. Revirtiendo ..."
     rm -f "$DEST_FILE"
     validate_ruleset && ok "Rollback OK, ruleset vuelve a validar." || err "OJO: ruleset sigue sin validar tras rollback."
-    die "Deploy abortado (sin restart). Revisá custom-ad-tuning.xml."
+    die "Deploy abortado (sin restart). Revisá $TUNING_FILE."
   fi
 
   # Restart. Si el manager no levanta → rollback + restart.
@@ -133,18 +133,37 @@ do_rollback(){
   fi
 }
 
+# La verificación depende de QUÉ tuning se desplegó: decirle a alguien que valide
+# 100123 después de desplegar el de Kong lo manda a mirar la regla equivocada.
 post_verify(){
-  cat <<EOF
-
-${GRN}=== Verificación post-deploy ===${CLR}
+  printf '\n%s=== Verificación post-deploy (%s) ===%s\n' "$GRN" "$TUNING_FILE" "$CLR"
+  case "$TUNING_FILE" in
+    zz-custom-ad-tuning.xml)
+      cat <<EOF
 1) Test funcional (pegá un full_log real y mirá el rule.id resultante):
      ${LOGTEST}          # evento MSOL/DC 100123  -> debe dar rule 100223/100224 level 0
                          # evento 100123 de mbaez-adm -> debe seguir en rule 100123 level 12
-2) A las 24-48h, el volumen de 100123/100126 debería desplomarse
-   (chequealo en el dashboard o contra el indexer: rule.id:100123 / rule.id:100126 last 24h).
-
-Revertir en cualquier momento:  sudo $0 --rollback
+2) A las 24-48h el volumen de 100123/100126 debería desplomarse
+   (dashboard o indexer: rule.id:100123 / rule.id:100126 last 24h).
 EOF
+      ;;
+    zz-kong-tuning.xml)
+      cat <<EOF
+1) Test funcional (pegá un full_log real de Kong y mirá el rule.id resultante):
+     ${LOGTEST}          # 404 desde 172.18.0.1 x10 -> 100207 debe quedar en rule 100307 level 0
+                         # 404 desde una IP publica -> debe seguir en rule 100207 level 8
+2) A las 24-48h, contra el indexer:
+     rule.id:100241                      -> deberia quedar en CERO
+     rule.id:100207 y data.srcip:172.18.* -> deberia quedar en CERO
+     rule.id:100207 con srcip publica      -> debe SEGUIR disparando (es la deteccion real)
+   Si 100207 se fue a cero del todo, algo se rompio: revisá el rollback.
+EOF
+      ;;
+    *)
+      echo "1) Verificá a mano las reglas que toca $TUNING_FILE."
+      ;;
+  esac
+  printf '\nRevertir en cualquier momento:  sudo TUNING_FILE=%s %s --rollback\n' "$TUNING_FILE" "$0"
 }
 
 # ---- Main -----------------------------------------------------------------
