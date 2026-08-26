@@ -488,7 +488,7 @@ def main() -> int:
             cfg = json.load(fh)
         recipients = args.to or cfg.get("to", [])
         n = len(issues)
-        subject = f"[Wazuh SIEM] {n} equipo(s) dejaron de reportar vulnerabilidades"
+        subject = t.subject("VULNS", "SIN DATOS", f"{n} equipos sin reportar")
         ok, info = t.send_report(
             cfg, html=html, plain=render_plain(issues, resueltos, len(agents)),
             subject=subject, recipients=recipients,

@@ -88,7 +88,37 @@ y 137 hotfixes, y todos informan su build de SO. La configuración
 (`<vulnerability-detection><enabled>yes`, feed cada 60m) está activa. El que no produce
 estado es el detector.
 
-Remediación sugerida (root):
+### Descartado: reiniciar agentes y manager (2026-08-17)
+
+Se ejecutaron ambos y **ninguno resolvió el problema**:
+
+1. Reinicio de los 8 agentes por API (`PUT /agents/restart`) — volvieron activos y
+   re-escanearon a los pocos minutos. Sin cambios en los hallazgos.
+2. `systemctl restart wazuh-manager` — el módulo arrancó limpio, sin errores:
+   `14:51:46 Starting vulnerability_scanner module` / `14:52:18 Vulnerability scanner
+   module started`. A los 30 minutos, los 4 hosts seguían en cero.
+
+### Aislamiento definitivo
+
+Comparando índices por agente queda claro que el inventario llega completo y lo que
+falla es la generación de hallazgos:
+
+| Agente | inventory-packages | inventory-hotfixes | vulnerabilities |
+|---|---|---|---|
+| SRVWSUS | 59 | 46 | **0** |
+| SRVIIS | 13 | **137** | **0** |
+| SRVDCVELEZ01 | 5 | 36 | **0** |
+| SRVFILE2401 | 2 | 78 | **0** |
+| SRVDC2 *(sano)* | 11 | 26 | 706 |
+| SRVSERVICIOS *(sano)* | 12 | 28 | 905 |
+
+SRVIIS tiene más hotfixes que cualquier host sano y produce cero. No hay correlación
+con la cantidad de inventario, ni con la versión de SO, ni con la del agente, ni con la
+fecha de alta, ni con el grupo. El log no registra ningún error del módulo.
+
+Con esto, el caso está listo para escalar a soporte de Wazuh con evidencia concreta.
+
+Remediación siguiente, aún no ejecutada (root):
 
 ```bash
 # 1. Ver si el módulo reporta errores (hoy el log está en DEBUG y es ilegible)

@@ -844,7 +844,7 @@ def render_compliance_fragment(comp: dict, prev_file: str, host_limit: int = 12)
     if gone:
         lista = escape(", ".join(gone))
         gone_note = f"""
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#fff8e6" style="background-color:#fff8e6;border-left:4px solid {C_HIGH};margin-bottom:14px;border-collapse:separate;border-radius:8px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#fff8e6" style="background-color:#fff8e6;border-left:4px solid {C_HIGH};border-collapse:separate;border-radius:8px;">
         <tr>
           <td style="padding:10px 12px;font-family:{FONT};font-size:12px;line-height:17px;color:{C_TEXT};">
             <strong>Dej&oacute; de reportar:</strong> {lista}.
@@ -855,23 +855,13 @@ def render_compliance_fragment(comp: dict, prev_file: str, host_limit: int = 12)
       </table>"""
 
     parts = [f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};margin-bottom:16px;border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
   <tr>
-    <td style="padding:18px;font-family:{FONT};">
-      <div style="font-family:{FONT};font-size:15px;font-weight:bold;color:{C_TEXT};padding-bottom:4px;">Cumplimiento de parches por host</div>
-      <div style="font-family:{FONT};font-size:12px;color:{C_MUTED};padding-bottom:14px;">Evoluci&oacute;n semana contra semana &middot; {prev_label}</div>
+    <td style="padding:20px 22px;font-family:{FONT};">
+      <div style="font-family:{FONT};font-size:15px;line-height:20px;font-weight:bold;color:{_theme.C_INK};padding-bottom:3px;">Cumplimiento de parches por host</div>
+      <div style="font-family:{FONT};font-size:12px;line-height:17px;color:{C_MUTED};padding-bottom:16px;">Evoluci&oacute;n semana contra semana &middot; {prev_label}</div>
 {gone_note}
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-          <td class="vp-metric" width="34%" valign="top" style="padding:0 5px 10px 0;">{cards[0]}</td>
-          <td class="vp-metric" width="33%" valign="top" style="padding:0 5px 10px 5px;">{cards[1]}</td>
-          <td class="vp-metric" width="33%" valign="top" style="padding:0 0 10px 5px;">{cards[2]}</td>
-        </tr>
-        <tr>
-          <td class="vp-metric" width="34%" valign="top" style="padding:0 5px 0 0;">{cards[3]}</td>
-          <td class="vp-metric" colspan="2" valign="top" style="padding:0 0 0 5px;">{cards[4]}</td>
-        </tr>
-      </table>
+{_theme.metric_row(cards)}
     </td>
   </tr>
 </table>
@@ -883,16 +873,16 @@ def render_compliance_fragment(comp: dict, prev_file: str, host_limit: int = 12)
     movers = movers[:host_limit]
 
     if movers:
-        th = f"font-family:{FONT};font-size:11px;font-weight:bold;color:#ffffff;padding:8px 5px;text-align:left;"
+        th = f"font-family:{FONT};font-size:11px;font-weight:bold;color:#ffffff;padding:10px 9px;letter-spacing:0.3px;text-align:left;"
         td_base = (
-            f"font-family:{FONT};font-size:12px;line-height:16px;color:{C_TEXT};"
-            f"padding:7px 5px;border-bottom:1px solid #eef2f5;vertical-align:top;"
+            f"font-family:{FONT};font-size:12px;line-height:18px;color:{C_TEXT};"
+            f"padding:9px 9px;border-bottom:1px solid {_theme.C_SOFT};vertical-align:top;"
         )
         parts.append(f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};margin-bottom:16px;border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
   <tr>
-    <td style="padding:18px;font-family:{FONT};">
-      <div style="font-family:{FONT};font-size:15px;font-weight:bold;color:{C_TEXT};padding-bottom:4px;">Hosts con mayor movimiento</div>
+    <td style="padding:20px 22px;font-family:{FONT};">
+      <div style="font-family:{FONT};font-size:15px;line-height:20px;font-weight:bold;color:{_theme.C_INK};padding-bottom:3px;">Hosts con mayor movimiento</div>
       <div style="font-family:{FONT};font-size:12px;color:{C_MUTED};padding-bottom:12px;">Cr&iacute;ticas + altas, respecto de la semana anterior</div>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
         <tr bgcolor="{C_GREEN}" style="background-color:{C_GREEN};">
@@ -925,7 +915,7 @@ def render_compliance_fragment(comp: dict, prev_file: str, host_limit: int = 12)
   </tr>
 </table>
 """)
-    return "".join(parts)
+    return _theme.spacer(16).join(parts)
 
 
 def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMIT) -> str:
@@ -941,7 +931,7 @@ def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMI
     baseline_note = ""
     if summary.get("baseline"):
         baseline_note = f"""
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f6f8" style="background-color:{C_BG};border-left:4px solid {C_MUTED};margin-bottom:14px;border-collapse:separate;border-radius:8px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f4f6f8" style="background-color:{C_BG};border-left:4px solid {C_MUTED};border-collapse:separate;border-radius:8px;">
         <tr>
           <td style="padding:10px 12px;font-family:{FONT};font-size:12px;line-height:17px;color:{C_MUTED};">
             <strong style="color:{C_TEXT};">Primera corrida:</strong> se estableci&oacute; la l&iacute;nea base.
@@ -990,23 +980,13 @@ def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMI
     ]
 
     parts.append(f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};margin-bottom:16px;border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
   <tr>
-    <td style="padding:18px;font-family:{FONT};">
-      <div style="font-family:{FONT};font-size:15px;font-weight:bold;color:{C_TEXT};padding-bottom:4px;">Priorizaci&oacute;n por explotabilidad real</div>
-      <div style="font-family:{FONT};font-size:12px;color:{C_MUTED};padding-bottom:14px;">EPSS (FIRST.org) + cat&aacute;logo CISA KEV</div>
+    <td style="padding:20px 22px;font-family:{FONT};">
+      <div style="font-family:{FONT};font-size:15px;line-height:20px;font-weight:bold;color:{_theme.C_INK};padding-bottom:3px;">Priorizaci&oacute;n por explotabilidad real</div>
+      <div style="font-family:{FONT};font-size:12px;line-height:17px;color:{C_MUTED};padding-bottom:16px;">EPSS (FIRST.org) + cat&aacute;logo CISA KEV</div>
 {baseline_note}
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-          <td class="vp-metric" width="34%" valign="top" style="padding:0 5px 10px 0;">{cards[0]}</td>
-          <td class="vp-metric" width="33%" valign="top" style="padding:0 5px 10px 5px;">{cards[1]}</td>
-          <td class="vp-metric" width="33%" valign="top" style="padding:0 0 10px 5px;">{cards[2]}</td>
-        </tr>
-        <tr>
-          <td class="vp-metric" width="34%" valign="top" style="padding:0 5px 0 0;">{cards[3]}</td>
-          <td class="vp-metric" colspan="2" valign="top" style="padding:0 0 0 5px;">{cards[4]}</td>
-        </tr>
-      </table>
+{_theme.metric_row(cards)}
     </td>
   </tr>
 </table>
@@ -1018,10 +998,10 @@ def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMI
         f"padding:8px 5px;text-align:left;"
     )
     parts.append(f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};margin-bottom:16px;border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
   <tr>
-    <td style="padding:18px;font-family:{FONT};">
-      <div style="font-family:{FONT};font-size:15px;font-weight:bold;color:{C_TEXT};padding-bottom:4px;">Top {len(top)} CVEs a parchear primero</div>
+    <td style="padding:20px 22px;font-family:{FONT};">
+      <div style="font-family:{FONT};font-size:15px;line-height:20px;font-weight:bold;color:{_theme.C_INK};padding-bottom:3px;">Top {len(top)} CVEs a parchear primero</div>
       <div style="font-family:{FONT};font-size:12px;color:{C_MUTED};padding-bottom:12px;">Ordenados por score de prioridad, de mayor a menor</div>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
         <tr bgcolor="{C_GREEN}" style="background-color:{C_GREEN};">
@@ -1087,9 +1067,9 @@ def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMI
     # ---- Sección 3: metodología + privacidad -------------------------------
     p = f"font-family:{FONT};font-size:12px;line-height:18px;color:{C_MUTED};margin:0;"
     parts.append(f"""
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};margin-bottom:16px;border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid {C_BORDER};border-collapse:separate;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
   <tr>
-    <td style="padding:18px;font-family:{FONT};">
+    <td style="padding:20px 22px;font-family:{FONT};">
       <div style="font-family:{FONT};font-size:14px;font-weight:bold;color:{C_TEXT};padding-bottom:10px;">C&oacute;mo leer este reporte</div>
       <p style="{p}padding-bottom:8px;">
         <strong style="color:{C_TEXT};">C&aacute;lculo de la prioridad:</strong>
@@ -1112,7 +1092,7 @@ def render_fragment(summary: dict, groups: list[dict], top_limit: int = TOP_LIMI
   </tr>
 </table>
 """)
-    return "".join(parts)
+    return _theme.spacer(16).join(parts)
 
 
 def render_plain_coverage(cov: dict) -> list[str]:
@@ -1241,58 +1221,38 @@ def render_email(
         if comp
         else "Priorizaci&oacute;n de Vulnerabilidades por Explotabilidad Real"
     )
-    return f"""<!DOCTYPE html>
-<html lang="es" xmlns="http://www.w3.org/1999/xhtml">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="x-apple-disable-message-reformatting">
-<title>Priorizaci&oacute;n de Vulnerabilidades - {escape(ORG_NAME)}</title>{CSS}</head>
-<body bgcolor="{C_BG}" style="margin:0;padding:0;background-color:{C_BG};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{C_BG}" style="background-color:{C_BG};">
-  <tr>
-    <td align="center" style="padding:20px 10px;">
+    # Badge del header: lo manda el peor indicador del parque, no el total de
+    # hallazgos. Un parque con 3 CVEs en el catálogo KEV es CRITICO aunque el
+    # número global haya bajado.
+    if not summary.get("total_active"):
+        badge_kind = "sin_datos"
+    elif summary.get("kev_count"):
+        badge_kind = "critico"
+    elif summary.get("epss_high_count") or summary.get("priority_high_count"):
+        badge_kind = "atencion"
+    else:
+        badge_kind = "ok"
 
-      <table role="presentation" class="vp-shell" width="700" cellpadding="0" cellspacing="0" border="0" align="center" style="width:700px;max-width:700px;">
-
-        <!-- Encabezado -->
-        <tr>
-          <td bgcolor="{C_GREEN}" align="center" style="background-color:{C_GREEN};padding:22px 24px;border-radius:12px 12px 0 0;">
-            <div style="font-family:{FONT};font-size:12px;font-weight:bold;color:#ffffff;padding-bottom:8px;">{escape(ORG_NAME.upper())} &nbsp;&middot;&nbsp; GERENCIA TECNOLOG&Iacute;A</div>
-            <div style="font-family:{FONT};font-size:19px;line-height:24px;font-weight:bold;color:#ffffff;">{titulo}</div>
-          </td>
-        </tr>
-        <tr>
-          <td bgcolor="{C_GREEN_DK}" align="center" style="background-color:{C_GREEN_DK};padding:9px 24px;border-radius:0 0 12px 12px;">
-            <div style="font-family:{FONT};font-size:12px;color:#ffffff;">{fecha} &nbsp;&middot;&nbsp; {_num(summary['total_active'])} hallazgos activos en {_num(summary['hosts_affected'])} hosts</div>
-          </td>
-        </tr>
-
-        <!-- Contenido -->
-        <tr>
-          <td style="padding:16px 0 0 0;">
-            {aviso}{compliance}{render_fragment(summary, groups, top_limit)}
-          </td>
-        </tr>
-
-        <!-- Pie -->
-        <tr>
-          <td align="center" style="padding:4px 12px 8px 12px;">
-            <div style="font-family:{FONT};font-size:11px;line-height:16px;color:{C_MUTED};">
-              Generado autom&aacute;ticamente por Wazuh SIEM<br>
-              Fuentes: Wazuh Vulnerability Detector &middot; FIRST EPSS &middot; CISA KEV<br>
-              Run ID: {escape(summary['run_id'])}
-            </div>
-          </td>
-        </tr>
-
-      </table>
-
-    </td>
-  </tr>
-</table>
-</body></html>"""
+    return _theme.document(
+        org=ORG_NAME,
+        title=titulo,
+        subtitle=(
+            f"{fecha} &nbsp;&middot;&nbsp; {_num(summary['total_active'])} hallazgos "
+            f"activos en {_num(summary['hosts_affected'])} hosts"
+        ),
+        body=f"{aviso}{compliance}{render_fragment(summary, groups, top_limit)}",
+        footer=(
+            "Generado autom&aacute;ticamente por Wazuh SIEM<br>"
+            "Fuentes: Wazuh Vulnerability Detector &middot; FIRST EPSS &middot; CISA KEV<br>"
+            f"Run ID: {escape(summary['run_id'])}"
+        ),
+        doc_title=f"Priorizaci&oacute;n de Vulnerabilidades - {ORG_NAME}",
+        badge_kind=badge_kind,
+        preheader=(
+            f"{_num(summary['total_active'])} hallazgos activos &middot; "
+            f"{_num(summary.get('kev_count', 0))} explotadas in-the-wild"
+        ),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1448,8 +1408,10 @@ def main() -> int:
         if not recipients:
             logger.error("No hay destinatarios")
             return 1
-        subject = args.subject or (
-            f"[Wazuh SIEM] Priorización de Vulnerabilidades - {datetime.now().strftime('%d/%m/%Y')}"
+        subject = args.subject or _theme.subject(
+            "VULNS", "PRIORIDAD",
+            f"{summary['priority_high_count']} explotables de {summary['total_active']}",
+            datetime.now().strftime("%d/%m"),
         )
         try:
             plain = render_plain(summary, groups, args.top, comp=comp_arg, cov=cov)

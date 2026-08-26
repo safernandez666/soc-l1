@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src import report_theme
 from src.agents.narrator import NarratorPlan, ProposedAction
 from src.config import Settings
 from src.mailer import (
@@ -133,15 +134,35 @@ def test_build_message_has_multipart_and_correct_headers(settings, alert, plan) 
     assert "text/html" in types
 
 
-def test_subject_truncates_long_titles(settings, alert) -> None:
+def test_subject_fits_inbox_budget(settings, alert) -> None:
+    """El asunto se recorta al presupuesto de bandeja, no a un slice fijo.
+
+    Outlook corta la lista cerca de los 72 caracteres. Antes el titulo se
+    cortaba a 60 fijos y despues se le concatenaba host y ticket, asi que el
+    asunto igual se pasaba y lo que se perdia era la cola -- justo el ticket.
+    """
     long_title_alert = alert.model_copy(update={"title": "A" * 200})
     plan = NarratorPlan(
         executive_summary="s", risk_level="low", actions=[], rationale="r"
     )
     msg = _build_message(settings, long_title_alert, plan, "TKN")
-    # Title sliced a 60 chars
-    assert "A" * 60 in msg["Subject"]
-    assert "A" * 61 not in msg["Subject"]
+    assert len(msg["Subject"]) <= report_theme.SUBJECT_BUDGET
+    # El recorte cae sobre el titulo; prefijo y estado quedan intactos porque
+    # son lo que filtran las reglas de bandeja.
+    assert msg["Subject"].startswith("[SOC L1][INCIDENTE] LOW \u00b7 ")
+    assert "\u2026" in msg["Subject"]
+    assert "desktop-1234" in msg["Subject"]
+
+
+def test_subject_no_gira_al_vacio_con_campos_minimos() -> None:
+    """El recorte corta el loop cuando ya no puede achicar nada mas.
+
+    Con campos que no bajan de `_MIN_CAMPO` no hay forma de entrar en el
+    presupuesto: la funcion tiene que devolver igual, no colgarse.
+    """
+    s = report_theme.subject("INCIDENTE", "CRITICAL", "abcdefghijkl", "mnopqrstuvwx", budget=20)
+    assert s.startswith("[SOC L1][INCIDENTE] CRITICAL")
+    assert len(s) > 20  # no entra, pero devolvio
 
 
 @pytest.mark.asyncio
@@ -232,8 +253,18 @@ def test_closure_subject_distinguishes_decision(settings, alert, plan) -> None:
         execution_results=[], decided_by_ip="1.2.3.4",
         decided_at="2026-06-06T14:05:00+00:00", executed_at="2026-06-06T14:05:02+00:00",
     )
-    assert "CERRADO: APROBADO" in msg["Subject"]
-    assert "desktop-1234" in msg["Subject"]
+    # "CERRADO" es el ESTADO (posicion fija, filtrable) y la decision el
+    # contexto. El host NO va: en el cierre el titulo ya lo identifica y
+    # sacarlo es lo que deja entrar al ticket dentro del presupuesto.
+    assert msg["Subject"].startswith("[SOC L1][INCIDENTE] CERRADO \u00b7 APROBADO \u00b7 ")
+    assert len(msg["Subject"]) <= report_theme.SUBJECT_BUDGET
+
+    rechazado = _build_closure_message(
+        settings, alert, plan, decision="rejected", timeline_events=TIMELINE_EVENTS,
+        execution_results=[], decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00", executed_at=None,
+    )
+    assert "RECHAZADO" in rechazado["Subject"]
 
 
 def test_closure_html_escapes_user_data(alert) -> None:

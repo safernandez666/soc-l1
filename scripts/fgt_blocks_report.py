@@ -429,10 +429,10 @@ def main() -> int:
         if not recipients:
             logger.error("No hay destinatarios")
             return 1
-        subject = args.subject or (
-            f"[Wazuh SIEM] Reporte Semanal de Bloqueos Autom&aacute;ticos - "
-            f"{start.strftime('%d/%m/%Y')}"
-        ).replace("&aacute;", "á")
+        subject = args.subject or t.subject(
+            "BLOQUEOS", "SEMANAL", f"{st['blocked']} bloqueos",
+            f"{start.strftime('%d/%m')}-{end.strftime('%d/%m')}",
+        )
         ok, info = t.send_report(
             cfg, html=html, plain=render_plain(st, start, end),
             subject=subject, recipients=recipients, debug=args.smtp_debug,
