@@ -4,7 +4,7 @@ Hay dos tunings en este directorio. El script es el mismo; se elige con `TUNING_
 
 | Archivo | Qué silencia | Estado |
 |---|---|---|
-| `zz-custom-ad-tuning.xml` (default) | 100123 DCSync y 100126 audit policy | staged, sin deploy |
+| `zz-custom-ad-tuning.xml` (default) | 100123 DCSync y 100126 audit policy | ✅ DESPLEGADO 2026-07-21 |
 | `zz-kong-tuning.xml` | 100241 y 100207 cuando el origen es el bridge de Docker | staged, sin deploy |
 
 ```bash
@@ -21,8 +21,9 @@ Sin `TUNING_FILE` se despliega el de AD, como estaba documentado.
 `rule 100126` (audit policy changed), manteniendo la detección real. Ver cabecera de
 `custom-ad-tuning.xml` para el detalle y los datos (90 días).
 
-**Estado:** archivo staged y validado (XML bien formado). **Falta deploy** — requiere
-root (copiar a la ruleset + restart del manager). No se aplicó todavía.
+**Estado:** ✅ desplegado el 2026-07-21 en `/var/ossec/etc/rules/zz-custom-ad-tuning.xml`
+(verificado 2026-08-26: el archivo en la ruleset es idéntico al de acá). El texto
+anterior decía que faltaba el deploy y estaba desactualizado.
 
 `ossec.conf` tiene `<rule_dir>etc/rules</rule_dir>`, así que **todo `.xml` en
 `/var/ossec/etc/rules/` se carga automáticamente en el restart** — no hace falta tocar
