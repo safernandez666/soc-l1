@@ -153,8 +153,9 @@ function Body({ d }: { d: FgtObservations }) {
       {s.total_observaciones === 0 && (
         <Card>
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            Todavía sin observaciones. Aplicá el ruteo de las reglas FortiGate IPS a SOC-L1
-            en <code className="text-foreground">ossec.conf</code> y reiniciá wazuh-manager
+            Todavía sin observaciones. Aplicá el ruteo de las reglas FortiGate IPS a zSOC
+            (<code className="text-foreground">custom-soc-l1</code>) en{" "}
+            <code className="text-foreground">ossec.conf</code> y reiniciá wazuh-manager
             (ver <code className="text-foreground">docs/fortigate-autoblock-runbook.md</code>).
           </CardContent>
         </Card>

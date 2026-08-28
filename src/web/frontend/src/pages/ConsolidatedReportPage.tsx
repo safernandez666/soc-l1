@@ -86,7 +86,7 @@ export function ConsolidatedReportPage() {
                   <img src="/ui/static/zebra-logo.svg" alt="ZebraSecurity" className="h-10 w-auto" />
                   <div className="text-right">
                     <div className="text-sm font-semibold">Informe consolidado</div>
-                    <div className="text-xs text-zinc-400">SOC-L1 · ZebraSecurity</div>
+                    <div className="text-xs text-zinc-400">zSOC · ZebraSecurity</div>
                   </div>
                 </header>
 
@@ -174,7 +174,7 @@ export function ConsolidatedReportPage() {
                   )}
 
                   <footer className="mt-8 border-t border-zinc-200 pt-3 text-[11px] text-zinc-400">
-                    Generado por SOC-L1 · ZebraSecurity — {new Date().toLocaleString("es-AR")}
+                    Generado por zSOC · ZebraSecurity — {new Date().toLocaleString("es-AR")}
                   </footer>
                 </div>
               </>

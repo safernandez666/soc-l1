@@ -156,7 +156,7 @@ export function Layout() {
           alt="ZebraSecurity"
           className="h-7 w-auto"
         />
-        <span className="text-sm font-semibold">SOC-L1</span>
+        <span className="text-sm font-semibold">zSOC</span>
         {mode && (
           <span className="ml-auto">
             <ModeChip mode={mode} />
@@ -189,7 +189,7 @@ export function Layout() {
             className="h-9 w-auto shrink-0"
           />
           <div className={`leading-tight ${hideOnCollapse}`}>
-            <div className="text-base font-semibold">SOC-L1</div>
+            <div className="text-base font-semibold">zSOC</div>
             <div className="text-[11px] tracking-wide text-muted-foreground">
               Zebra<span className="font-bold text-foreground">Security</span>
             </div>

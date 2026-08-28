@@ -102,7 +102,7 @@ function Body({ d }: { d: InvgateReconcile }) {
                     <TableHead>Caso</TableHead>
                     <TableHead>Título</TableHead>
                     <TableHead>Host</TableHead>
-                    <TableHead>Estado SOC-L1</TableHead>
+                    <TableHead>Estado zSOC</TableHead>
                     <TableHead>Ticket</TableHead>
                     <TableHead>Estado InvGate</TableHead>
                     <TableHead>Verificado</TableHead>
