@@ -23,42 +23,78 @@ const FILTERS: [string, string][] = [
   ...STATUS_ORDER.map((s) => [s, statusLabelPlural(s)] as [string, string]),
 ]
 
+// Ventanas de tiempo — espejo de router._QUEUE_RANGES. El backend recorta por
+// created_at, así que la paginación y el total ya vienen filtrados.
+const RANGES: [string, string][] = [
+  ["24h", "Últimas 24 h"],
+  ["7d", "7 días"],
+  ["30d", "30 días"],
+  ["", "Todo"],
+]
+
 export function QueuePage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const status = params.get("status") || ""
+  const since = params.get("since") || ""
   const page = Math.max(1, Number(params.get("page") || "1"))
 
-  const state = useFetch(() => api.queue(status || null, page), [status, page])
+  const state = useFetch(
+    () => api.queue(status || null, page, since || null),
+    [status, page, since],
+  )
 
-  const setFilter = (val: string) => {
-    const next = new URLSearchParams()
-    if (val) next.set("status", val)
-    setParams(next)
+  // Cambiar cualquier filtro vuelve a la página 1: el offset viejo puede quedar
+  // fuera de rango con el total nuevo.
+  const apply = (next: { status?: string; since?: string; page?: number }) => {
+    const qs = new URLSearchParams()
+    const st = next.status ?? status
+    const sc = next.since ?? since
+    if (st) qs.set("status", st)
+    if (sc) qs.set("since", sc)
+    if (next.page && next.page > 1) qs.set("page", String(next.page))
+    setParams(qs)
   }
-  const goPage = (p: number) => {
-    const next = new URLSearchParams()
-    if (status) next.set("status", status)
-    next.set("page", String(p))
-    setParams(next)
-  }
+  const setFilter = (val: string) => apply({ status: val })
+  const setRange = (val: string) => apply({ since: val })
+  const goPage = (p: number) => apply({ page: p })
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap gap-2">
-        {FILTERS.map(([val, label]) => (
-          <button
-            key={val}
-            onClick={() => setFilter(val)}
-            className={`rounded-full border px-3 py-1 text-sm transition-colors ${
-              status === val
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {FILTERS.map(([val, label]) => (
+            <button
+              key={val}
+              onClick={() => setFilter(val)}
+              className={`rounded-full border px-3 py-1 text-sm transition-colors ${
+                status === val
+                  ? "border-primary bg-primary/10 text-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Picker de tiempo: segmentado, separado de los chips de estado para
+            que se lea como otra dimensión de filtro y no como un estado más. */}
+        <div className="flex items-center gap-1 rounded-full border border-border p-0.5">
+          {RANGES.map(([val, label]) => (
+            <button
+              key={val || "all"}
+              onClick={() => setRange(val)}
+              className={`rounded-full px-3 py-1 text-sm transition-colors ${
+                since === val
+                  ? "bg-primary/15 text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <StateView state={state}>
@@ -72,11 +108,11 @@ export function QueuePage() {
                   <p className="text-sm text-muted-foreground">
                     No hay casos para este filtro.
                   </p>
-                  {status && (
+                  {(status || since) && (
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setFilter("")}
+                      onClick={() => apply({ status: "", since: "" })}
                     >
                       Limpiar filtros
                     </Button>

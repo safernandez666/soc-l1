@@ -133,12 +133,16 @@ export interface InvgateReconcile {
   last_checked: string | null
 }
 
+// Ventanas del picker de tiempo de la cola (espejo de router._QUEUE_RANGES).
+export type QueueRange = "" | "24h" | "7d" | "30d"
+
 export interface QueuePage {
   cases: CaseSummary[]
   total: number
   page: number
   per_page: number
   status: StatusKey | null
+  since: QueueRange
 }
 
 // ===== Detalle de caso (espejo de queries._get_case_sync) =====
@@ -365,9 +369,10 @@ function reportQs(f: ReportFilters): string {
 export const api = {
   session: () => get<Session>("/session"),
   metrics: () => get<Metrics>("/metrics"),
-  queue: (status: string | null, page: number) => {
+  queue: (status: string | null, page: number, since?: string | null) => {
     const qs = new URLSearchParams()
     if (status) qs.set("status", status)
+    if (since) qs.set("since", since)
     qs.set("page", String(page))
     return get<QueuePage>(`/queue?${qs.toString()}`)
   },

@@ -12,6 +12,7 @@ y react-router resuelve /ui/queue, /ui/case/{id}, /ui/kpis client-side.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -140,6 +141,26 @@ async def logout() -> Response:
 
 _QUEUE_STATUSES = {"pending", "approved", "executed", "rejected", "expired"}
 _QUEUE_PER_PAGE = 50
+
+# Ventanas del picker de tiempo de la cola. La clave viaja en la query string y
+# el SPA la muestra tal cual; "" (o cualquier valor no listado) = sin recorte.
+_QUEUE_RANGES: dict[str, timedelta] = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+
+
+def _range_since_iso(since: str | None) -> tuple[str, str]:
+    """(clave normalizada, corte ISO8601 UTC) para la ventana pedida.
+
+    created_at se guarda como ISO con offset +00:00, así que el corte se compara
+    textualmente contra ese mismo formato."""
+    key = since if since in _QUEUE_RANGES else ""
+    if not key:
+        return ("", "")
+    cutoff = datetime.now(timezone.utc) - _QUEUE_RANGES[key]
+    return (key, cutoff.isoformat())
 
 
 def _api_unauthorized() -> JSONResponse:
@@ -281,18 +302,24 @@ async def api_kpis(request: Request, settings: SettingsDep) -> Response:
 
 @router.get("/api/queue")
 async def api_queue(
-    request: Request, settings: SettingsDep, status: str | None = None, page: int = 1
+    request: Request,
+    settings: SettingsDep,
+    status: str | None = None,
+    page: int = 1,
+    since: str | None = None,
 ) -> Response:
     if not _authed(request, settings):
         return _api_unauthorized()
     page = max(1, page)
     status = status if status in _QUEUE_STATUSES else None
+    since_key, since_iso = _range_since_iso(since)
     cases, total = await queries.list_cases(
         settings.state_db_path,
         status=status,
         limit=_QUEUE_PER_PAGE,
         offset=(page - 1) * _QUEUE_PER_PAGE,
         baseline_iso=settings.metrics_baseline_at,
+        since_iso=since_iso,
     )
     return JSONResponse(
         {
@@ -301,6 +328,7 @@ async def api_queue(
             "page": page,
             "per_page": _QUEUE_PER_PAGE,
             "status": status,
+            "since": since_key,
         }
     )
 

@@ -450,7 +450,12 @@ async def _fortigate_blocks(settings: Settings) -> dict[str, Any]:
 
 
 def _list_cases_sync(
-    db_path: str, status: str | None, limit: int, offset: int, baseline_iso: str = ""
+    db_path: str,
+    status: str | None,
+    limit: int,
+    offset: int,
+    baseline_iso: str = "",
+    since_iso: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -459,7 +464,8 @@ def _list_cases_sync(
     except sqlite3.OperationalError:
         return ([], 0)
 
-    # WHERE dinámico: status (opcional) + baseline de medición (opcional).
+    # WHERE dinámico: status (opcional) + baseline de medición (opcional) +
+    # ventana de tiempo elegida en la cola (opcional).
     # created_at se guarda en ISO8601 con offset uniforme, así que el >= textual
     # equivale al cronológico; las filas con created_at NULL quedan excluidas bajo baseline.
     conds: list[str] = []
@@ -470,6 +476,9 @@ def _list_cases_sync(
     if baseline_iso:
         conds.append("created_at >= ?")
         params.append(baseline_iso)
+    if since_iso:
+        conds.append("created_at >= ?")
+        params.append(since_iso)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
 
     with conn:
@@ -694,9 +703,10 @@ async def list_cases(
     limit: int = 50,
     offset: int = 0,
     baseline_iso: str = "",
+    since_iso: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     return await asyncio.to_thread(
-        _list_cases_sync, db_path, status, limit, offset, baseline_iso
+        _list_cases_sync, db_path, status, limit, offset, baseline_iso, since_iso
     )
 
 
