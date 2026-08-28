@@ -315,3 +315,75 @@ async def test_closure_invokes_smtp_when_configured(settings, alert, plan) -> No
             executed_at="2026-06-06T14:05:02+00:00",
         )
         mocked.assert_called_once()
+
+
+# ===== Alertas de correo (Defender for Office 365) =====
+
+
+@pytest.fixture
+def o365_alert():
+    raw = json.loads((FIXTURES / "defender_o365_malicious_url.json").read_text())
+    return normalize(raw)
+
+
+@pytest.fixture
+def o365_plan() -> NarratorPlan:
+    return NarratorPlan(
+        executive_summary="Dos buzones recibieron un correo con URL maliciosa.",
+        risk_level="low",
+        actions=[
+            ProposedAction(
+                type="notify_only",
+                target="jperez, mgomez",
+                justification="Defender ya removió los mensajes.",
+            )
+        ],
+        rationale="Phishing removido post-entrega.",
+    )
+
+
+def test_o365_html_has_email_section(o365_alert, o365_plan) -> None:
+    """El correo trae asunto, destinatarios, remitente y URL.
+
+    Regresión: estas alertas llegaban con "Información principal" vacía porque
+    todo el template colgaba de device.hostname / files, que en O365 no existen.
+    """
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "Correos involucrados (2)" in html
+    assert "jperez@contoso.com" in html
+    assert "mgomez@contoso.com" in html
+    assert "abre.ai/rw8y" in html
+    assert "200.41.220.50" in html
+    assert "Actualiz" in html  # el asunto, escapado
+
+
+def test_o365_html_pivot_is_subject_not_none(o365_alert, o365_plan) -> None:
+    """Sin host, el titular es el asunto + buzones (antes decía "-")."""
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "Buzones" in html
+    assert "<strong>-</strong>" not in html
+
+
+def test_o365_html_shows_vendor_mitre(o365_alert, o365_plan) -> None:
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "T1566.002" in html
+
+
+def test_o365_text_body_has_emails(o365_alert, o365_plan) -> None:
+    txt = _build_text_body(o365_alert, o365_plan, "http://x/a", "http://x/r")
+    assert "CORREOS INVOLUCRADOS (2)" in txt
+    assert "jperez@contoso.com" in txt
+    assert "abre.ai/rw8y" in txt
+    assert "(sin host)" not in txt
+
+
+def test_endpoint_email_has_no_email_section(alert, plan) -> None:
+    """Las alertas de endpoint siguen igual: sin sección de correos."""
+    html = _build_html_body(alert, plan, "http://x/a", "http://x/r", ttl_hours=24)
+    assert "Correos involucrados" not in html

@@ -440,6 +440,11 @@ SI RECIBÍS `{"_error": "MAX_RETRIES_EXCEEDED", ...}` en una tool response:
 PROCEDIMIENTO OBLIGATORIO (en este orden):
 1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam` \
 (idealmente en paralelo - una llamada por user). Si la lista está vacía, no llames.
+   Los users con role="mailbox_owner" salen de una alerta de correo (Defender for Office
+   365): son los DESTINATARIOS del mensaje, no atacantes. Enriquecelos igual (departamento,
+   manager) porque el analista los va a tener que contactar. Si alguno no está en AD suele
+   ser un buzón de otro dominio, NO un indicio de ataque: usá "no_ad_match" pero aclaralo
+   en el summary.
 2. Si la alerta tiene wazuh_rule.id, llamá wazuh_get_rule UNA SOLA VEZ con ese id.
 3. Si la alerta tiene file con sha256, llamá wazuh_recent_alerts(sha256=..., minutes=30) \
 UNA SOLA VEZ. Si NO hay sha256 pero hay host afectado, llamá wazuh_recent_alerts(host=..., minutes=30). \
@@ -455,7 +460,11 @@ CRITERIO PARA `flags` (priorización para el próximo agente):
 - "no_ad_match" → si un sam involucrado no existe en AD (puede ser ataque con cuenta inexistente).
 - "high_bad_pwd_count" → bad_pwd_count >= 5 (posible brute force previo).
 - "multiple_users_distinct_departments" → si los users tienen departments distintos en la misma alerta.
-- "mitre_<technique_id>" → uno por cada technique reportada por la rule (ej. "mitre_T1059").
+- "mitre_<technique_id>" → uno por cada technique reportada por la rule (ej. "mitre_T1059"). \
+Si la rule no tiene mapping pero alert.threat.mitre_techniques trae algo (lo reporta el \
+propio Defender), usá esas: NO reportes "sin mapeo MITRE" cuando ese campo tiene datos.
+- "phishing_delivered" → alerta de correo (alert.emails no vacío) con al menos una URL en \
+alert.emails[].urls.
 - "rule_high_severity" → si rule.level >= 10.
 - "rule_group_<group>" → para grupos críticos: lateral_movement, credential_access, \
 privilege_escalation, persistence, exfiltration. Ej "rule_group_lateral_movement".

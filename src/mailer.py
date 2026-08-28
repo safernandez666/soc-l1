@@ -161,8 +161,13 @@ def _build_text_body(
     lines.append("")
     lines.append("CONTEXTO")
     lines.append(f"  Alert ID:  {alert.alert_id}")
-    lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}"
-                 + (f" ({alert.device.fqdn})" if alert.device.fqdn else ""))
+    if alert.device.hostname or not alert.emails:
+        lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}"
+                     + (f" ({alert.device.fqdn})" if alert.device.fqdn else ""))
+    else:
+        buzones = list(dict.fromkeys(m.recipient for m in alert.emails if m.recipient))
+        lines.append(f"  Buzones:   {', '.join(buzones[:5]) or '-'}"
+                     + (f" (+{len(buzones) - 5})" if len(buzones) > 5 else ""))
     if alert.threat and (alert.threat.display_name or alert.threat.family):
         lines.append(f"  Amenaza:   {alert.threat.display_name or ''}"
                      + (f" [{alert.threat.family}]" if alert.threat.family else ""))
@@ -180,6 +185,21 @@ def _build_text_body(
         lines.append(f"  Incidente: {alert.threat.incident_url}")
     if alert.threat and alert.threat.alert_url:
         lines.append(f"  Alerta MDE: {alert.threat.alert_url}")
+    if alert.threat and alert.threat.mitre_techniques:
+        lines.append(f"  MITRE:     {', '.join(alert.threat.mitre_techniques)}")
+    if alert.emails:
+        lines.append("")
+        lines.append(f"CORREOS INVOLUCRADOS ({len(alert.emails)})")
+        for m in alert.emails[:5]:
+            lines.append(f"  - Asunto: {m.subject or '(sin asunto)'}")
+            lines.append(f"    Para:   {m.recipient or '-'}")
+            lines.append(f"    De:     {m.sender_address or '-'} ({m.sender_ip or 'sin IP'})")
+            if m.urls:
+                lines.append(f"    URLs:   {', '.join(m.urls[:5])}")
+            if m.attachments_count:
+                lines.append(f"    Adjuntos: {m.attachments_count}")
+        if len(alert.emails) > 5:
+            lines.append(f"  (+{len(alert.emails) - 5} mensaje(s) más)")
     lines.append("")
     lines.append(f"ACCIONES PROPUESTAS ({len(plan.actions)})")
     if not plan.actions:
@@ -265,9 +285,21 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         host_html += "<br>" + " ".join(ip_bits)
 
     rows: list[tuple[str, str]] = [
-        ("Alert ID",       f"<code>{_esc(alert.alert_id)}</code>"),
-        ("Host",           host_html),
+        ("Alert ID", f"<code>{_esc(alert.alert_id)}</code>"),
     ]
+    # Las alertas de mail (Office 365) no tienen host: en vez de una fila "Host: -"
+    # mostramos los buzones alcanzados, que es el activo afectado real.
+    if alert.device.hostname:
+        rows.append(("Host", host_html))
+    elif alert.emails:
+        buzones = list(dict.fromkeys(m.recipient for m in alert.emails if m.recipient))
+        rows.append((
+            "Buzones",
+            ", ".join(f"<code>{_esc(b)}</code>" for b in buzones[:5])
+            + (f" <span style='color:#6b7280;'>+{len(buzones) - 5}</span>" if len(buzones) > 5 else ""),
+        ))
+    else:
+        rows.append(("Host", host_html))
 
     # Amenaza (clasificación real de Defender): display_name + family
     if alert.threat and (alert.threat.display_name or alert.threat.family):
@@ -296,6 +328,14 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         if alert.device.os:
             posture_bits.append(f"<span style='color:#6b7280;'>{_esc(alert.device.os)}</span>")
         rows.append(("Postura equipo", " · ".join(posture_bits)))
+
+    # MITRE que reporta el propio Defender: las reglas 2000xx no tienen mapping en
+    # Wazuh, así que sin esto el correo decía "sin técnicas MITRE asociadas".
+    if alert.threat and alert.threat.mitre_techniques:
+        rows.append((
+            "MITRE (vendor)",
+            " ".join(_badge(t, "warning") for t in alert.threat.mitre_techniques[:6]),
+        ))
 
     rows += [
         ("Wazuh rule",     f"{_esc(alert.wazuh_rule.id)} (level {alert.wazuh_rule.level})"),
@@ -395,6 +435,97 @@ def _defender_section(alert: NormalizedAlert) -> str:
         "Defender &mdash; gu&iacute;a y pivots",
         "Lo que recomienda el vendor y d&oacute;nde seguir la investigaci&oacute;n",
         guidance + links_html,
+    )
+
+
+def _pivot_value(alert: NormalizedAlert) -> str:
+    """El titular del correo: lo más jugoso de la alerta, en una línea.
+
+    Endpoint → host + archivo/usuarios. Mail (Office 365) → asunto + buzones,
+    porque esas alertas no traen host y el titular quedaba en "-".
+    """
+    if not alert.device.hostname and alert.emails:
+        m0 = alert.emails[0]
+        pivot = f"<strong>{_esc(m0.subject or alert.title)}</strong>"
+        buzones = [m.recipient for m in alert.emails if m.recipient]
+        if buzones:
+            extra = f" +{len(buzones) - 2}" if len(buzones) > 2 else ""
+            pivot += f" → {_esc(', '.join(buzones[:2]))}{extra}"
+        return pivot
+
+    pivot = f"<strong>{_esc(alert.device.hostname)}</strong>"
+    if alert.files:
+        f0 = alert.files[0]
+        verdict_txt = (f0.verdict or "unknown").lower()
+        verdict_style = "critical" if verdict_txt == "malicious" else "warning"
+        pivot += (
+            f" → {_badge(verdict_txt, verdict_style)} <code>{_esc(f0.name)}</code>"
+        )
+    elif alert.users_involved:
+        sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
+        pivot += f" → usuarios: {sams}"
+    return pivot
+
+
+def _email_section(alert: NormalizedAlert) -> str:
+    """Card con los correos de la alerta (Defender for Office 365).
+
+    Vacío si la alerta no trae mailEvidence. Es la "información principal" de una
+    alerta de phishing: sin esta sección el correo llegaba con el host en None y
+    sin destinatarios, aunque el payload traía asunto, remitente y URL.
+    """
+    if not alert.emails:
+        return ""
+    bloques: list[str] = []
+    for m in alert.emails[:5]:
+        rows: list[tuple[str, str]] = []
+        if m.recipient:
+            rows.append(("Destinatario", f"<code>{_esc(m.recipient)}</code>"))
+        if m.sender_address:
+            rows.append(("Remitente", f"<code>{_esc(m.sender_address)}</code>"))
+        if m.sender_ip:
+            rows.append(("IP origen", f"<code>{_esc(m.sender_ip)}</code>"))
+        if m.urls:
+            urls_html = "<br>".join(
+                f"<code style='font-size:11px;word-break:break-all;'>{_esc(u)}</code>"
+                for u in m.urls[:5]
+            )
+            if len(m.urls) > 5:
+                urls_html += (
+                    f"<br><em style='color:{_theme.C_MUTED};'>"
+                    f"+{len(m.urls) - 5} m&aacute;s&hellip;</em>"
+                )
+            rows.append((f"URLs ({m.url_count})", urls_html))
+        if m.attachments_count:
+            rows.append(("Adjuntos", str(m.attachments_count)))
+        if m.received_at:
+            rows.append(("Recibido", f"<code style='font-size:12px;'>{_esc(m.received_at)}</code>"))
+        entrega = " · ".join(
+            x for x in (m.delivery_action, m.delivery_location) if x and x != "unknown"
+        )
+        if entrega:
+            rows.append(("Entrega", _esc(entrega)))
+        if m.threats:
+            rows.append(("Amenazas", _badge(", ".join(m.threats), "critical")))
+        asunto = (
+            f'<div style="font-family:{_theme.FONT};font-size:14px;line-height:20px;'
+            f'font-weight:bold;color:{_theme.C_TEXT};padding-bottom:8px;">'
+            f'&#9993;&nbsp; {_esc(m.subject or "(sin asunto)")}</div>'
+        )
+        bloques.append(asunto + _theme.kv_rows(rows))
+
+    body = _theme.spacer(14).join(bloques)
+    if len(alert.emails) > 5:
+        body += (
+            f'<div style="font-family:{_theme.FONT};font-size:12px;'
+            f'color:{_theme.C_MUTED};padding-top:8px;">'
+            f'+{len(alert.emails) - 5} mensaje(s) m&aacute;s en la alerta de Defender.</div>'
+        )
+    destinatarios = len({m.recipient for m in alert.emails if m.recipient})
+    return _theme.section(
+        f"Correos involucrados ({len(alert.emails)})",
+        f"{destinatarios} buz&oacute;n(es) alcanzado(s) &mdash; evidencia de Defender for Office 365",
+        body,
     )
 
 
@@ -597,18 +728,9 @@ def _build_html_body(
     )
 
     # Pivot value: lo más jugoso de la alerta. Host + archivo malicious (si hay).
-    pivot_value = f"<strong>{_esc(alert.device.hostname)}</strong>"
-    if alert.files:
-        f0 = alert.files[0]
-        verdict_txt = (f0.verdict or "unknown").lower()
-        verdict_style = "critical" if verdict_txt == "malicious" else "warning"
-        pivot_value += (
-            f" → {_badge(verdict_txt, verdict_style)} "
-            f"<code>{_esc(f0.name)}</code>"
-        )
-    elif alert.users_involved:
-        sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
-        pivot_value += f" → usuarios: {sams}"
+    # En las alertas de mail (Defender for Office 365) NO hay host: el pivot es el
+    # asunto del mensaje y a quién le llegó.
+    pivot_value = _pivot_value(alert)
 
     # Si tenemos review_url, mandamos UN solo botón "Revisar y decidir" que abre la
     # página con checkboxes per-action. Si no, fallback al patrón viejo (2 botones).
@@ -661,6 +783,7 @@ def _build_html_body(
         + _ctx_rows(alert, plan),
     )
 
+    cuerpo += _email_section(alert)
     cuerpo += _defender_section(alert)
     cuerpo += _enrichment_section(enrichment)
     cuerpo += _threat_intel_section(threat_intel)
@@ -1291,6 +1414,7 @@ def _build_closure_html_body(
         + _ctx_rows(alert, plan),
     )
 
+    cuerpo += _email_section(alert)
     cuerpo += _defender_section(alert)
 
     cuerpo += _theme.section(

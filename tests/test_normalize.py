@@ -171,3 +171,91 @@ def test_unwrap_raw_without_source_envelope() -> None:
     a = normalize(raw)
     assert a.source == "wazuh_native"
     assert a.alert_id == "raw-no-source"
+
+
+# ===== Defender for Office 365 (alertas de correo) =====
+
+
+@pytest.fixture
+def defender_o365() -> dict:
+    """Alerta real de O365: "malicious URL removed after delivery", 2 buzones."""
+    return json.loads((FIXTURES / "defender_o365_malicious_url.json").read_text())
+
+
+def test_o365_extracts_mailbox_users(defender_o365: dict) -> None:
+    """Los buzones alcanzados salen como users_involved.
+
+    Regresión: el parser solo miraba deviceEvidence/fileEvidence (MDE), así que
+    estas alertas llegaban con users_involved=[] y el Narrator escribía
+    "no hay usuarios involucrados" con dos destinatarios reales en el payload.
+    """
+    a = normalize(defender_o365)
+    sams = {u.sam for u in a.users_involved}
+    assert sams == {"jperez", "mgomez"}
+    assert all(u.role == "mailbox_owner" for u in a.users_involved)
+    assert all(u.domain == "contoso.dns" for u in a.users_involved)
+
+
+def test_o365_extracts_email_evidence(defender_o365: dict) -> None:
+    """Asunto, remitente, IP y URL maliciosa llegan al modelo normalizado."""
+    a = normalize(defender_o365)
+    assert len(a.emails) == 2
+    m = a.emails[0]
+    assert m.subject.startswith("Actualizá tus datos")
+    assert m.recipient == "jperez@contoso.com"
+    assert m.sender_ip == "200.41.220.50"
+    assert m.sender_address.endswith("@4167062.mailer-example.com")
+    assert m.urls == ["abre.ai/rw8y"]
+    assert m.url_count == 1
+    assert m.verdict == "suspicious"
+
+
+def test_o365_sender_ip_becomes_external_ip(defender_o365: dict) -> None:
+    """La IP del sender es el IOC que el ThreatIntel manda a AbuseIPDB."""
+    a = normalize(defender_o365)
+    assert a.network.src_ip_external == "200.41.220.50"
+
+
+def test_o365_keeps_vendor_mitre(defender_o365: dict) -> None:
+    """T1566.002 viene en el payload de Defender aunque la rule 200001 no mapee."""
+    a = normalize(defender_o365)
+    assert a.threat.mitre_techniques == ["T1566.002"]
+    assert a.threat.incident_id == "29"
+
+
+def test_o365_null_strings_are_cleaned(defender_o365: dict) -> None:
+    """Graph manda el string "null"; no queremos family="null" en el correo."""
+    a = normalize(defender_o365)
+    assert a.threat.family is None
+    assert a.threat.display_name is None
+
+
+def test_o365_no_device_fields(defender_o365: dict) -> None:
+    """No hay endpoint en estas alertas: device queda vacío, no inventado."""
+    a = normalize(defender_o365)
+    assert a.device.hostname is None
+    assert a.files == []
+
+
+def test_endpoint_alert_has_no_emails(defender_keygen: dict) -> None:
+    """Las alertas de endpoint no deben ganar evidencia de correo."""
+    a = normalize(defender_keygen)
+    assert a.emails == []
+
+
+@pytest.mark.parametrize(
+    "ip,expected",
+    [
+        ("200.41.220.50", True),
+        ("255.255.255.255", False),  # placeholder que mete Defender
+        ("192.168.1.10", False),
+        ("10.0.0.1", False),
+        ("127.0.0.1", False),
+        ("no-es-una-ip", False),
+        (None, False),
+    ],
+)
+def test_is_public_ip(ip, expected) -> None:
+    from src.normalize import _is_public_ip
+
+    assert _is_public_ip(ip) is expected

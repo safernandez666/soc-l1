@@ -1,0 +1,238 @@
+{
+  "timestamp": "2026-07-29T21:17:25.435-0300",
+  "rule": {
+    "level": 3,
+    "description": "Defender [info]: Email messages containing malicious URL removed after delivery​",
+    "id": "200001",
+    "firedtimes": 1,
+    "mail": false,
+    "groups": [
+      "azure",
+      "defender",
+      "defender_info"
+    ]
+  },
+  "agent": {
+    "id": "000",
+    "name": "wazuh-manager"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "id": "1785370645.172267503",
+  "decoder": {
+    "name": "json"
+  },
+  "data": {
+    "id": "fae9109076-9eab-0c22-c400-08deedcc1a16",
+    "providerAlertId": "e9109076-9eab-0c22-c400-08deedcc1a16",
+    "incidentId": "29",
+    "severity": "informational",
+    "classification": "null",
+    "determination": "null",
+    "serviceSource": "microsoftDefenderForOffice365",
+    "detectionSource": "microsoftDefenderForOffice365",
+    "productName": "Microsoft Defender for Office 365",
+    "detectorId": "8e6ba277-ef39-404e-aaf1-294f6d9a2b88",
+    "tenantId": "11111111-2222-3333-4444-555555555555",
+    "title": "Email messages containing malicious URL removed after delivery​",
+    "description": "Emails with malicious URL that were delivered and later removed -V1.0.0.3",
+    "category": "InitialAccess",
+    "categories": [
+      "PreAttack",
+      "InitialAccess",
+      "Probing"
+    ],
+    "assignedTo": "Suppression rule",
+    "alertWebUrl": "https://security.microsoft.com/alerts/fae9109076-9eab-0c22-c400-08deedcc1a16?tid=11111111-2222-3333-4444-555555555555",
+    "incidentWebUrl": "https://security.microsoft.com/incident2/29/overview?tid=11111111-2222-3333-4444-555555555555",
+    "actorDisplayName": "null",
+    "threatDisplayName": "null",
+    "threatFamilyName": "null",
+    "mitreTechniques": [
+      "T1566.002"
+    ],
+    "createdDateTime": "2026-07-30T00:08:47.2966667Z",
+    "lastUpdateDateTime": "2026-07-30T00:09:23.86Z",
+    "resolvedDateTime": "2026-07-30T00:08:47.2966667Z",
+    "firstActivityDateTime": "2026-07-29T23:54:22Z",
+    "lastActivityDateTime": "2026-07-29T23:56:23Z",
+    "systemTags": [],
+    "alertPolicyId": "null",
+    "investigationState": "suppressedAlert",
+    "comments": [],
+    "evidence": [
+      {
+        "@odata.type": "#microsoft.graph.security.mailboxEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "primaryAddress": "jperez@contoso.com",
+        "displayName": "Juan Perez",
+        "upn": "jperez@contoso.com",
+        "userAccount": {
+          "accountName": "jperez",
+          "domainName": "contoso.dns",
+          "userSid": "S-1-5-21-1111111111-2222222222-3333333333-1233",
+          "azureAdUserId": "aaaaaaaa-1111-2222-3333-444444444444",
+          "tenantId": null,
+          "userPrincipalName": "jperez@contoso.com",
+          "displayName": null,
+          "activeDirectoryObjectGuid": null,
+          "resourceAccessEvents": []
+        }
+      },
+      {
+        "@odata.type": "#microsoft.graph.security.mailboxEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "primaryAddress": "mgomez@contoso.com",
+        "displayName": "Maria Gomez",
+        "upn": "mgomez@contoso.com",
+        "userAccount": {
+          "accountName": "mgomez",
+          "domainName": "contoso.dns",
+          "userSid": "S-1-5-21-1111111111-2222222222-3333333333-18650",
+          "azureAdUserId": "bbbbbbbb-1111-2222-3333-444444444444",
+          "tenantId": null,
+          "userPrincipalName": "mgomez@contoso.com",
+          "displayName": null,
+          "activeDirectoryObjectGuid": null,
+          "resourceAccessEvents": []
+        }
+      },
+      {
+        "@odata.type": "#microsoft.graph.security.analyzedMessageEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "networkMessageId": "1581eea8-b1a5-40d9-6ee2-08deedcc8ecf",
+        "internetMessageId": "<20260729235205.1169.952328152.swift@submanager-nftxupgrade30805.activehosted.com>",
+        "subject": "Actualizá tus datos y seguí disfrutando del servicio premium ",
+        "language": null,
+        "senderIp": "200.41.220.50",
+        "recipientEmailAddress": "jperez@contoso.com",
+        "antiSpamDirection": null,
+        "deliveryAction": null,
+        "deliveryLocation": null,
+        "urn": null,
+        "threats": [],
+        "threatDetectionMethods": [],
+        "urls": [
+          "abre.ai/rw8y"
+        ],
+        "urlCount": 1,
+        "attachmentsCount": 0,
+        "receivedDateTime": "2026-07-29T23:53:19Z",
+        "p1Sender": {
+          "emailAddress": null,
+          "displayName": null,
+          "domainName": null
+        },
+        "p2Sender": {
+          "emailAddress": "bounce+campaign.example.net.10@4167062.mailer-example.com",
+          "displayName": null,
+          "domainName": null
+        }
+      },
+      {
+        "@odata.type": "#microsoft.graph.security.analyzedMessageEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "networkMessageId": "6111f4f4-8c74-436a-34d2-08deedcc8f79",
+        "internetMessageId": "<20260729235205.1169.952328152.swift@submanager-nftxupgrade30805.activehosted.com>",
+        "subject": "Actualizá tus datos y seguí disfrutando del servicio premium ",
+        "language": null,
+        "senderIp": "200.41.220.50",
+        "recipientEmailAddress": "mgomez@contoso.com",
+        "antiSpamDirection": null,
+        "deliveryAction": null,
+        "deliveryLocation": null,
+        "urn": null,
+        "threats": [],
+        "threatDetectionMethods": [],
+        "urls": [
+          "abre.ai/rw8y"
+        ],
+        "urlCount": 1,
+        "attachmentsCount": 0,
+        "receivedDateTime": "2026-07-29T23:53:24Z",
+        "p1Sender": {
+          "emailAddress": null,
+          "displayName": null,
+          "domainName": null
+        },
+        "p2Sender": {
+          "emailAddress": "bounce+campaign.example.net.10@4167062.mailer-example.com",
+          "displayName": null,
+          "domainName": null
+        }
+      },
+      {
+        "@odata.type": "#microsoft.graph.security.userEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "stream": null,
+        "userAccount": {
+          "accountName": "jperez",
+          "domainName": "contoso.dns",
+          "userSid": "S-1-5-21-1111111111-2222222222-3333333333-1233",
+          "azureAdUserId": "aaaaaaaa-1111-2222-3333-444444444444",
+          "tenantId": null,
+          "userPrincipalName": "jperez@contoso.com",
+          "displayName": "Juan Perez",
+          "activeDirectoryObjectGuid": null,
+          "resourceAccessEvents": []
+        }
+      },
+      {
+        "@odata.type": "#microsoft.graph.security.userEvidence",
+        "createdDateTime": "2026-07-30T00:09:23.81Z",
+        "verdict": "suspicious",
+        "remediationStatus": "none",
+        "remediationStatusDetails": null,
+        "roles": [],
+        "detailedRoles": [],
+        "tags": [],
+        "stream": null,
+        "userAccount": {
+          "accountName": "mgomez",
+          "domainName": "contoso.dns",
+          "userSid": "S-1-5-21-1111111111-2222222222-3333333333-18650",
+          "azureAdUserId": "bbbbbbbb-1111-2222-3333-444444444444",
+          "tenantId": null,
+          "userPrincipalName": "mgomez@contoso.com",
+          "displayName": "Maria Gomez",
+          "activeDirectoryObjectGuid": null,
+          "resourceAccessEvents": []
+        }
+      }
+    ],
+    "azure_tag": "azure-ad-graph",
+    "azure_aad_tag": "azure-defender"
+  },
+  "location": "Azure"
+}

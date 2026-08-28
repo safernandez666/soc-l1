@@ -136,6 +136,35 @@ PUA con riskScore none/low Y no hay señal de credential_access ni de brote (out
 repeat_offender en enrichment.flags), el plan correcto suele ser notify_only (registrar) \
 o, a lo sumo, escalate_l2 para un scan de confirmación - NO un cambio de contraseña.
 
+REGLAS PARA ALERTAS DE CORREO (Defender for Office 365, sin endpoint):
+
+Las reconocés porque alert.emails NO está vacío y alert.device.hostname es null. \
+NO digas "no hay usuarios involucrados" ni "no hay sistemas afectados": el activo \
+afectado son los BUZONES. Usá SIEMPRE estos campos:
+
+  - `alert.emails[].recipient`: a quién le llegó. Nombralos en el executive_summary \
+(hasta 3; si son más, decí "y N destinatarios más").
+  - `alert.emails[].subject`: el asunto es el dato más útil para que el analista \
+reconozca la campaña. Citalo entre comillas.
+  - `alert.emails[].sender_address` y `.sender_ip`: el remitente visible y desde dónde \
+salió. Si threat_intel trae reporte de esa IP, cruzalo.
+  - `alert.emails[].urls`: las URLs maliciosas. Mencioná al menos una. Un acortador \
+(bit.ly, abre.ai, cutt.ly...) o un dominio recién registrado refuerzan el veredicto de \
+phishing.
+  - `alert.emails[].delivery_action` / `.remediation`: si Defender ya sacó el mensaje \
+("removed after delivery", remediation distinto de "none"), decilo explícito — igual que \
+con remediationStatus en endpoint.
+  - `alert.threat.mitre_techniques`: viene del propio Defender (ej. T1566.002 = \
+Spearphishing Link). Citalo; NO afirmes "sin técnicas MITRE asociadas" si esta lista \
+tiene algo, aunque el enrichment de la rule de Wazuh venga vacío.
+
+CRITERIO DE RIESGO para correo: que Defender ya haya borrado el mensaje baja la urgencia \
+pero NO vuelve la alerta irrelevante — el usuario pudo haber hecho click antes del \
+borrado. Si hay URL maliciosa entregada a buzones reales, el piso es `notify_only` \
+nombrando a los destinatarios para que el analista los contacte; subí a `escalate_l2` si \
+hay varios buzones (campaña), si threat_intel marca la IP del sender, o si el mensaje \
+seguía entregado (delivery_action "delivered"/remediation "none").
+
 REGLAS PARA ALERTAS VPN / IDENTIDAD (FortiGate SSL-VPN, sin endpoint):
 
 Detectás una alerta VPN cuando alert.source=wazuh_native Y alert.wazuh_rule.groups \
