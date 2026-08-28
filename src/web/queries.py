@@ -609,9 +609,46 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
         "plan": _loads(r["plan_json"]) or {},
         "alert": _loads(r["alert_json"]) or {},
         "timeline": _loads(r["timeline_json"]) or [],
-        "execution_result": _loads(r["execution_result"]) or [],
+        "execution_result": _mark_simulated(_loads(r["execution_result"]) or []),
         **_invgate_state(r),
     }
+
+
+# El executor marca cada acción simulada con el prefijo "DRY_RUN: " en el message
+# (ver executor.execute_action). Lo derivamos por fila y no del dry_run de HOY,
+# para que un caso viejo siga contando la verdad aunque el modo haya cambiado.
+_DRY_RUN_PREFIX = "DRY_RUN:"
+
+
+def _mark_simulated(results: Any) -> list[dict[str, Any]]:
+    if not isinstance(results, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for er in results:
+        if not isinstance(er, dict):
+            continue
+        message = er.get("message") or ""
+        out.append({**er, "simulated": str(message).startswith(_DRY_RUN_PREFIX)})
+    return out
+
+
+def _get_case_token_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
+    """Token + estado de un caso. SOLO para uso server-side (decidir desde /ui).
+
+    El token nunca sale en las respuestas JSON del dashboard: es la capability que
+    viaja en el link del correo. Acá se resuelve adentro del proceso para poder
+    reusar la misma ruta de decisión sin exponerlo al browser.
+    """
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return None
+    with conn:
+        row = conn.execute(
+            "SELECT token, status, alert_id FROM pending_approvals WHERE rowid=?",
+            (rowid,),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 # ===== Wrappers async =====
@@ -665,6 +702,11 @@ async def list_cases(
 
 async def get_case(db_path: str, rowid: int) -> dict[str, Any] | None:
     return await asyncio.to_thread(_get_case_sync, db_path, rowid)
+
+
+async def get_case_token(db_path: str, rowid: int) -> dict[str, Any] | None:
+    """Token + estado de un caso, para decidir desde /ui. No exponer al browser."""
+    return await asyncio.to_thread(_get_case_token_sync, db_path, rowid)
 
 
 # ===== Reconciliación InvGate (vista "tickets abiertos") =====

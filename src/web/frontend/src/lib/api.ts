@@ -29,9 +29,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   if (res.status === 401) {
     throw new UnauthorizedError("unauthorized")
   }
-  const data = (await res.json().catch(() => ({}))) as { error?: string }
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string
+    message?: string
+  }
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status} en ${path}`)
+    // El backend manda `message` en castellano para mostrarle al analista;
+    // `error` es el código y solo sirve de fallback.
+    throw new Error(data?.message || data?.error || `HTTP ${res.status} en ${path}`)
   }
   return data as T
 }
@@ -84,8 +89,15 @@ export interface Metrics {
   top_users: [string, number][]
 }
 
+export type ExecMode = "live" | "dry_run" | "mixed"
+
 export interface Session {
   authed: boolean
+  /** Modo efectivo de ejecución. Ausente si no hay sesión. */
+  mode?: ExecMode
+  dry_run_master?: boolean
+  /** Por familia: true = simula, false = ejecuta de verdad. */
+  dry_run_families?: Record<"ad" | "fortigate" | "defender", boolean>
 }
 
 // ===== Cola (espejo de queries._summarize_row + api_queue) =====
@@ -170,6 +182,18 @@ export interface ExecResult {
   target?: string | null
   ok?: boolean
   message?: string | null
+  /** true si la acción se simuló (DRY_RUN) y nunca tocó el sistema destino. */
+  simulated?: boolean
+}
+
+export interface DecisionResult {
+  ok: boolean
+  state: "ok"
+  decision: "approved" | "rejected"
+  alert_id: string | null
+  n_actions: number
+  skipped: number
+  message: string
 }
 
 export interface CaseDetail extends InvgateFields {
@@ -356,4 +380,13 @@ export const api = {
   reports: (f: ReportFilters) => get<ReportsResponse>(`/reports?${reportQs(f)}`),
   reportsCsvUrl: (f: ReportFilters) => `${BASE}/reports.csv?${reportQs(f)}`,
   invgate: () => get<InvgateReconcile>("/invgate"),
+  decide: (
+    rowid: number | string,
+    decision: "approved" | "rejected",
+    selectedActionIndices: number[] | null,
+  ) =>
+    post<DecisionResult>(`/case/${rowid}/decide`, {
+      decision,
+      selected_action_indices: selectedActionIndices,
+    }),
 }

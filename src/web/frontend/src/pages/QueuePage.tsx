@@ -4,6 +4,7 @@ import { useFetch } from "@/lib/useFetch"
 import { humanizeAge } from "@/lib/format"
 import { StateView } from "@/components/StateView"
 import { StatusBadge, RiskPill } from "@/components/badges"
+import { STATUS_ORDER, statusLabelPlural } from "@/lib/status"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,13 +16,11 @@ import {
   TableRow,
 } from "@/components/ui/table"
 
+// Del diccionario compartido: antes "executed" era "Ejecutados" acá y "Cerrado"
+// en el badge de la misma fila.
 const FILTERS: [string, string][] = [
   ["", "Todos"],
-  ["pending", "Pendientes"],
-  ["approved", "Aprobados"],
-  ["executed", "Ejecutados"],
-  ["rejected", "Rechazados"],
-  ["expired", "Expirados"],
+  ...STATUS_ORDER.map((s) => [s, statusLabelPlural(s)] as [string, string]),
 ]
 
 export function QueuePage() {

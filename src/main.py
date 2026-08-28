@@ -19,8 +19,9 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -1219,19 +1220,38 @@ async def _send_closure_safely(
     )
 
 
-async def _handle_decision(
+@dataclass(slots=True)
+class DecisionOutcome:
+    """Qué pasó al aplicar una decisión, sin decidir todavía cómo se muestra.
+
+    La comparten la página HTML que abre el aprobador desde el correo (/approve,
+    /reject, /decide) y la API del dashboard (/ui/api/case/{rowid}/decide): una
+    sola ruta de mutación y de efectos de lado, dos formatos de salida.
+    """
+
+    state: str  # ok | not_found | expired | already | plan_error
+    decision: str
+    row: dict[str, Any] | None = None
+    alert_id: str | None = None
+    prev_status: str | None = None
+    invgate_request_id: int | None = None
+    actions_to_run: list[Any] = field(default_factory=list)
+    skipped: int = 0
+
+
+async def _decide_and_apply(
     request: Request,
     settings: Settings,
     token: str,
     decision: str,
     selected_action_indices: list[int] | None = None,
-) -> HTMLResponse:
-    """Lógica común para /approve, /reject y /decide.
+) -> DecisionOutcome:
+    """Aplica la decisión y dispara sus efectos (InvGate, cierre, executor).
 
-    selected_action_indices: si viene (desde /decide), solo esas acciones se ejecutan.
-    Si None y decision='approved', se ejecutan TODAS (compat con /approve clásico).
+    selected_action_indices: si viene, solo esas acciones se ejecutan. Si es None
+    y decision='approved', se ejecutan TODAS (compat con /approve clásico).
     """
-    from src.state import decide_approval, mark_executed
+    from src.state import decide_approval
 
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
@@ -1248,11 +1268,7 @@ async def _handle_decision(
 
     if result == "not_found":
         logger.warning("APPROVAL_NOT_FOUND | token=%s ip=%s", token[:12], ip)
-        return _render_decision_page(
-            "not_found",
-            "Este link no corresponde a ningún approval pendiente. "
-            "Puede haber sido manipulado o pertenecer a otro entorno.",
-        )
+        return DecisionOutcome(state="not_found", decision=decision)
 
     if result == "expired":
         logger.warning(
@@ -1261,11 +1277,11 @@ async def _handle_decision(
             token[:12],
             ip,
         )
-        return _render_decision_page(
-            "expired",
-            f"Este approval excedió el TTL de <strong>{settings.approval_ttl_hours}h</strong> "
-            "y no puede ser decidido. Si la alerta sigue siendo relevante, esperá la próxima "
-            "iteración del pipeline.",
+        return DecisionOutcome(
+            state="expired",
+            decision=decision,
+            row=row,
+            alert_id=row["alert_id"] if row else None,
         )
 
     if result == "already_decided":
@@ -1277,11 +1293,12 @@ async def _handle_decision(
             prev,
             ip,
         )
-        return _render_decision_page(
-            "already",
-            f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>). "
-            "Cada link es single-use y no admite cambios.",
-            meta_html=_decision_meta_html(row["alert_id"]) if row else "",
+        return DecisionOutcome(
+            state="already",
+            decision=decision,
+            row=row,
+            alert_id=row["alert_id"] if row else None,
+            prev_status=prev,
         )
 
     # result == "ok"
@@ -1306,13 +1323,12 @@ async def _handle_decision(
         _spawn(
             _send_closure_safely(settings, row, decision="rejected", execution_results=None)
         )
-        return _render_decision_page(
-            "rejected",
-            f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
-            f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
-            "y timestamp para audit.",
-            meta_html=_decision_meta_html(alert_id),
-            extra_action_html=_close_ticket_action_html(token, invgate_rid),
+        return DecisionOutcome(
+            state="ok",
+            decision=decision,
+            row=row,
+            alert_id=alert_id,
+            invgate_request_id=invgate_rid,
         )
 
     # approved → ejecutar plan
@@ -1322,13 +1338,15 @@ async def _handle_decision(
         plan = NarratorPlan.model_validate_json(row["plan_json"])
     except Exception:
         logger.exception("APPROVAL_PLAN_PARSE_FAILED | alert=%s", alert_id)
-        return _render_decision_page(
-            "error",
-            "Aprobaste, pero el plan guardado no pudo deserializarse. "
-            "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
+        return DecisionOutcome(
+            state="plan_error",
+            decision=decision,
+            row=row,
+            alert_id=alert_id,
+            invgate_request_id=invgate_rid,
         )
 
-    # Filtrar por acciones seleccionadas (si vinieron de /decide).
+    # Filtrar por acciones seleccionadas (si vinieron de /decide o del dashboard).
     # Si selected_action_indices es None, se ejecutan todas (modo /approve clásico).
     total_actions = len(plan.actions)
     if selected_action_indices is not None:
@@ -1339,15 +1357,86 @@ async def _handle_decision(
         actions_to_run = plan.actions
         skipped = 0
 
-    # Lanzamos el executor en background para responder rápido al humano que clickeó
+    # Lanzamos el executor en background para responder rápido al humano que decidió
     _spawn(
         _execute_approved_plan_in_background(
             settings, token, alert_id, plan, actions_to_run, invgate_rid
         )
     )
 
+    return DecisionOutcome(
+        state="ok",
+        decision=decision,
+        row=row,
+        alert_id=alert_id,
+        invgate_request_id=invgate_rid,
+        actions_to_run=actions_to_run,
+        skipped=skipped,
+    )
+
+
+async def _handle_decision(
+    request: Request,
+    settings: Settings,
+    token: str,
+    decision: str,
+    selected_action_indices: list[int] | None = None,
+) -> HTMLResponse:
+    """Página HTML de /approve, /reject y /decide sobre el resultado de decidir."""
+    outcome = await _decide_and_apply(
+        request, settings, token, decision, selected_action_indices
+    )
+
+    if outcome.state == "not_found":
+        return _render_decision_page(
+            "not_found",
+            "Este link no corresponde a ningún approval pendiente. "
+            "Puede haber sido manipulado o pertenecer a otro entorno.",
+        )
+
+    if outcome.state == "expired":
+        return _render_decision_page(
+            "expired",
+            f"Este approval excedió el TTL de <strong>{settings.approval_ttl_hours}h</strong> "
+            "y no puede ser decidido. Si la alerta sigue siendo relevante, esperá la próxima "
+            "iteración del pipeline.",
+        )
+
+    if outcome.state == "already":
+        return _render_decision_page(
+            "already",
+            f"Este approval ya fue resuelto previamente (estado: "
+            f"<strong>{outcome.prev_status}</strong>). "
+            "Cada link es single-use y no admite cambios.",
+            meta_html=(
+                _decision_meta_html(outcome.alert_id) if outcome.alert_id else ""
+            ),
+        )
+
+    if outcome.state == "plan_error":
+        return _render_decision_page(
+            "error",
+            "Aprobaste, pero el plan guardado no pudo deserializarse. "
+            "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
+        )
+
+    alert_id = outcome.alert_id
+    invgate_rid = outcome.invgate_request_id
+
+    if outcome.decision == "rejected":
+        return _render_decision_page(
+            "rejected",
+            f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
+            f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
+            "y timestamp para audit.",
+            meta_html=_decision_meta_html(alert_id),
+            extra_action_html=_close_ticket_action_html(token, invgate_rid),
+        )
+
     import html as _h
 
+    actions_to_run = outcome.actions_to_run
+    skipped = outcome.skipped
     n = len(actions_to_run)
     if n == 0:
         body = (

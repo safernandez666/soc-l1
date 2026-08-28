@@ -150,8 +150,27 @@ def _api_unauthorized() -> JSONResponse:
 
 @router.get("/api/session")
 async def api_session(request: Request, settings: SettingsDep) -> Response:
-    """Chequeo liviano de sesión para el bootstrap del SPA."""
-    return JSONResponse({"authed": _authed(request, settings)})
+    """Chequeo liviano de sesión para el bootstrap del SPA.
+
+    Devuelve además el modo de ejecución efectivo, para que la UI pueda decir en
+    todo momento si las contenciones se aplican o se simulan. Sin esto el panel
+    mostraba "ok" en acciones que nunca tocaron FortiGate, AD ni Defender.
+    """
+    authed = _authed(request, settings)
+    if not authed:
+        return JSONResponse({"authed": False})
+    families = settings.dry_run_state()
+    return JSONResponse({
+        "authed": True,
+        "dry_run_master": settings.dry_run_mode,
+        "dry_run_families": families,
+        # "dry_run" = se simula todo; "live" = se ejecuta todo; "mixed" = por familia.
+        "mode": (
+            "dry_run" if all(families.values())
+            else "live" if not any(families.values())
+            else "mixed"
+        ),
+    })
 
 
 @router.get("/api/metrics")
@@ -306,6 +325,109 @@ async def api_case(request: Request, settings: SettingsDep, rowid: int) -> Respo
             {"error": "not_found"}, status_code=http_status.HTTP_404_NOT_FOUND
         )
     return JSONResponse(case)
+
+
+_DECISIONS = {"approved", "rejected"}
+
+# state de DecisionOutcome → (HTTP, mensaje para el analista)
+_DECIDE_HTTP = {
+    "not_found": (http_status.HTTP_404_NOT_FOUND, "El caso ya no tiene un approval pendiente."),
+    "expired": (http_status.HTTP_409_CONFLICT, "El approval venció y no se puede decidir."),
+    "already": (http_status.HTTP_409_CONFLICT, "Este caso ya fue decidido."),
+    "plan_error": (
+        http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "Quedó registrada la decisión, pero el plan guardado no se pudo leer: no se ejecutó nada.",
+    ),
+}
+
+
+@router.post("/api/case/{rowid}/decide")
+async def api_case_decide(request: Request, settings: SettingsDep, rowid: int) -> Response:
+    """Aprobar o rechazar un caso desde el panel.
+
+    Hasta acá el panel era solo-lectura y la única forma de decidir era el link del
+    correo. Esto no abre un segundo camino: reusa la misma ruta de decisión que
+    /approve, /reject y /decide (_decide_and_apply), así que valen los mismos
+    guardrails, el mismo TTL, el mismo single-use y los mismos efectos — InvGate,
+    mail de cierre y executor. El token no viaja nunca al browser: se resuelve
+    server-side a partir del rowid, para no convertir el panel en un repartidor de
+    capabilities de aprobación.
+    """
+    if not _authed(request, settings):
+        return _api_unauthorized()
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    decision = str(body.get("decision") or "")
+    if decision not in _DECISIONS:
+        return JSONResponse(
+            {"error": "bad_decision"}, status_code=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    selected = body.get("selected_action_indices")
+    if selected is not None and not (
+        isinstance(selected, list)
+        and all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in selected)
+    ):
+        return JSONResponse(
+            {"error": "bad_selection"}, status_code=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    found = await queries.get_case_token(settings.state_db_path, rowid)
+    if found is None:
+        return JSONResponse(
+            {"error": "not_found", "message": "No existe ese caso."},
+            status_code=http_status.HTTP_404_NOT_FOUND,
+        )
+
+    # Import tardío: src.main monta este router, importarlo arriba sería circular.
+    from src.main import _decide_and_apply
+
+    ip = request.client.host if request.client else None
+    logger.info(
+        "DASHBOARD_DECISION | rowid=%s alert=%s decision=%s ip=%s selected=%s",
+        rowid, found.get("alert_id"), decision, ip, selected,
+    )
+
+    outcome = await _decide_and_apply(
+        request, settings, found["token"], decision, selected
+    )
+
+    if outcome.state != "ok":
+        code, message = _DECIDE_HTTP[outcome.state]
+        return JSONResponse(
+            {
+                "error": outcome.state,
+                "message": message,
+                "prev_status": outcome.prev_status,
+            },
+            status_code=code,
+        )
+
+    n = len(outcome.actions_to_run)
+    if decision == "rejected":
+        message = "Caso rechazado. No se ejecuta ninguna acción."
+    elif n == 0:
+        message = "Aprobado sin acciones seleccionadas: no se ejecutó nada."
+    else:
+        simulated = all(settings.dry_run_for(a.type) for a in outcome.actions_to_run)
+        verbo = "simulando" if simulated else "ejecutando"
+        message = f"Aprobado. {verbo.capitalize()} {n} acción{'' if n == 1 else 'es'}."
+
+    return JSONResponse({
+        "ok": True,
+        "state": "ok",
+        "decision": decision,
+        "alert_id": outcome.alert_id,
+        "n_actions": n,
+        "skipped": outcome.skipped,
+        "message": message,
+    })
 
 
 @router.get("/api/config")
