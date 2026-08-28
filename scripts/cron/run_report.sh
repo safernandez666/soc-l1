@@ -18,6 +18,15 @@ if [ -z "$REPORT" ]; then
   exit 2
 fi
 
+# Pararse en $BASE antes de cualquier cosa: src/config.py declara env_file=".env",
+# que es RELATIVO al directorio de trabajo. Desde cron el CWD es $HOME, así que
+# Settings() no encontraba /opt/soc-l1/.env y se quedaba sin WAZUH_API_PASSWORD.
+# Efecto observado: agent_coverage_alert.py moría con rc=1 (KeyError: 'data') en
+# cada corrida, y el aviso de calidad del dato del reporte de vulnerabilidades
+# fallaba en silencio con un 401 contra la API del manager. Las corridas manuales
+# desde /opt/soc-l1 funcionaban, que es por qué no se había notado.
+cd "$BASE" || { echo "$(date -Is) ERROR: no se puede entrar a $BASE" >&2; exit 1; }
+
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$REPORT.log"
 
