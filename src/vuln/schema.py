@@ -148,6 +148,27 @@ CREATE TABLE IF NOT EXISTS vuln_priority_brief (
     brief      TEXT NOT NULL,
     cve_refs   TEXT NOT NULL DEFAULT '[]'      -- JSON array
 );
+
+-- Bitácora de rescans forzados (reinicio del agente para que syscollector
+-- re-inventaríe). Guarda el estado del host EN EL MOMENTO del pedido para
+-- poder verificar después si el reinicio sirvió: sin este registro no hay
+-- forma de distinguir "el detector se destrabó" de "alguien parcheó el host".
+CREATE TABLE IF NOT EXISTS vuln_rescans (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    host           TEXT NOT NULL,
+    agent_id       TEXT NOT NULL DEFAULT '',
+    motivo         TEXT NOT NULL,              -- 'sin_datos' | 'desfasado'
+    solicitado_at  TEXT NOT NULL,
+    resultado      TEXT NOT NULL,              -- 'ok' | 'error' | 'simulado'
+    detalle        TEXT NOT NULL DEFAULT '',
+    build_indexado TEXT NOT NULL DEFAULT '',
+    build_real     TEXT NOT NULL DEFAULT '',
+    hallazgos      INTEGER NOT NULL DEFAULT 0,
+    verificado_at  TEXT,
+    verificado     TEXT                        -- 'convergio' | 'sin_cambio' | NULL (pendiente)
+);
+CREATE INDEX IF NOT EXISTS idx_rescans_host ON vuln_rescans(host, solicitado_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rescans_pendientes ON vuln_rescans(verificado, solicitado_at);
 """
 
 # Columnas que le faltan a las tablas de SCHEMA (tabla, columna, definición).
