@@ -173,22 +173,71 @@ function Empty({ children }: { children: React.ReactNode }) {
   )
 }
 
+/** Envoltorio para que un chip del ranking filtre la lista.
+ *
+ *  Si no hay `onClick` el chip queda como etiqueta pasiva (así se usa en
+ *  contextos donde no hay filtro que aplicar). Con `onClick` es un botón real:
+ *  foco por teclado, aria-pressed y cursor, porque un tag que filtra pero no se
+ *  ve clickeable es un filtro que nadie encuentra.
+ */
+function PillButton({
+  onClick,
+  activo,
+  title,
+  children,
+}: {
+  onClick?: () => void
+  activo?: boolean
+  title: string
+  children: React.ReactNode
+}) {
+  if (!onClick) return <span title={title}>{children}</span>
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={activo}
+      title={title}
+      className="cursor-pointer transition-opacity hover:opacity-75"
+    >
+      {children}
+    </button>
+  )
+}
+
 /** Chip de CISA KEV. Explotación confirmada in-the-wild: la señal más fuerte. */
-function KevPill({ on }: { on: boolean }) {
+function KevPill({
+  on,
+  onFiltrar,
+  activo,
+}: {
+  on: boolean
+  onFiltrar?: () => void
+  activo?: boolean
+}) {
   if (!on) return <span className="text-xs text-muted-foreground">—</span>
   return (
-    <Badge
-      variant="outline"
-      className="text-[10px] font-semibold tracking-wide"
-      style={{
-        borderColor: "var(--zs-danger)",
-        background: "color-mix(in oklab, var(--zs-danger) 14%, transparent)",
-        color: "var(--zs-danger)",
-      }}
-      title="CISA KEV — explotación confirmada in-the-wild"
+    <PillButton
+      onClick={onFiltrar}
+      activo={activo}
+      title={
+        onFiltrar
+          ? "CISA KEV — clic para ver solo los KEV"
+          : "CISA KEV — explotación confirmada in-the-wild"
+      }
     >
-      KEV
-    </Badge>
+      <Badge
+        variant="outline"
+        className="text-[10px] font-semibold tracking-wide"
+        style={{
+          borderColor: "var(--zs-danger)",
+          background: "color-mix(in oklab, var(--zs-danger) 14%, transparent)",
+          color: "var(--zs-danger)",
+        }}
+      >
+        KEV
+      </Badge>
+    </PillButton>
   )
 }
 
@@ -198,20 +247,37 @@ function KevPill({ on }: { on: boolean }) {
  *  Va relleno y no en outline como el de KEV a propósito: son 5 CVEs sobre 4.295
  *  y no pueden leerse como "un KEV más". Si alguien mira la pantalla tres
  *  segundos, esto es lo que tiene que ver. */
-function RansomPill({ on }: { on: boolean }) {
+function RansomPill({
+  on,
+  onFiltrar,
+  activo,
+}: {
+  on: boolean
+  onFiltrar?: () => void
+  activo?: boolean
+}) {
   if (!on) return null
   return (
-    <Badge
-      className="text-[10px] font-bold tracking-wide"
-      style={{
-        background: "var(--zs-danger)",
-        borderColor: "var(--zs-danger)",
-        color: "#0b0d09",
-      }}
-      title="CISA KEV — CVE usado en campañas de ransomware conocidas"
+    <PillButton
+      onClick={onFiltrar}
+      activo={activo}
+      title={
+        onFiltrar
+          ? "Usado en campañas de ransomware conocidas — clic para ver solo estos"
+          : "CISA KEV — CVE usado en campañas de ransomware conocidas"
+      }
     >
-      RANSOMWARE
-    </Badge>
+      <Badge
+        className="text-[10px] font-bold tracking-wide"
+        style={{
+          background: "var(--zs-danger)",
+          borderColor: "var(--zs-danger)",
+          color: "#0b0d09",
+        }}
+      >
+        RANSOMWARE
+      </Badge>
+    </PillButton>
   )
 }
 
@@ -751,10 +817,22 @@ function HostList({
 function CveRows({
   q,
   onAgente,
+  onFiltro,
+  kev,
+  ransomware,
 }: {
   q: VulnCvesPage
   onAgente: (host: string) => void
+  onFiltro: (f: { kev?: boolean; ransomware?: boolean }) => void
+  kev: boolean
+  ransomware: boolean
 }) {
+  // Clic en un chip alterna ese filtro. Ransomware y KEV se excluyen: todo
+  // ransomware ya es KEV, así que prender uno apaga el otro (mismo criterio que
+  // los toggles de la barra de filtros).
+  const filtrarKev = () => onFiltro({ kev: !kev, ransomware: false })
+  const filtrarRansom = () => onFiltro({ ransomware: !ransomware, kev: false })
+
   // Una fila abierta por vez: la lista es de 50 CVEs y abrir varias a la vez
   // convierte la tabla en una pared de nombres.
   const [abierto, setAbierto] = useState<string | null>(null)
@@ -771,8 +849,12 @@ function CveRows({
               <div className="flex items-start justify-between gap-2">
                 <div className="font-mono text-sm font-medium">{c.cve}</div>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                  <RansomPill on={c.kev_ransomware} />
-                  <KevPill on={c.cisa_kev} />
+                  <RansomPill
+                    on={c.kev_ransomware}
+                    onFiltrar={filtrarRansom}
+                    activo={ransomware}
+                  />
+                  <KevPill on={c.cisa_kev} onFiltrar={filtrarKev} activo={kev} />
                   <RiskPill risk={c.severity} />
                 </div>
               </div>
@@ -847,8 +929,16 @@ function CveRows({
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap items-center gap-1">
-                        <KevPill on={c.cisa_kev} />
-                        <RansomPill on={c.kev_ransomware} />
+                        <KevPill
+                          on={c.cisa_kev}
+                          onFiltrar={filtrarKev}
+                          activo={kev}
+                        />
+                        <RansomPill
+                          on={c.kev_ransomware}
+                          onFiltrar={filtrarRansom}
+                          activo={ransomware}
+                        />
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
@@ -1175,7 +1265,13 @@ export function VulnsPage() {
             }
             return (
               <div className="space-y-4">
-                <CveRows q={l} onAgente={(h) => apply({ agente: h })} />
+                <CveRows
+                  q={l}
+                  onAgente={(h) => apply({ agente: h })}
+                  onFiltro={apply}
+                  kev={kev}
+                  ransomware={ransomware}
+                />
                 <div className="flex items-center justify-between">
                   <Button
                     variant="outline"
