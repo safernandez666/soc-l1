@@ -423,7 +423,13 @@ export interface VulnSummary {
   totals?: VulnTotals
   por_severidad?: Partial<Record<VulnSeveridad, number>>
   por_categoria?: Partial<Record<VulnCategoria, number>>
-  kev?: { hallazgos: number; cves: number }
+  kev?: {
+    hallazgos: number
+    cves: number
+    /** Subconjunto de KEV usado en campañas de ransomware conocidas. */
+    ransomware_hallazgos?: number
+    ransomware_cves?: number
+  }
   epss_alto?: number
   prioridad_alta?: number
   top_hosts?: VulnHost[]
@@ -439,10 +445,15 @@ export interface VulnCve {
   /** Probabilidad EPSS en 0..1; se muestra como porcentaje. */
   epss_score: number | null
   cisa_kev: boolean
+  /** CISA marca el CVE como usado en campañas de ransomware (knownRansomwareCampaignUse). */
+  kev_ransomware: boolean
   severity: string
   categoria: string
   hosts_count: number
+  /** Nombres de los hosts afectados (tope de 30). */
   hosts: string[]
+  /** True si `hosts` no trae todos: la pantalla lo dice en vez de mostrar la lista corta como completa. */
+  hosts_truncados: boolean
   package_name: string | null
   first_seen_at: string | null
   lifecycle_status: string
@@ -458,6 +469,7 @@ export interface VulnCvesPage {
     categoria: string | null
     agente: string | null
     kev: boolean
+    ransomware: boolean
     q: string | null
   }
 }
@@ -467,6 +479,7 @@ export interface VulnFilters {
   categoria?: string
   agente?: string
   kev?: boolean
+  ransomware?: boolean
   q?: string
   page?: number
 }
@@ -477,6 +490,7 @@ function vulnQs(f: VulnFilters): string {
   if (f.categoria) qs.set("categoria", f.categoria)
   if (f.agente) qs.set("agente", f.agente)
   if (f.kev) qs.set("kev", "1")
+  if (f.ransomware) qs.set("ransomware", "1")
   if (f.q) qs.set("q", f.q)
   qs.set("page", String(f.page && f.page > 1 ? f.page : 1))
   return qs.toString()

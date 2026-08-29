@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { useSearchParams } from "react-router-dom"
+import { Fragment, useEffect, useState } from "react"
+import { Link, useSearchParams } from "react-router-dom"
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 import {
   api,
@@ -192,6 +192,29 @@ function KevPill({ on }: { on: boolean }) {
   )
 }
 
+/** Chip de ransomware: el subconjunto de KEV que CISA marca como usado en
+ *  campañas de ransomware conocidas (`knownRansomwareCampaignUse`).
+ *
+ *  Va relleno y no en outline como el de KEV a propósito: son 5 CVEs sobre 4.295
+ *  y no pueden leerse como "un KEV más". Si alguien mira la pantalla tres
+ *  segundos, esto es lo que tiene que ver. */
+function RansomPill({ on }: { on: boolean }) {
+  if (!on) return null
+  return (
+    <Badge
+      className="text-[10px] font-bold tracking-wide"
+      style={{
+        background: "var(--zs-danger)",
+        borderColor: "var(--zs-danger)",
+        color: "#0b0d09",
+      }}
+      title="CISA KEV — CVE usado en campañas de ransomware conocidas"
+    >
+      RANSOMWARE
+    </Badge>
+  )
+}
+
 /** Aviso de cobertura: qué NO está representado en los números de arriba.
  *
  * Sin esto la pantalla miente por omisión. Un agente al que el detector nunca le
@@ -270,6 +293,9 @@ function CoverageNotice({ c }: { c?: VulnCobertura }) {
 function HeadlineBlock({ s }: { s: VulnSummary }) {
   const t = s.totals
   const kev = s.kev ?? { hallazgos: 0, cves: 0 }
+  // Los CVEs de KEV que CISA ligó a campañas de ransomware. Es el peor recorte
+  // del peor recorte, así que va como atajo directo al filtro.
+  const ransomCves = kev.ransomware_cves ?? 0
   const run = s.last_run
   return (
     <Section
@@ -308,6 +334,19 @@ function HeadlineBlock({ s }: { s: VulnSummary }) {
             <div className="mt-1 text-sm font-medium">
               {num(kev.cves)} CVE distintos con explotación confirmada
             </div>
+            {ransomCves > 0 && (
+              <Link
+                to="/ui/vulns?ransomware=1"
+                className="mt-3 flex items-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold transition-opacity hover:opacity-80"
+                style={{ background: "var(--zs-danger)", color: "#0b0d09" }}
+              >
+                <span className="tracking-wide">RANSOMWARE</span>
+                <span className="tabular-nums">
+                  {num(ransomCves)} CVE · {num(kev.ransomware_hallazgos ?? 0)}{" "}
+                  hallazgos
+                </span>
+              </Link>
+            )}
             <p className="mt-2 text-xs text-muted-foreground">
               Catálogo de CISA: se están explotando in-the-wild ahora. Van
               primero, incluso por encima de un CVSS más alto.
@@ -656,13 +695,64 @@ function HostsBlock({
 
 // ===== Ranking de CVEs =====
 
-function hostsTitle(c: VulnCve): string {
-  const shown = c.hosts.slice(0, 12).join(", ")
-  const rest = c.hosts_count - Math.min(c.hosts.length, 12)
-  return rest > 0 ? `${shown} y ${rest} más` : shown || "sin detalle"
+/** Lista de hosts afectados por un CVE, con cada nombre como atajo al filtro.
+ *
+ *  Antes esto vivía sólo en un `title=`: el dato estaba, pero había que adivinar
+ *  que se podía hacer hover sobre un número, y en mobile no había forma. Cada
+ *  host filtra la pantalla por ese agente, que es la pregunta que sigue siempre
+ *  a "¿en cuáles?": qué más tiene pendiente esa máquina.
+ */
+function HostList({
+  c,
+  onAgente,
+}: {
+  c: VulnCve
+  onAgente: (host: string) => void
+}) {
+  if (!c.hosts.length) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Sin detalle de hosts para este CVE.
+      </p>
+    )
+  }
+  const faltan = c.hosts_count - c.hosts.length
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {c.hosts.map((h) => (
+        <button
+          key={h}
+          type="button"
+          onClick={() => onAgente(h)}
+          title={`Ver todo lo pendiente de ${h}`}
+          className="rounded-full border px-2 py-0.5 font-mono text-[11px] transition-colors hover:opacity-80"
+          style={{ borderColor: "var(--border)", color: "var(--zs-text-secondary)" }}
+        >
+          {h}
+        </button>
+      ))}
+      {c.hosts_truncados && faltan > 0 && (
+        <span className="text-[11px] text-muted-foreground">
+          y {num(faltan)} más
+        </span>
+      )}
+    </div>
+  )
 }
 
-function CveRows({ q }: { q: VulnCvesPage }) {
+function CveRows({
+  q,
+  onAgente,
+}: {
+  q: VulnCvesPage
+  onAgente: (host: string) => void
+}) {
+  // Una fila abierta por vez: la lista es de 50 CVEs y abrir varias a la vez
+  // convierte la tabla en una pared de nombres.
+  const [abierto, setAbierto] = useState<string | null>(null)
+  const alternar = (cve: string) =>
+    setAbierto((prev) => (prev === cve ? null : cve))
+
   return (
     <>
       {/* Mobile: cards apiladas */}
@@ -672,7 +762,8 @@ function CveRows({ q }: { q: VulnCvesPage }) {
             <CardContent className="space-y-2 py-4">
               <div className="flex items-start justify-between gap-2">
                 <div className="font-mono text-sm font-medium">{c.cve}</div>
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                  <RansomPill on={c.kev_ransomware} />
                   <KevPill on={c.cisa_kev} />
                   <RiskPill risk={c.severity} />
                 </div>
@@ -686,8 +777,16 @@ function CveRows({ q }: { q: VulnCvesPage }) {
                 </span>
                 <span className="tabular-nums">CVSS {dec(c.cvss_score)}</span>
                 <span className="tabular-nums">EPSS {pctEpss(c.epss_score)}</span>
-                <span className="tabular-nums">{num(c.hosts_count)} hosts</span>
+                <button
+                  type="button"
+                  onClick={() => alternar(c.cve)}
+                  aria-expanded={abierto === c.cve}
+                  className="tabular-nums underline decoration-dotted underline-offset-2"
+                >
+                  {num(c.hosts_count)} hosts
+                </button>
               </div>
+              {abierto === c.cve && <HostList c={c} onAgente={onAgente} />}
               <div className="truncate font-mono text-xs text-muted-foreground">
                 {c.package_name || "—"}
               </div>
@@ -716,7 +815,8 @@ function CveRows({ q }: { q: VulnCvesPage }) {
               </TableHeader>
               <TableBody>
                 {q.cves.map((c) => (
-                  <TableRow key={c.cve}>
+                  <Fragment key={c.cve}>
+                  <TableRow>
                     <TableCell>
                       <div className="font-mono text-xs font-medium">{c.cve}</div>
                       <div className="text-[11px] text-muted-foreground">
@@ -738,16 +838,24 @@ function CveRows({ q }: { q: VulnCvesPage }) {
                       {pctEpss(c.epss_score)}
                     </TableCell>
                     <TableCell>
-                      <KevPill on={c.cisa_kev} />
+                      <div className="flex flex-wrap items-center gap-1">
+                        <KevPill on={c.cisa_kev} />
+                        <RansomPill on={c.kev_ransomware} />
+                      </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {CAT_LABEL[c.categoria as VulnCategoria] ?? c.categoria}
                     </TableCell>
-                    <TableCell
-                      className="text-right tabular-nums"
-                      title={hostsTitle(c)}
-                    >
-                      {num(c.hosts_count)}
+                    <TableCell className="text-right tabular-nums">
+                      <button
+                        type="button"
+                        onClick={() => alternar(c.cve)}
+                        aria-expanded={abierto === c.cve}
+                        title="Ver en qué hosts está"
+                        className="underline decoration-dotted underline-offset-2 hover:opacity-80"
+                      >
+                        {num(c.hosts_count)}
+                      </button>
                     </TableCell>
                     <TableCell
                       className="max-w-[180px] truncate font-mono text-xs text-muted-foreground"
@@ -756,6 +864,17 @@ function CveRows({ q }: { q: VulnCvesPage }) {
                       {c.package_name || "—"}
                     </TableCell>
                   </TableRow>
+                  {abierto === c.cve && (
+                    <TableRow>
+                      <TableCell colSpan={9} className="py-3">
+                        <div className="mb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                          Hosts afectados
+                        </div>
+                        <HostList c={c} onAgente={onAgente} />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  </Fragment>
                 ))}
               </TableBody>
             </Table>
@@ -773,6 +892,7 @@ type Filtros = {
   categoria: string
   agente: string
   kev: boolean
+  ransomware: boolean
   q: string
   page: number
 }
@@ -783,13 +903,14 @@ export function VulnsPage() {
   const categoria = params.get("categoria") || ""
   const agente = params.get("agente") || ""
   const kev = params.get("kev") === "1"
+  const ransomware = params.get("ransomware") === "1"
   const q = params.get("q") || ""
   const page = Math.max(1, Number(params.get("page") || "1"))
 
   const summary = useFetch(() => api.vulnsSummary(), [])
   const listado = useFetch(
-    () => api.vulnsCves({ severidad, categoria, agente, kev, q, page }),
-    [severidad, categoria, agente, kev, q, page]
+    () => api.vulnsCves({ severidad, categoria, agente, kev, ransomware, q, page }),
+    [severidad, categoria, agente, kev, ransomware, q, page]
   )
 
   // Cambiar cualquier filtro vuelve a la página 1: con ~4.300 CVEs el offset
@@ -800,6 +921,7 @@ export function VulnsPage() {
       categoria,
       agente,
       kev,
+      ransomware,
       q,
       page: 1,
       ...next,
@@ -809,6 +931,7 @@ export function VulnsPage() {
     if (f.categoria) qs.set("categoria", f.categoria)
     if (f.agente) qs.set("agente", f.agente)
     if (f.kev) qs.set("kev", "1")
+    if (f.ransomware) qs.set("ransomware", "1")
     if (f.q) qs.set("q", f.q)
     if (f.page > 1) qs.set("page", String(f.page))
     setParams(qs)
@@ -827,7 +950,9 @@ export function VulnsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [texto])
 
-  const hayFiltros = Boolean(severidad || categoria || agente || kev || q)
+  const hayFiltros = Boolean(
+    severidad || categoria || agente || kev || ransomware || q
+  )
 
   // El select de agentes se arma con los hosts del resumen; si el filtro activo
   // no está entre ellos igual lo listamos para no perder la selección.
@@ -986,6 +1111,29 @@ export function VulnsPage() {
                 Solo KEV
               </button>
 
+              {/* Ransomware es un subconjunto de KEV, así que prender este apaga
+                  el otro: dejar los dos encendidos sugiere una intersección que
+                  no existe (todo ransomware ya es KEV). */}
+              <button
+                type="button"
+                onClick={() =>
+                  apply({ ransomware: !ransomware, kev: false })
+                }
+                aria-pressed={ransomware}
+                className="rounded-full border px-3 py-1.5 text-sm font-medium transition-colors"
+                style={
+                  ransomware
+                    ? {
+                        borderColor: "var(--zs-danger)",
+                        background: "var(--zs-danger)",
+                        color: "#0b0d09",
+                      }
+                    : { borderColor: "var(--border)", color: "var(--zs-text-muted)" }
+                }
+              >
+                Ransomware
+              </button>
+
               {hayFiltros && (
                 <Button
                   variant="outline"
@@ -996,6 +1144,7 @@ export function VulnsPage() {
                       categoria: "",
                       agente: "",
                       kev: false,
+                      ransomware: false,
                       q: "",
                     })
                   }
@@ -1015,7 +1164,7 @@ export function VulnsPage() {
             }
             return (
               <div className="space-y-4">
-                <CveRows q={l} />
+                <CveRows q={l} onAgente={(h) => apply({ agente: h })} />
                 <div className="flex items-center justify-between">
                   <Button
                     variant="outline"

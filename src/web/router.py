@@ -359,6 +359,7 @@ async def api_vulns_cves(
     categoria: str | None = None,
     agente: str | None = None,
     kev: int = 0,
+    ransomware: int = 0,
     q: str | None = None,
     page: int = 1,
 ) -> Response:
@@ -375,6 +376,7 @@ async def api_vulns_cves(
         categoria=categoria,
         agente=agente,
         kev=bool(kev),
+        ransomware=bool(ransomware),
         q=(q or "").strip()[:100] or None,
         page=max(1, page),
     )

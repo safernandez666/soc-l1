@@ -36,6 +36,7 @@ def _finding(
     cvss: float = 7.5,
     epss: float = 0.01,
     kev: bool = False,
+    ransomware: bool = True,
     priority: float = 40.0,
     package: str = "Google Chrome",
     categoria: str = "Packages",
@@ -53,7 +54,7 @@ def _finding(
         "cvss_score": cvss,
         "epss_score": epss,
         "cisa_kev": kev,
-        "kev": {"ransomware": "Known"} if kev else None,
+        "kev": {"ransomware": "Known" if ransomware else "Unknown"} if kev else None,
         "epss_percentile": 0.5,
         "priority_score": priority,
         "lifecycle_status": status,
@@ -273,7 +274,10 @@ async def test_summary_untriaged_es_bucket_propio(db_path: str) -> None:
 async def test_summary_categoria_kev_y_umbrales(db_path: str) -> None:
     s = await queries.vulns_summary(db_path)
     assert s["por_categoria"] == {"OS": 3, "Packages": 8}
-    assert s["kev"] == {"hallazgos": 3, "cves": 1}
+    assert s["kev"] == {
+        "hallazgos": 3, "cves": 1,
+        "ransomware_hallazgos": 3, "ransomware_cves": 1,
+    }
     assert s["epss_alto"] == 3       # los 3 de CVE-2025-0001, epss 0.9 >= 0.5
     assert s["prioridad_alta"] == 3  # priority 95 >= 80
 
@@ -361,6 +365,14 @@ async def test_summary_base_vieja_sin_columna_categoria(tmp_path: Path) -> None:
 
     c = await queries.vulns_cves(path)
     assert c["cves"][0]["categoria"] == ""
+    # Sin context_object no hay de dónde sacar el flag: se lee como "no es
+    # ransomware" en vez de romper la pantalla.
+    assert c["cves"][0]["kev_ransomware"] is False
+    assert s["kev"]["ransomware_hallazgos"] == 0
+    assert await queries.vulns_cves(path, ransomware=True) == {
+        **c, "cves": [], "total": 0,
+        "filtros": {**c["filtros"], "ransomware": True},
+    }
 
 
 # ===== /ui/api/vulns/cves =====
@@ -399,11 +411,38 @@ async def test_cves_fila_agregada(db_path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cves_tope_de_hosts_pero_conteo_real(db_path: str) -> None:
+async def test_cves_devuelve_todos_los_hosts_del_caso_normal(db_path: str) -> None:
+    """6 hosts entran completos: el tope viejo de 5 truncaba casos reales.
+
+    La pantalla ofrece "¿en cuáles?" como lista desplegable, así que truncar acá
+    era dejarla sin poder contestarlo (662 CVEs de producción pasan de 5 hosts).
+    """
     c = await queries.vulns_cves(db_path)
     fila = next(x for x in c["cves"] if x["cve"] == "CVE-2025-0002")
     assert fila["hosts_count"] == 6
-    assert len(fila["hosts"]) == 5
+    assert len(fila["hosts"]) == 6
+    assert fila["hosts_truncados"] is False
+
+
+@pytest.mark.asyncio
+async def test_cves_tope_de_hosts_avisa_que_trunco(tmp_path: Path) -> None:
+    """Pasado el tope, la lista se corta pero el conteo y el aviso son reales."""
+    path = str(tmp_path / "muchos.db")
+    conn = open_state(path)
+    persist_lifecycle(
+        conn,
+        [
+            _finding(f"h{i}", "CVE-2025-8000", f"SRV{i:03d}", priority=50.0)
+            for i in range(35)
+        ],
+    )
+    conn.close()
+
+    c = await queries.vulns_cves(path)
+    fila = c["cves"][0]
+    assert fila["hosts_count"] == 35
+    assert len(fila["hosts"]) == 30
+    assert fila["hosts_truncados"] is True
 
 
 @pytest.mark.asyncio
@@ -508,7 +547,9 @@ def test_endpoint_summary_contrato(auth_client: TestClient) -> None:
     assert body["cobertura"]["disponible"] is False
     assert set(body["totals"]) == {"activos", "cves_unicos", "agentes", "resueltas_total"}
     assert list(body["por_severidad"]) == ["Critical", "High", "Medium", "Low", "Untriaged"]
-    assert set(body["kev"]) == {"hallazgos", "cves"}
+    assert set(body["kev"]) == {
+        "hallazgos", "cves", "ransomware_hallazgos", "ransomware_cves",
+    }
     assert set(body["top_hosts"][0]) == {"agent_name", "total", "criticas", "kev"}
     assert set(body["tendencia"][0]) == {"fecha", "activos", "nuevas", "resueltas"}
 
@@ -520,12 +561,13 @@ def test_endpoint_cves_contrato(auth_client: TestClient) -> None:
     assert set(body) == {"cves", "total", "page", "per_page", "filtros"}
     assert body["per_page"] == 50
     assert set(body["cves"][0]) == {
-        "cve", "priority_score", "cvss_score", "epss_score", "cisa_kev", "severity",
-        "categoria", "hosts_count", "hosts", "package_name", "first_seen_at",
-        "lifecycle_status",
+        "cve", "priority_score", "cvss_score", "epss_score", "cisa_kev",
+        "kev_ransomware", "severity", "categoria", "hosts_count", "hosts",
+        "hosts_truncados", "package_name", "first_seen_at", "lifecycle_status",
     }
     assert body["filtros"] == {
-        "severidad": None, "categoria": None, "agente": None, "kev": False, "q": None,
+        "severidad": None, "categoria": None, "agente": None, "kev": False,
+        "ransomware": False, "q": None,
     }
 
 
@@ -535,7 +577,7 @@ def test_endpoint_cves_query_params(auth_client: TestClient) -> None:
     body = r.json()
     assert body["filtros"] == {
         "severidad": "Critical", "categoria": None, "agente": None,
-        "kev": True, "q": "windows",
+        "kev": True, "ransomware": False, "q": "windows",
     }
     assert [x["cve"] for x in body["cves"]] == ["CVE-2025-0001"]
 
@@ -579,3 +621,95 @@ async def test_summary_expone_cobertura_persistida(db_path: str) -> None:
     assert cov["agentes_con_datos"] == 26 and cov["agentes_total"] == 28
     assert cov["desfasados"][0]["host"] == "SRVDC2"
     assert cov["hallazgos_dudosos"] == 885
+
+
+# ===== Ransomware: el subconjunto de KEV que CISA liga a campañas conocidas =====
+#
+# El flag no es una columna: vive en context_object.kev.ransomware ("Known" /
+# "Unknown"), así que lo que se protege acá es que json_extract lo lea bien y que
+# un KEV cualquiera NO se cuele como ransomware.
+
+_RANSOM_FINDINGS = [
+    # KEV ligado a ransomware, en 2 hosts.
+    _finding("r1", "CVE-2025-9001", "SRVDC1", kev=True, priority=92.0,
+             package="WinRAR 5.91 (64-bit)"),
+    _finding("r2", "CVE-2025-9001", "SRVDC2", kev=True, priority=92.0,
+             package="WinRAR 5.91 (64-bit)"),
+    # KEV pero SIN ransomware: el caso que no tiene que aparecer al filtrar.
+    _finding("r3", "CVE-2025-9002", "SRVDC1", kev=True, ransomware=False, priority=88.0),
+    # Ni KEV ni ransomware.
+    _finding("r4", "CVE-2025-9003", "SRVDC1", priority=30.0),
+    # Ligado a ransomware pero ya resuelto: no cuenta como activo.
+    _finding("r5", "CVE-2025-9004", "SRVDC1", kev=True, status="resolved", priority=90.0),
+]
+
+
+@pytest.fixture
+def ransom_db(tmp_path: Path) -> str:
+    path = str(tmp_path / "ransom.db")
+    conn = open_state(path)
+    persist_lifecycle(conn, _RANSOM_FINDINGS)
+    conn.close()
+    return path
+
+
+@pytest.mark.asyncio
+async def test_cves_marca_ransomware_solo_donde_corresponde(ransom_db: str) -> None:
+    c = await queries.vulns_cves(ransom_db)
+    por_cve = {x["cve"]: x for x in c["cves"]}
+    assert por_cve["CVE-2025-9001"]["kev_ransomware"] is True
+    # KEV sí, ransomware no: la distinción es todo el punto del filtro.
+    assert por_cve["CVE-2025-9002"]["cisa_kev"] is True
+    assert por_cve["CVE-2025-9002"]["kev_ransomware"] is False
+    assert por_cve["CVE-2025-9003"]["kev_ransomware"] is False
+
+
+@pytest.mark.asyncio
+async def test_cves_filtro_ransomware(ransom_db: str) -> None:
+    c = await queries.vulns_cves(ransom_db, ransomware=True)
+    assert [x["cve"] for x in c["cves"]] == ["CVE-2025-9001"]
+    assert c["total"] == 1
+    assert c["filtros"]["ransomware"] is True
+
+
+@pytest.mark.asyncio
+async def test_filtro_ransomware_excluye_resueltos(ransom_db: str) -> None:
+    c = await queries.vulns_cves(ransom_db, ransomware=True)
+    assert "CVE-2025-9004" not in [x["cve"] for x in c["cves"]]
+
+
+@pytest.mark.asyncio
+async def test_filtro_ransomware_se_combina_con_los_otros(ransom_db: str) -> None:
+    # Un filtro que no matchea deja la lista vacía en vez de ignorar el ransomware.
+    c = await queries.vulns_cves(ransom_db, ransomware=True, agente="SRVWEB")
+    assert c["cves"] == []
+    c = await queries.vulns_cves(ransom_db, ransomware=True, agente="SRVDC2")
+    assert [x["cve"] for x in c["cves"]] == ["CVE-2025-9001"]
+
+
+@pytest.mark.asyncio
+async def test_summary_cuenta_ransomware_aparte_de_kev(ransom_db: str) -> None:
+    s = await queries.vulns_summary(ransom_db)
+    # 3 hallazgos KEV activos (r1, r2, r3) sobre 2 CVEs distintos.
+    assert s["kev"]["hallazgos"] == 3
+    assert s["kev"]["cves"] == 2
+    # De esos, ransomware: 2 hallazgos de 1 solo CVE.
+    assert s["kev"]["ransomware_hallazgos"] == 2
+    assert s["kev"]["ransomware_cves"] == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_sin_ransomware_devuelve_cero_no_none(tmp_path: Path) -> None:
+    path = str(tmp_path / "limpia.db")
+    conn = open_state(path)
+    persist_lifecycle(conn, [_finding("x1", "CVE-2025-9100", "SRVDC1")])
+    conn.close()
+    s = await queries.vulns_summary(path)
+    assert s["kev"]["ransomware_hallazgos"] == 0
+    assert s["kev"]["ransomware_cves"] == 0
+
+
+def test_endpoint_cves_filtro_ransomware(auth_client: TestClient) -> None:
+    r = auth_client.get("/ui/api/vulns/cves?ransomware=1")
+    assert r.status_code == 200
+    assert r.json()["filtros"]["ransomware"] is True

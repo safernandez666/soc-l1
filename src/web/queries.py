@@ -786,7 +786,18 @@ VULN_SEVERITIES = ("Critical", "High", "Medium", "Low", VULN_UNTRIAGED)
 VULN_CATEGORIES = ("OS", "Packages")
 
 VULN_PER_PAGE = 50
-_VULN_MAX_HOSTS = 5  # nombres de agente que se muestran por CVE
+
+# El catálogo CISA KEV marca qué CVEs se usaron en campañas de ransomware
+# (`knownRansomwareCampaignUse`). El pipeline lo guarda en context_object, no en
+# una columna: son 11 hallazgos sobre 16.329, no justifica migrar el esquema y
+# json_extract sobre el índice de lifecycle_status resuelve en milisegundos.
+# Valores del feed: "Known" | "Unknown".
+_KEV_RANSOMWARE_SQL = "json_extract(context_object, '$.kev.ransomware') = 'Known'"
+# Nombres de agente que se mandan por CVE. Estaba en 5 y truncaba de más: el peor
+# CVE del parque toca 14 hosts y 662 CVEs pasan de 5, así que la pantalla no podía
+# contestar "¿en cuáles?" ni teniendo el dato. Con 28 agentes en total, 30 alcanza
+# para no truncar nunca en la práctica y sigue acotando el payload si el parque crece.
+_VULN_MAX_HOSTS = 30
 
 # Un hallazgo cuenta como activo mientras el ciclo de vida no lo dé por resuelto.
 _VULN_ACTIVE = "lifecycle_status != 'resolved'"
@@ -814,6 +825,16 @@ def _vuln_columns(conn: sqlite3.Connection) -> set[str]:
     return {r[1] for r in conn.execute("PRAGMA table_info(vuln_lifecycle)")}
 
 
+def _ransomware_expr(cols: set[str]) -> str:
+    """Expresión SQL del flag de ransomware, tolerante a una base sin context_object.
+
+    Mismo criterio que `_categoria_expr`: la base se abre read-only, así que una
+    base vieja no se migra desde el panel; se lee como "no es ransomware" en vez
+    de tumbar la pantalla entera.
+    """
+    return _KEV_RANSOMWARE_SQL if "context_object" in cols else "0"
+
+
 def _categoria_expr(cols: set[str]) -> str:
     """Expresión SQL para `categoria`, que puede no existir todavía.
 
@@ -836,6 +857,7 @@ def _vuln_filters(
     agente: str | None,
     kev: bool,
     q: str | None,
+    ransomware: bool = False,
 ) -> tuple[str, list[Any]]:
     """WHERE (siempre sobre hallazgos activos) + params, compartido por las dos consultas."""
     where = [_VULN_ACTIVE]
@@ -851,6 +873,10 @@ def _vuln_filters(
         params.append(agente)
     if kev:
         where.append("cisa_kev = 1")
+    # Ransomware implica KEV (el flag vive en la entrada del catálogo), así que
+    # no hace falta pedir los dos: este filtro solo ya acota a KEV.
+    if ransomware:
+        where.append(_ransomware_expr(cols))
     if q:
         where.append("(cve LIKE ? ESCAPE '\\' OR package_name LIKE ? ESCAPE '\\')")
         term = _like_term(q)
@@ -930,8 +956,12 @@ def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
             if r["categoria"] in por_categoria:
                 por_categoria[r["categoria"]] = r["n"]
 
+        ransom = _ransomware_expr(cols)
         kev = conn.execute(
-            f"SELECT count(*) AS hallazgos, count(DISTINCT cve) AS cves "
+            f"SELECT count(*) AS hallazgos, count(DISTINCT cve) AS cves, "
+            f"       sum({ransom}) AS ransomware_hallazgos, "
+            f"       count(DISTINCT CASE WHEN {ransom} THEN cve END) "
+            f"           AS ransomware_cves "
             f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE} AND cisa_kev = 1"
         ).fetchone()
         umbrales = conn.execute(
@@ -979,7 +1009,12 @@ def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
         },
         "por_severidad": por_severidad,
         "por_categoria": por_categoria,
-        "kev": {"hallazgos": kev["hallazgos"], "cves": kev["cves"]},
+        "kev": {
+            "hallazgos": kev["hallazgos"],
+            "cves": kev["cves"],
+            "ransomware_hallazgos": int(kev["ransomware_hallazgos"] or 0),
+            "ransomware_cves": int(kev["ransomware_cves"] or 0),
+        },
         "epss_alto": int(umbrales["epss_alto"] or 0),
         "prioridad_alta": int(umbrales["prio_alta"] or 0),
         "top_hosts": top_hosts,
@@ -1022,6 +1057,7 @@ def _vulns_cves_sync(
     kev: bool = False,
     q: str | None = None,
     page: int = 1,
+    ransomware: bool = False,
 ) -> dict[str, Any]:
     """Hallazgos activos agrupados por CVE, filtrados y paginados (50 por página).
 
@@ -1033,6 +1069,7 @@ def _vulns_cves_sync(
         "categoria": categoria if categoria in VULN_CATEGORIES else None,
         "agente": agente or None,
         "kev": bool(kev),
+        "ransomware": bool(ransomware),
         "q": q or None,
     }
     vacio = {"cves": [], "total": 0, "page": page, "per_page": VULN_PER_PAGE, "filtros": filtros}
@@ -1050,6 +1087,7 @@ def _vulns_cves_sync(
         where, params = _vuln_filters(
             cols, filtros["severidad"], filtros["categoria"],
             filtros["agente"], filtros["kev"], filtros["q"],
+            filtros["ransomware"],
         )
 
         total = conn.execute(
@@ -1063,6 +1101,7 @@ def _vulns_cves_sync(
             f"       max(cvss_score) AS cvss_score, "
             f"       max(epss_score) AS epss_score, "
             f"       max(cisa_kev) AS cisa_kev, "
+            f"       max({_ransomware_expr(cols)}) AS kev_ransomware, "
             f"       min({_SEV_RANK_SQL}) AS sev_rank, "
             f"       count(DISTINCT agent_name) AS hosts_count, "
             f"       min(first_seen_at) AS first_seen_at "
@@ -1113,10 +1152,14 @@ def _vuln_cve_row(grupo: sqlite3.Row, detalle: dict[str, Any]) -> dict[str, Any]
         "cvss_score": float(grupo["cvss_score"] or 0),
         "epss_score": float(grupo["epss_score"] or 0),
         "cisa_kev": bool(grupo["cisa_kev"]),
+        "kev_ransomware": bool(grupo["kev_ransomware"]),
         "severity": _SEV_BY_RANK.get(grupo["sev_rank"], VULN_UNTRIAGED),
         "categoria": _mas_frecuente(detalle["categorias"]),
         "hosts_count": grupo["hosts_count"],
         "hosts": sorted(detalle["hosts"])[:_VULN_MAX_HOSTS],
+        # True si `hosts` no trae todos: la pantalla tiene que decirlo en vez de
+        # mostrar una lista corta como si fuera completa.
+        "hosts_truncados": len(detalle["hosts"]) > _VULN_MAX_HOSTS,
         "package_name": _mas_frecuente(detalle["paquetes"]),
         "first_seen_at": grupo["first_seen_at"],
         "lifecycle_status": next(
@@ -1145,7 +1188,9 @@ async def vulns_cves(
     kev: bool = False,
     q: str | None = None,
     page: int = 1,
+    ransomware: bool = False,
 ) -> dict[str, Any]:
     return await asyncio.to_thread(
-        _vulns_cves_sync, db_path, severidad, categoria, agente, kev, q, page
+        _vulns_cves_sync, db_path, severidad, categoria, agente, kev, q, page,
+        ransomware,
     )
