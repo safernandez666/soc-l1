@@ -4,6 +4,7 @@ import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 import {
   api,
   type VulnCategoria,
+  type VulnCobertura,
   type VulnCve,
   type VulnCvesPage,
   type VulnSeveridad,
@@ -191,7 +192,80 @@ function KevPill({ on }: { on: boolean }) {
   )
 }
 
+/** Aviso de cobertura: qué NO está representado en los números de arriba.
+ *
+ * Sin esto la pantalla miente por omisión. Un agente al que el detector nunca le
+ * generó un hallazgo no deja ninguna fila en la base, así que no aparece — y un
+ * servidor sin medir termina leyéndose igual que uno limpio. Los desfasados son el
+ * problema inverso: siguen contando hallazgos que el host ya parcheó.
+ */
+function CoverageNotice({ c }: { c?: VulnCobertura }) {
+  if (!c?.disponible) return null
+  const sinDatos = c.sin_datos ?? []
+  const desfasados = c.desfasados ?? []
+  if (sinDatos.length === 0 && desfasados.length === 0) return null
+
+  return (
+    <Card
+      style={{
+        borderColor: "color-mix(in oklab, var(--zs-warn) 55%, transparent)",
+        background: "color-mix(in oklab, var(--zs-warn) 7%, transparent)",
+      }}
+    >
+      <CardContent className="space-y-3 py-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <h3 className="text-sm font-semibold" style={{ color: "var(--zs-warn)" }}>
+            Los números de esta pantalla no cubren todo el parque
+          </h3>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {c.agentes_con_datos ?? 0} de {c.agentes_total ?? 0} agentes con datos
+          </span>
+        </div>
+
+        {sinDatos.length > 0 && (
+          <p className="text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">
+              Sin ningún hallazgo ({sinDatos.length}):
+            </span>{" "}
+            {sinDatos.map((h, i) => (
+              <span key={h}>
+                {i > 0 && ", "}
+                <span className="font-mono text-xs text-foreground">{h}</span>
+              </span>
+            ))}
+            . Están activos y reportando inventario, pero el detector de Wazuh no
+            genera hallazgos para ellos: no aparecen acá, y eso no significa que
+            estén limpios.
+          </p>
+        )}
+
+        {desfasados.length > 0 && (
+          <p className="text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">
+              Con inventario desactualizado ({desfasados.length}):
+            </span>{" "}
+            {desfasados.map((d, i) => (
+              <span key={d.host}>
+                {i > 0 && ", "}
+                <span className="font-mono text-xs text-foreground">{d.host}</span>{" "}
+                <span className="tabular-nums">({d.hallazgos})</span>
+              </span>
+            ))}
+            . El índice conserva un build de SO anterior al que el agente reporta
+            hoy, así que sus{" "}
+            <span className="tabular-nums font-medium text-foreground">
+              {c.hallazgos_dudosos ?? 0}
+            </span>{" "}
+            hallazgos probablemente ya estén parcheados y sigan contando.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 // ===== Bloques del resumen =====
+
 
 function HeadlineBlock({ s }: { s: VulnSummary }) {
   const t = s.totals
@@ -786,6 +860,8 @@ export function VulnsPage() {
             </Empty>
           ) : (
             <div className="space-y-10">
+              <CoverageNotice c={s.cobertura} />
+
               <HeadlineBlock s={s} />
 
               <Section title="Cómo se reparte el backlog">

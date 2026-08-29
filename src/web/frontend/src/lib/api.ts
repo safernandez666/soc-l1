@@ -395,6 +395,26 @@ export interface VulnHost {
   kev: number
 }
 
+export interface VulnDesfasado {
+  host: string
+  indexado: string
+  actual: string
+  hallazgos: number
+}
+
+/** Cobertura del inventario: qué agentes NO están representados en los datos. */
+export interface VulnCobertura {
+  disponible: boolean
+  actualizado?: string
+  agentes_total?: number
+  agentes_con_datos?: number
+  /** Activos y reportando, pero el detector no genera ningún hallazgo. */
+  sin_datos?: string[]
+  /** El índice tiene un build de SO viejo: sus hallazgos ya podrían estar parcheados. */
+  desfasados?: VulnDesfasado[]
+  hallazgos_dudosos?: number
+}
+
 export interface VulnSummary {
   available: boolean
   error?: string
@@ -408,6 +428,7 @@ export interface VulnSummary {
   prioridad_alta?: number
   top_hosts?: VulnHost[]
   tendencia?: VulnTrendPoint[]
+  cobertura?: VulnCobertura
 }
 
 export interface VulnCve {

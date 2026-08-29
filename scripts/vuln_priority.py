@@ -77,6 +77,7 @@ from src.vuln.store import (
     group_by_cve,
     load_previous_snapshot,
     open_state,
+    persist_coverage,
     persist_lifecycle,
     persist_run,
     save_snapshot,
@@ -165,7 +166,6 @@ def main() -> int:
     else:
         persist_lifecycle(conn, rows)
         persist_run(conn, summary)
-    conn.close()
 
     active = [r for r in rows if r["lifecycle_status"] != "resolved"]
     groups = group_by_cve(active)
@@ -174,6 +174,11 @@ def main() -> int:
     # contra el snapshot semanal anterior (lectura únicamente).
     agent_os = fetch_agent_os_versions()
     cov = assess_coverage(active, agent_os)
+    # El snapshot de cobertura lo consume /ui: sin esto la pantalla no puede saber
+    # que hay agentes sin ningún hallazgo, porque no dejan rastro en la base.
+    if not args.dry_run:
+        persist_coverage(conn, cov, len(agent_os))
+    conn.close()
     if cov.get("disponible"):
         logger.info(
             "Calidad del dato: %s host(s) desfasados (%s hallazgos dudosos) | %s sin datos",

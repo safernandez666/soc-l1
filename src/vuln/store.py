@@ -288,6 +288,44 @@ def assess_coverage(active: list[dict], agent_os: dict[str, str]) -> dict:
     }
 
 
+def persist_coverage(conn: sqlite3.Connection, cov: dict, total_agentes: int) -> None:
+    """Guarda el resultado de assess_coverage() para que /ui lo muestre.
+
+    La pantalla no puede recalcular esto: necesita la API del manager para saber
+    qué agentes existen, y un host sin hallazgos no deja rastro en la base. Sin
+    este snapshot, /ui omite en silencio a los agentes sin datos y un servidor sin
+    medir se lee igual que uno sano.
+    """
+    if not cov.get("disponible"):
+        return
+    payload = {
+        "sin_datos": cov.get("sin_datos", []),
+        "desfasados": cov.get("desfasados", []),
+        "hallazgos_dudosos": cov.get("hallazgos_dudosos", 0),
+        "agentes_total": total_agentes,
+        "agentes_con_datos": total_agentes - len(cov.get("sin_datos", [])),
+    }
+    conn.execute(
+        "INSERT INTO vuln_state_cache (id, updated_at, state) VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, state=excluded.state",
+        (_now_iso(), json.dumps(payload, ensure_ascii=False)),
+    )
+    conn.commit()
+
+
+def load_coverage(conn: sqlite3.Connection) -> dict:
+    """Lee el último snapshot de cobertura. {} si nunca se escribió."""
+    row = conn.execute("SELECT updated_at, state FROM vuln_state_cache WHERE id = 1").fetchone()
+    if not row:
+        return {}
+    try:
+        data = json.loads(row[1])
+    except (TypeError, ValueError):
+        return {}
+    data["updated_at"] = row[0]
+    return data
+
+
 # --------------------------------------------------------------------------
 # Cumplimiento de parches por host (los datos del reporte semanal original)
 # --------------------------------------------------------------------------

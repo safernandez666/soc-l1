@@ -858,6 +858,38 @@ def _vuln_filters(
     return " AND ".join(where), params
 
 
+def _vuln_cobertura(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Snapshot de cobertura que dejó la última ingesta.
+
+    Los agentes SIN ningún hallazgo no dejan rastro en vuln_lifecycle, así que la
+    pantalla no puede deducirlos de la base: si no los mostramos, un servidor que
+    el detector nunca evaluó se ve igual que uno limpio. El snapshot lo escribe
+    persist_coverage() en cada ingesta, con la lista de la API del manager.
+    """
+    try:
+        row = conn.execute(
+            "SELECT updated_at, state FROM vuln_state_cache WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {"disponible": False}
+    if not row:
+        return {"disponible": False}
+    try:
+        data = json.loads(row["state"])
+    except (TypeError, ValueError):
+        return {"disponible": False}
+    sin_datos = data.get("sin_datos") or []
+    return {
+        "disponible": True,
+        "actualizado": row["updated_at"],
+        "agentes_total": data.get("agentes_total", 0),
+        "agentes_con_datos": data.get("agentes_con_datos", 0),
+        "sin_datos": sin_datos,
+        "desfasados": data.get("desfasados") or [],
+        "hallazgos_dudosos": data.get("hallazgos_dudosos", 0),
+    }
+
+
 def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
     """Resumen del inventario activo + serie histórica de corridas."""
     try:
@@ -931,6 +963,8 @@ def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
         ).fetchone()
         tendencia = _vuln_tendencia(conn)
 
+        cobertura = _vuln_cobertura(conn)
+
     return {
         "available": True,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -950,6 +984,7 @@ def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
         "prioridad_alta": int(umbrales["prio_alta"] or 0),
         "top_hosts": top_hosts,
         "tendencia": tendencia,
+        "cobertura": cobertura,
     }
 
 

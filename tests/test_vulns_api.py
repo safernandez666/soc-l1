@@ -501,7 +501,11 @@ def test_endpoint_summary_contrato(auth_client: TestClient) -> None:
     assert set(body) == {
         "available", "generated_at", "last_run", "totals", "por_severidad",
         "por_categoria", "kev", "epss_alto", "prioridad_alta", "top_hosts", "tendencia",
+        "cobertura",
     }
+    # Sin snapshot de cobertura la clave existe igual, con disponible=False: la
+    # pantalla necesita distinguir "no hay dato" de "cobertura completa".
+    assert body["cobertura"]["disponible"] is False
     assert set(body["totals"]) == {"activos", "cves_unicos", "agentes", "resueltas_total"}
     assert list(body["por_severidad"]) == ["Critical", "High", "Medium", "Low", "Untriaged"]
     assert set(body["kev"]) == {"hallazgos", "cves"}
@@ -540,3 +544,38 @@ def test_endpoint_cves_page_invalida_cae_en_la_primera(auth_client: TestClient) 
     r = auth_client.get("/ui/api/vulns/cves?page=-5")
     assert r.status_code == 200
     assert r.json()["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_expone_cobertura_persistida(db_path: str) -> None:
+    """El snapshot que deja la ingesta llega tal cual al summary.
+
+    Los agentes sin ningún hallazgo no dejan filas en vuln_lifecycle, así que la
+    única forma de que /ui sepa de ellos es este snapshot.
+    """
+    import json as _json
+    import sqlite3 as _sq
+
+    payload = {
+        "sin_datos": ["SRVWSUS", "SRVIIS"],
+        "desfasados": [
+            {"host": "SRVDC2", "indexado": "10.0.17763.7009",
+             "actual": "10.0.17763.9020", "hallazgos": 885}
+        ],
+        "hallazgos_dudosos": 885,
+        "agentes_total": 28,
+        "agentes_con_datos": 26,
+    }
+    with _sq.connect(db_path) as c:
+        c.execute(
+            "INSERT INTO vuln_state_cache (id, updated_at, state) VALUES (1, ?, ?)",
+            ("2026-08-28T22:00:00+00:00", _json.dumps(payload)),
+        )
+
+    s = await queries.vulns_summary(db_path)
+    cov = s["cobertura"]
+    assert cov["disponible"] is True
+    assert cov["sin_datos"] == ["SRVWSUS", "SRVIIS"]
+    assert cov["agentes_con_datos"] == 26 and cov["agentes_total"] == 28
+    assert cov["desfasados"][0]["host"] == "SRVDC2"
+    assert cov["hallazgos_dudosos"] == 885
