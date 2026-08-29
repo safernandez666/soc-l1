@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react"
-import { Link, useSearchParams } from "react-router-dom"
+import { useSearchParams } from "react-router-dom"
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 import {
   api,
@@ -290,7 +290,13 @@ function CoverageNotice({ c }: { c?: VulnCobertura }) {
 // ===== Bloques del resumen =====
 
 
-function HeadlineBlock({ s }: { s: VulnSummary }) {
+function HeadlineBlock({
+  s,
+  onRansomware,
+}: {
+  s: VulnSummary
+  onRansomware: () => void
+}) {
   const t = s.totals
   const kev = s.kev ?? { hallazgos: 0, cves: 0 }
   // Los CVEs de KEV que CISA ligó a campañas de ransomware. Es el peor recorte
@@ -335,9 +341,11 @@ function HeadlineBlock({ s }: { s: VulnSummary }) {
               {num(kev.cves)} CVE distintos con explotación confirmada
             </div>
             {ransomCves > 0 && (
-              <Link
-                to="/ui/vulns?ransomware=1"
-                className="mt-3 flex items-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold transition-opacity hover:opacity-80"
+              <button
+                type="button"
+                onClick={onRansomware}
+                title="Filtrar la lista por los CVEs ligados a ransomware"
+                className="mt-3 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs font-semibold transition-opacity hover:opacity-80"
                 style={{ background: "var(--zs-danger)", color: "#0b0d09" }}
               >
                 <span className="tracking-wide">RANSOMWARE</span>
@@ -345,7 +353,7 @@ function HeadlineBlock({ s }: { s: VulnSummary }) {
                   {num(ransomCves)} CVE · {num(kev.ransomware_hallazgos ?? 0)}{" "}
                   hallazgos
                 </span>
-              </Link>
+              </button>
             )}
             <p className="mt-2 text-xs text-muted-foreground">
               Catálogo de CISA: se están explotando in-the-wild ahora. Van
@@ -987,7 +995,10 @@ export function VulnsPage() {
             <div className="space-y-10">
               <CoverageNotice c={s.cobertura} />
 
-              <HeadlineBlock s={s} />
+              <HeadlineBlock
+                s={s}
+                onRansomware={() => apply({ ransomware: true, kev: false })}
+              />
 
               <Section title="Cómo se reparte el backlog">
                 <div className="grid gap-4 md:grid-cols-2">
