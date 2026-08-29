@@ -19,8 +19,9 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -44,6 +45,53 @@ def _spawn(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+# Reglas AD de cambio de cuenta (altas/bajas/grupos) que SOC-L1 espeja por Teams.
+# El correo lo sigue mandando el integration custom-email-unified de Wazuh; acá solo
+# agregamos la tarjeta de Teams (informativa, sin triage/aprobación) y cortamos el
+# ingest — estos eventos no van al Narrator ni generan ticket.
+_AD_ACCOUNT_CHANGE_RULES = frozenset(
+    {"100080", "100081", "100082", "100083", "100084", "100085"}
+)
+
+
+def _is_ad_account_change(alert: NormalizedAlert) -> bool:
+    return (alert.wazuh_rule.id or "") in _AD_ACCOUNT_CHANGE_RULES
+
+
+def _ad_eventdata(alert: NormalizedAlert) -> dict:
+    """Extrae win.system.eventID + win.eventdata.{target,subject}UserName del raw.
+
+    Los eventos Windows AD traen el detalle en data.win (que el normalizer no
+    desarma); lo leemos acá para la tarjeta de Teams.
+    """
+    win = ((alert.raw or {}).get("data") or {}).get("win") or {}
+    event_id = (win.get("system") or {}).get("eventID")
+    eventdata = win.get("eventdata") or {}
+    return {
+        "event_id": str(event_id) if event_id is not None else None,
+        "target_user": eventdata.get("targetUserName"),
+        "subject_user": eventdata.get("subjectUserName"),
+    }
+
+
+async def _notify_ad_account_change(alert: NormalizedAlert, settings: Settings) -> None:
+    """Espejo Teams de un cambio de cuenta AD. Fire-and-forget (nunca propaga)."""
+    from src.teams import send_teams_account_change
+
+    ev = _ad_eventdata(alert)
+    await send_teams_account_change(
+        settings,
+        alert_id=alert.alert_id,
+        severity=alert.severity_source,
+        rule_id=alert.wazuh_rule.id,
+        rule_desc=alert.wazuh_rule.description,
+        event_id=ev["event_id"],
+        target_user=ev["target_user"],
+        subject_user=ev["subject_user"],
+        host=alert.device.hostname,
+    )
 
 
 @asynccontextmanager
@@ -84,15 +132,19 @@ async def lifespan(app: FastAPI):
 
     # Init SQLite si Narrator está habilitado (es lo único que la usa)
     sweeper: asyncio.Task | None = None
+    invgate_sweeper: asyncio.Task | None = None
     if settings.enable_narrator:
         from src.state import init_db
 
         await init_db(settings.state_db_path)
         sweeper = asyncio.create_task(_purge_sweeper(settings))
+        invgate_sweeper = asyncio.create_task(_invgate_reconcile_sweeper(settings))
 
     yield
     if sweeper is not None:
         sweeper.cancel()
+    if invgate_sweeper is not None:
+        invgate_sweeper.cancel()
     logger.info("SOC L1 service shutting down")
 
 
@@ -108,6 +160,21 @@ async def _purge_sweeper(settings: Settings) -> None:
         except Exception:  # noqa: BLE001 - el sweeper nunca debe tumbar el servicio
             logger.exception("purge sweeper falló (reintenta en el próximo ciclo)")
         await asyncio.sleep(6 * 3600)
+
+
+async def _invgate_reconcile_sweeper(settings: Settings) -> None:
+    """Reconcilia el estado real de los tickets InvGate cada 30 min (y al boot).
+
+    InvGate = fuente de verdad: releemos y persistimos el estado en state.db para
+    que el dashboard muestre la realidad, no nuestra suposición al cerrar."""
+    from src.invgate_sync import reconcile_invgate
+
+    while True:
+        try:
+            await reconcile_invgate(settings)
+        except Exception:  # noqa: BLE001 - nunca debe tumbar el servicio
+            logger.exception("invgate reconcile falló (reintenta en el próximo ciclo)")
+        await asyncio.sleep(30 * 60)
 
 
 app = FastAPI(
@@ -207,6 +274,21 @@ async def wazuh_webhook(
         len(alert.files),
     )
 
+    # Cambio de cuenta AD (alta/baja/grupo, reglas 100080-100085): SOC-L1 solo lo
+    # espeja por Teams y corta. El correo con el detalle lo sigue mandando el
+    # integration custom-email-unified de Wazuh — no pasa por triage/Narrator.
+    if _is_ad_account_change(alert):
+        if settings.teams_webhook_url:
+            _spawn(_notify_ad_account_change(alert, settings))
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "ad_account_change_notified",
+                "alert_id": alert.alert_id,
+                "rule_id": alert.wazuh_rule.id,
+            },
+        )
+
     # Auto-block FortiGate. Ver docs/fortigate-autoblock-plan.md. Best-effort.
     fgt_decision = None
     fgt_outcome = None
@@ -228,17 +310,12 @@ async def wazuh_webhook(
     # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
     if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
         if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
-            from src import mailer
-
+            # Closed-loop con auditoría: crea+cierra ticket InvGate del bloqueo y manda
+            # el email de confirmación con el número de ticket + lo que quedó registrado.
+            # El dedup por IP (mark_notified en enforce) garantiza 1 ticket por IP/ventana.
             _spawn(
-                mailer.send_fgt_block_email(
-                    settings,
-                    alert_id=alert.alert_id,
-                    ip=fgt_decision.ip,
-                    rule_id=fgt_decision.rule_id,
-                    host=alert.device.hostname,
-                    ttl_hours=settings.fortigate_block_ttl_hours,
-                    expires_at=fgt_outcome.expires_at,
+                _fgt_block_ticket_and_notify(
+                    settings, alert, fgt_decision, fgt_outcome
                 )
             )
         return JSONResponse(
@@ -282,6 +359,20 @@ async def wazuh_webhook(
                     ttl_hours=settings.fortigate_block_ttl_hours,
                 )
             )
+            # Espejo por Teams (Fase 0 observe). Fire-and-forget.
+            if settings.teams_webhook_url:
+                from src.teams import send_teams_observation
+
+                _spawn(
+                    send_teams_observation(
+                        settings,
+                        alert_id=alert.alert_id,
+                        ip=fgt_decision.ip,
+                        rule_id=fgt_decision.rule_id,
+                        host=alert.device.hostname,
+                        ttl_hours=settings.fortigate_block_ttl_hours,
+                    )
+                )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
@@ -684,6 +775,17 @@ async def _run_narrator_and_request_approval(
             enrichment=enrichment,
             threat_intel=threat_intel,
         )
+
+        # Notificación Teams (Fase 1): tarjeta con botones a /review y /approve.
+        # Fire-and-forget — nunca aborta el pipeline.
+        if settings.teams_webhook_url:
+            try:
+                from src.teams import send_teams_approval_request
+
+                await send_teams_approval_request(settings, alert, plan, token)
+            except Exception:
+                logger.exception("teams: approval_request falló para alert=%s",
+                                 alert.alert_id)
     except Exception:
         logger.exception("narrator/approval failed for alert id=%s", alert.alert_id)
 
@@ -807,6 +909,146 @@ async def _update_invgate_post_execution(
         )
 
 
+def _build_fgt_block_ticket(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> tuple[str, str]:
+    """Arma (title, description) del ticket InvGate para un auto-block FortiGate.
+
+    El MISMO texto se inyecta en el ticket y se muestra en el email de bloqueo,
+    para que el analista vea exactamente qué quedó registrado en InvGate.
+    """
+    ttl_h = settings.fortigate_block_ttl_hours
+    title = (
+        f"[SOC-L1][FortiGate] IP bloqueada {decision.ip} — "
+        f"regla IPS {decision.rule_id or '—'}"
+    )
+    description = (
+        "SOC-L1 detectó una alerta IPS de alta confianza y bloqueó automáticamente "
+        "la IP origen en FortiGate (quarantine con TTL). El ataque ya está contenido "
+        "— no requiere acción humana.\n\n"
+        f"IP bloqueada:   {decision.ip}\n"
+        f"Regla IPS:      {decision.rule_id or '—'}\n"
+        f"Host / origen:  {alert.device.hostname or '—'}\n"
+        f"Alerta:         {alert.alert_id}\n"
+        f"TTL del ban:    {ttl_h}h\n"
+        f"Expira:         {outcome.expires_at or '—'}\n\n"
+        "Acción ejecutada: quarantine_ip (banned users con TTL) en FortiGate.\n"
+        "El ban se libera solo al vencer el TTL.\n\n"
+        "Ticket creado y cerrado automáticamente por SOC-L1: la amenaza ya fue "
+        "contenida. Queda como registro de auditoría del bloqueo."
+    )
+    return title, description
+
+
+async def _fgt_block_ticket_and_notify(
+    settings: Settings,
+    alert: NormalizedAlert,
+    decision,
+    outcome,
+) -> None:
+    """Crea+cierra ticket InvGate del auto-block y manda el email de bloqueo con el ticket.
+
+    Closed-loop con auditoría: el bloqueo en FortiGate ya pasó (best-effort, nunca rompe
+    el ingest). El cierre (PUT /incident.solution.accept) puede dar HTTP 403 si la cuenta
+    de API no tiene permiso de cierre; en ese caso el ticket queda ABIERTO y el email lo
+    refleja. Si InvGate no está configurado, manda el email igual sin número de ticket.
+    """
+    title, description = _build_fgt_block_ticket(settings, alert, decision, outcome)
+
+    request_id: int | None = None
+    closed = False
+    try:
+        from src.tools.invgate import InvgateClient, is_configured, priority_id_from_risk
+
+        if is_configured(settings):
+            async with InvgateClient(settings) as client:
+                created = await client.create_incident(
+                    title=title,
+                    description=description,
+                    priority_id=priority_id_from_risk("high"),
+                )
+                if created.ok and created.request_id is not None:
+                    request_id = created.request_id
+                    # Cierre automático (permiso de resolver habilitado 2026-07-23):
+                    # el auto-block es sin human-in-the-loop y la amenaza ya está
+                    # contenida, así que el ticket se abre Y se cierra en el acto.
+                    # close_incident propone la solución (pública, con el detalle del
+                    # bloqueo) y la acepta. Best-effort: si el cierre falla (409 /
+                    # estado no soluble), el ticket queda abierto como registro y
+                    # closed=False; el flujo nunca aborta por esto.
+                    closed_res = await client.close_incident(
+                        request_id,
+                        solution_comment=(
+                            f"Caso contenido automáticamente por SOC-L1 auto-block. "
+                            f"IP {decision.ip} en quarantine en FortiGate hasta "
+                            f"{outcome.expires_at or 'vencimiento del TTL'}. "
+                            f"No requiere acción humana."
+                        ),
+                    )
+                    closed = closed_res.ok
+        else:
+            logger.info(
+                "🎫 INVGATE no configurado - skip ticket auto-block ip=%s", decision.ip
+            )
+    except Exception:  # noqa: BLE001 - ticket es best-effort, nunca rompe el flujo
+        logger.exception(
+            "invgate: ticket auto-block falló | ip=%s alert=%s",
+            decision.ip, alert.alert_id,
+        )
+
+    # Registro para la vista FortiGate (creados / cerrados / abiertos esperando cierre).
+    if request_id is not None:
+        from src import fortigate_autoblock
+
+        fortigate_autoblock.record_ticket(
+            settings,
+            alert_id=alert.alert_id,
+            ip=decision.ip,
+            rule_id=decision.rule_id,
+            request_id=request_id,
+            created=True,
+            closed=closed,
+        )
+
+    from src import mailer
+
+    await mailer.send_fgt_block_email(
+        settings,
+        alert_id=alert.alert_id,
+        ip=decision.ip,
+        rule_id=decision.rule_id,
+        host=alert.device.hostname,
+        ttl_hours=settings.fortigate_block_ttl_hours,
+        expires_at=outcome.expires_at,
+        invgate_request_id=request_id,
+        invgate_closed=closed,
+        invgate_description=description,
+    )
+
+    # Espejo por Teams (Fase 1): el auto-block cortocircuita antes del Narrator, así
+    # que no pasa por los hooks de approval/closure. Fire-and-forget, nunca propaga.
+    if settings.teams_webhook_url:
+        try:
+            from src.teams import send_teams_block
+
+            await send_teams_block(
+                settings,
+                alert_id=alert.alert_id,
+                ip=decision.ip,
+                rule_id=decision.rule_id,
+                host=alert.device.hostname,
+                ttl_hours=settings.fortigate_block_ttl_hours,
+                expires_at=outcome.expires_at,
+                invgate_request_id=request_id,
+                invgate_closed=closed,
+            )
+        except Exception:
+            logger.exception("teams: fgt_block falló para alert=%s", alert.alert_id)
+
+
 # ===== Approval endpoints =====
 
 
@@ -840,7 +1082,7 @@ def _decision_meta_html(alert_id: str) -> str:
 
 
 def _render_decision_page(
-    state_key: str, body_html: str, meta_html: str = ""
+    state_key: str, body_html: str, meta_html: str = "", extra_action_html: str = ""
 ) -> HTMLResponse:
     """Render página de decisión con el design system de soc-l1.
 
@@ -848,6 +1090,8 @@ def _render_decision_page(
     body_html: contenido del cuerpo (puede contener <code>, <strong>, etc.)
     meta_html: bloque opcional (alert_id + hora) que se muestra prominente en el
         banner, para que el operador distinga ESTA decisión de una pestaña vieja.
+    extra_action_html: acción opcional (p.ej. link "Cerrar ticket InvGate") que se
+        muestra ARRIBA del botón "Cerrar pestaña". Se inyecta tal cual (ya escapado).
     """
     s = _PAGE_STATES.get(state_key, _PAGE_STATES["error"])
     page = f"""<!DOCTYPE html>
@@ -887,6 +1131,7 @@ def _render_decision_page(
       <div class="body">{body_html}</div>
     </div>
     <div style="text-align:center; padding: 4px 24px 20px;">
+      {extra_action_html}
       <button onclick="cerrarPestana()"
               style="padding:12px 28px; border:none; border-radius:6px; cursor:pointer;
                      background:{s["accent"]}; color:white; font:bold 14px sans-serif;">
@@ -918,6 +1163,24 @@ def _render_decision_page(
 </html>
 """
     return HTMLResponse(content=page)
+
+
+def _close_ticket_action_html(token: str, invgate_rid: int | None) -> str:
+    """Link "Cerrar ticket InvGate #N" para las páginas de decisión man-in-the-loop.
+
+    Sólo aparece si el caso tiene ticket InvGate. En los casos con aprobación humana el
+    cierre NO es automático (a diferencia del auto-block): se le da al analista la OPCIÓN
+    de cerrarlo desde la misma página de decisión.
+    """
+    if not invgate_rid:
+        return ""
+    return (
+        f'<a href="/close-ticket/{token}" '
+        'style="display:inline-block; padding:12px 28px; border-radius:6px; '
+        'background:#0969da; color:white; font:bold 14px sans-serif; '
+        'text-decoration:none; margin:0 0 12px;">'
+        f'🎫 Cerrar ticket InvGate #{invgate_rid}</a><br>'
+    )
 
 
 async def _send_closure_safely(
@@ -957,19 +1220,38 @@ async def _send_closure_safely(
     )
 
 
-async def _handle_decision(
+@dataclass(slots=True)
+class DecisionOutcome:
+    """Qué pasó al aplicar una decisión, sin decidir todavía cómo se muestra.
+
+    La comparten la página HTML que abre el aprobador desde el correo (/approve,
+    /reject, /decide) y la API del dashboard (/ui/api/case/{rowid}/decide): una
+    sola ruta de mutación y de efectos de lado, dos formatos de salida.
+    """
+
+    state: str  # ok | not_found | expired | already | plan_error
+    decision: str
+    row: dict[str, Any] | None = None
+    alert_id: str | None = None
+    prev_status: str | None = None
+    invgate_request_id: int | None = None
+    actions_to_run: list[Any] = field(default_factory=list)
+    skipped: int = 0
+
+
+async def _decide_and_apply(
     request: Request,
     settings: Settings,
     token: str,
     decision: str,
     selected_action_indices: list[int] | None = None,
-) -> HTMLResponse:
-    """Lógica común para /approve, /reject y /decide.
+) -> DecisionOutcome:
+    """Aplica la decisión y dispara sus efectos (InvGate, cierre, executor).
 
-    selected_action_indices: si viene (desde /decide), solo esas acciones se ejecutan.
-    Si None y decision='approved', se ejecutan TODAS (compat con /approve clásico).
+    selected_action_indices: si viene, solo esas acciones se ejecutan. Si es None
+    y decision='approved', se ejecutan TODAS (compat con /approve clásico).
     """
-    from src.state import decide_approval, mark_executed
+    from src.state import decide_approval
 
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
@@ -986,11 +1268,7 @@ async def _handle_decision(
 
     if result == "not_found":
         logger.warning("APPROVAL_NOT_FOUND | token=%s ip=%s", token[:12], ip)
-        return _render_decision_page(
-            "not_found",
-            "Este link no corresponde a ningún approval pendiente. "
-            "Puede haber sido manipulado o pertenecer a otro entorno.",
-        )
+        return DecisionOutcome(state="not_found", decision=decision)
 
     if result == "expired":
         logger.warning(
@@ -999,11 +1277,11 @@ async def _handle_decision(
             token[:12],
             ip,
         )
-        return _render_decision_page(
-            "expired",
-            f"Este approval excedió el TTL de <strong>{settings.approval_ttl_hours}h</strong> "
-            "y no puede ser decidido. Si la alerta sigue siendo relevante, esperá la próxima "
-            "iteración del pipeline.",
+        return DecisionOutcome(
+            state="expired",
+            decision=decision,
+            row=row,
+            alert_id=row["alert_id"] if row else None,
         )
 
     if result == "already_decided":
@@ -1015,11 +1293,12 @@ async def _handle_decision(
             prev,
             ip,
         )
-        return _render_decision_page(
-            "already",
-            f"Este approval ya fue resuelto previamente (estado: <strong>{prev}</strong>). "
-            "Cada link es single-use y no admite cambios.",
-            meta_html=_decision_meta_html(row["alert_id"]) if row else "",
+        return DecisionOutcome(
+            state="already",
+            decision=decision,
+            row=row,
+            alert_id=row["alert_id"] if row else None,
+            prev_status=prev,
         )
 
     # result == "ok"
@@ -1044,12 +1323,12 @@ async def _handle_decision(
         _spawn(
             _send_closure_safely(settings, row, decision="rejected", execution_results=None)
         )
-        return _render_decision_page(
-            "rejected",
-            f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
-            f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
-            "y timestamp para audit.",
-            meta_html=_decision_meta_html(alert_id),
+        return DecisionOutcome(
+            state="ok",
+            decision=decision,
+            row=row,
+            alert_id=alert_id,
+            invgate_request_id=invgate_rid,
         )
 
     # approved → ejecutar plan
@@ -1059,13 +1338,15 @@ async def _handle_decision(
         plan = NarratorPlan.model_validate_json(row["plan_json"])
     except Exception:
         logger.exception("APPROVAL_PLAN_PARSE_FAILED | alert=%s", alert_id)
-        return _render_decision_page(
-            "error",
-            "Aprobaste, pero el plan guardado no pudo deserializarse. "
-            "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
+        return DecisionOutcome(
+            state="plan_error",
+            decision=decision,
+            row=row,
+            alert_id=alert_id,
+            invgate_request_id=invgate_rid,
         )
 
-    # Filtrar por acciones seleccionadas (si vinieron de /decide).
+    # Filtrar por acciones seleccionadas (si vinieron de /decide o del dashboard).
     # Si selected_action_indices es None, se ejecutan todas (modo /approve clásico).
     total_actions = len(plan.actions)
     if selected_action_indices is not None:
@@ -1076,15 +1357,86 @@ async def _handle_decision(
         actions_to_run = plan.actions
         skipped = 0
 
-    # Lanzamos el executor en background para responder rápido al humano que clickeó
+    # Lanzamos el executor en background para responder rápido al humano que decidió
     _spawn(
         _execute_approved_plan_in_background(
             settings, token, alert_id, plan, actions_to_run, invgate_rid
         )
     )
 
+    return DecisionOutcome(
+        state="ok",
+        decision=decision,
+        row=row,
+        alert_id=alert_id,
+        invgate_request_id=invgate_rid,
+        actions_to_run=actions_to_run,
+        skipped=skipped,
+    )
+
+
+async def _handle_decision(
+    request: Request,
+    settings: Settings,
+    token: str,
+    decision: str,
+    selected_action_indices: list[int] | None = None,
+) -> HTMLResponse:
+    """Página HTML de /approve, /reject y /decide sobre el resultado de decidir."""
+    outcome = await _decide_and_apply(
+        request, settings, token, decision, selected_action_indices
+    )
+
+    if outcome.state == "not_found":
+        return _render_decision_page(
+            "not_found",
+            "Este link no corresponde a ningún approval pendiente. "
+            "Puede haber sido manipulado o pertenecer a otro entorno.",
+        )
+
+    if outcome.state == "expired":
+        return _render_decision_page(
+            "expired",
+            f"Este approval excedió el TTL de <strong>{settings.approval_ttl_hours}h</strong> "
+            "y no puede ser decidido. Si la alerta sigue siendo relevante, esperá la próxima "
+            "iteración del pipeline.",
+        )
+
+    if outcome.state == "already":
+        return _render_decision_page(
+            "already",
+            f"Este approval ya fue resuelto previamente (estado: "
+            f"<strong>{outcome.prev_status}</strong>). "
+            "Cada link es single-use y no admite cambios.",
+            meta_html=(
+                _decision_meta_html(outcome.alert_id) if outcome.alert_id else ""
+            ),
+        )
+
+    if outcome.state == "plan_error":
+        return _render_decision_page(
+            "error",
+            "Aprobaste, pero el plan guardado no pudo deserializarse. "
+            "Las acciones <strong>no se ejecutaron</strong>. Revisar logs del servicio.",
+        )
+
+    alert_id = outcome.alert_id
+    invgate_rid = outcome.invgate_request_id
+
+    if outcome.decision == "rejected":
+        return _render_decision_page(
+            "rejected",
+            f"El plan de acción fue rechazado. <strong>No se ejecutará ninguna acción</strong> "
+            f"para la alerta <code>{alert_id}</code>. Quedó registrada la decisión con tu IP "
+            "y timestamp para audit.",
+            meta_html=_decision_meta_html(alert_id),
+            extra_action_html=_close_ticket_action_html(token, invgate_rid),
+        )
+
     import html as _h
 
+    actions_to_run = outcome.actions_to_run
+    skipped = outcome.skipped
     n = len(actions_to_run)
     if n == 0:
         body = (
@@ -1111,7 +1463,10 @@ async def _handle_decision(
                 f"<strong>descartada{'s' if skipped > 1 else ''}</strong> por tu selección)"
             )
         body += '<br><br><span style="font-size:12px;color:#6b7280;">El resultado queda en logs y SQLite.</span>'
-    return _render_decision_page("approved", body, meta_html=_decision_meta_html(alert_id))
+    return _render_decision_page(
+        "approved", body, meta_html=_decision_meta_html(alert_id),
+        extra_action_html=_close_ticket_action_html(token, invgate_rid),
+    )
 
 
 async def _execute_approved_plan_in_background(
@@ -1174,6 +1529,78 @@ async def reject_plan(request: Request, settings: SettingsDep, token: str) -> HT
     return await _handle_decision(request, settings, token, "rejected")
 
 
+@app.get("/close-ticket/{token}")
+async def close_ticket(request: Request, settings: SettingsDep, token: str) -> HTMLResponse:
+    """Cierra el ticket InvGate de un caso man-in-the-loop, a pedido del analista.
+
+    A diferencia del auto-block (que abre y cierra solo), los casos con aprobación humana
+    dejan el ticket abierto y ofrecen ESTA opción de cierre en la página de decisión.
+    Best-effort: si InvGate rechaza el cierre (estado no soluble, etc.), la página lo
+    informa y el ticket puede cerrarse manualmente en InvGate.
+    """
+    import html as _h
+
+    from src.state import get_pending_approval
+
+    ip = request.client.host if request.client else None
+    row = await get_pending_approval(settings.state_db_path, token)
+    if row is None:
+        return _render_decision_page(
+            "not_found",
+            "Este link no corresponde a ningún caso. Puede haber sido manipulado "
+            "o pertenecer a otro entorno.",
+        )
+
+    alert_id = row.get("alert_id", "?")
+    invgate_rid = row.get("invgate_request_id")
+    if not invgate_rid:
+        return _render_decision_page(
+            "already",
+            f"El caso <code>{_h.escape(str(alert_id))}</code> no tiene ticket InvGate "
+            "asociado, así que no hay nada que cerrar.",
+            meta_html=_decision_meta_html(alert_id),
+        )
+
+    logger.info(
+        "INVGATE_CLOSE_REQUEST | alert=%s ticket=%s ip=%s", alert_id, invgate_rid, ip
+    )
+
+    close_ok = False
+    close_err = "InvGate no configurado"
+    try:
+        from src.tools.invgate import InvgateClient, is_configured
+
+        if is_configured(settings):
+            async with InvgateClient(settings) as client:
+                res = await client.close_incident(
+                    invgate_rid,
+                    solution_comment=(
+                        f"Cierre solicitado por el analista ({ip or 'IP desconocida'}) "
+                        f"desde la página de decisión SOC-L1. Caso {alert_id} resuelto."
+                    ),
+                )
+            close_ok = res.ok
+            close_err = res.error or ""
+    except Exception:
+        logger.exception("invgate: close-ticket falló | ticket=%s", invgate_rid)
+        close_err = "excepción interna (ver logs)"
+
+    if close_ok:
+        return _render_decision_page(
+            "approved",
+            f"Ticket InvGate <strong>#{invgate_rid}</strong> cerrado correctamente "
+            f"para la alerta <code>{_h.escape(str(alert_id))}</code>.",
+            meta_html=_decision_meta_html(alert_id),
+        )
+    return _render_decision_page(
+        "error",
+        f"No se pudo cerrar el ticket <strong>#{invgate_rid}</strong> por API "
+        f"({_h.escape(close_err or 'error desconocido')}). "
+        "Se puede cerrar manualmente en InvGate.",
+        meta_html=_decision_meta_html(alert_id),
+    )
+
+
 # ===== Review (granular approval) =====
 
 
@@ -1187,24 +1614,65 @@ def _render_review_page(
     """Página HTML con form: 1 checkbox por acción + 2 botones (Aprobar selección, Rechazar todo)."""
     import html as _h
 
+    _action_color = {
+        "disable_user": "#dc2626",
+        "force_password_change": "#ea580c",
+        "block_ip": "#7f1d1d",
+        "scan_host": "#0891b2",
+        "isolate_host": "#9333ea",
+        "notify_only": "#38bdf8",
+        "escalate_l2": "#a16207",
+    }
+
+    # Plan solo-informativo: todas las acciones son notify_only → no hay nada que
+    # ejecutar, así que ofrecemos un botón único "Acuso recibo" en vez de aprobar/
+    # rechazar. Internamente se procesa como approve (el executor registra "noted").
+    ack_only = bool(plan.actions) and all(a.type == "notify_only" for a in plan.actions)
+
     if not plan.actions:
         # Plan vacío: solo botón rechazar (no hay nada que aprobar)
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         actions_html = (
             "<p style='color:#6b7280;font-style:italic;'>El plan no incluye acciones "
             "automatizadas. Solo podés cerrar el incidente como rechazado.</p>"
         )
+        help_text = ""
+        buttons_html = (
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Cerrar (rechazar)</button>"
+        )
+    elif ack_only:
+        # Solo notify_only: tarjetas read-only + hidden inputs para mandar los índices.
+        section_title = "Notificación (solo registro)"
+        cards, hidden = [], []
+        for i, a in enumerate(plan.actions):
+            color = _action_color.get(a.type, "#475569")
+            hidden.append(f'<input type="hidden" name="action_idx" value="{i}">')
+            cards.append(
+                f"""<div style="padding:14px 16px;margin-bottom:8px;background-color:#f6f8fa;
+                              border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {color};">
+                  <strong style="font-family:monospace;color:{color};">{_h.escape(a.type)}</strong>
+                  → <code style="background-color:#ddf4ff;color:#0969da;padding:2px 6px;border-radius:3px;">{_h.escape(a.target)}</code>
+                  <div style="margin:6px 0 0 0;font-size:12px;color:#6b7280;line-height:1.5;">
+                    {_h.escape(a.justification)}
+                  </div>
+                </div>"""
+            )
+        actions_html = "\n".join(hidden) + "\n" + "\n".join(cards)
+        help_text = (
+            "<p style='font-size:13px;color:#6b7280;margin:0 0 12px;'>Este caso es "
+            "<strong>solo informativo</strong> (notify_only): no hay ninguna acción que "
+            "ejecutar. Acusá recibo para dejarlo registrado y cerrarlo.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Acuso recibo y cerrar</button>"
+        )
     else:
+        section_title = f"Acciones propuestas ({len(plan.actions)})"
         rows_html = []
         for i, a in enumerate(plan.actions):
-            action_color = {
-                "disable_user": "#dc2626",
-                "force_password_change": "#ea580c",
-                "block_ip": "#7f1d1d",
-                "scan_host": "#0891b2",
-                "isolate_host": "#9333ea",
-                "notify_only": "#38bdf8",
-                "escalate_l2": "#a16207",
-            }.get(a.type, "#475569")
+            action_color = _action_color.get(a.type, "#475569")
             rows_html.append(
                 f"""<label style="display:block;padding:14px 16px;margin-bottom:8px;
                                   background-color:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;border-left:4px solid {action_color};
@@ -1219,6 +1687,17 @@ def _render_review_page(
                 </label>"""
             )
         actions_html = "\n".join(rows_html)
+        help_text = (
+            "<p style='font-size:12px;color:#6b7280;margin:0 0 12px;'>Desmarcá las que NO "
+            "querés ejecutar y clickeá <strong>Aprobar selección</strong>. O clickeá "
+            "<strong>Rechazar todo</strong> si ninguna debe correr.</p>"
+        )
+        buttons_html = (
+            '<button type="submit" name="decision" value="approve" class="btn btn-approve">'
+            "✅ Aprobar selección</button>\n"
+            '<button type="submit" name="decision" value="reject" class="btn btn-reject">'
+            "❌ Rechazar todo</button>"
+        )
 
     page = f"""<!DOCTYPE html>
 <html>
@@ -1268,21 +1747,13 @@ def _render_review_page(
 
     <form method="post" action="/decide/{token}">
       <div class="form-section">
-        <h2>Acciones propuestas ({len(plan.actions)})</h2>
-        <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">
-          Desmarcá las que NO querés ejecutar y clickeá <strong>Aprobar selección</strong>.
-          O clickeá <strong>Rechazar todo</strong> si ninguna debe correr.
-        </p>
+        <h2>{section_title}</h2>
+        {help_text}
         {actions_html}
       </div>
 
       <div class="buttons">
-        <button type="submit" name="decision" value="approve" class="btn btn-approve">
-          ✅ Aprobar selección
-        </button>
-        <button type="submit" name="decision" value="reject" class="btn btn-reject">
-          ❌ Rechazar todo
-        </button>
+        {buttons_html}
       </div>
     </form>
 

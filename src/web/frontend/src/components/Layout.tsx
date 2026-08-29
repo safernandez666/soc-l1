@@ -1,5 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom"
 import { useEffect, useState, type ReactNode } from "react"
+import { ModeChip } from "@/components/badges"
+import { useExecMode } from "@/lib/useExecMode"
 
 type NavItem = { to: string; label: string; end: boolean; icon: ReactNode }
 
@@ -38,6 +40,19 @@ const NAV: NavItem[] = [
     icon: <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />,
   },
   {
+    to: "/vulns",
+    label: "Vulnerabilidades",
+    end: false,
+    // shield-alert
+    icon: (
+      <>
+        <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+        <path d="M12 8v4" />
+        <path d="M12 16h.01" />
+      </>
+    ),
+  },
+  {
     to: "/fortigate",
     label: "FortiGate",
     end: false,
@@ -52,6 +67,18 @@ const NAV: NavItem[] = [
         <path d="M6.5 15.75V21" />
         <path d="M12 15.75V21" />
         <path d="M17.5 15.75V21" />
+      </>
+    ),
+  },
+  {
+    to: "/invgate",
+    label: "InvGate",
+    end: false,
+    // ticket
+    icon: (
+      <>
+        <path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z" />
+        <path d="M13 5v14" />
       </>
     ),
   },
@@ -109,6 +136,7 @@ function NavIcon({ children }: { children: ReactNode }) {
 }
 
 export function Layout() {
+  const { mode } = useExecMode()
   const [collapsed, setCollapsed] = useState<boolean>(
     () => localStorage.getItem("sidebar-collapsed") === "1"
   )
@@ -141,7 +169,12 @@ export function Layout() {
           alt="ZebraSecurity"
           className="h-7 w-auto"
         />
-        <span className="text-sm font-semibold">SOC-L1</span>
+        <span className="text-sm font-semibold">zSOC</span>
+        {mode && (
+          <span className="ml-auto">
+            <ModeChip mode={mode} />
+          </span>
+        )}
       </header>
 
       {/* Overlay mobile cuando el drawer está abierto */}
@@ -169,12 +202,18 @@ export function Layout() {
             className="h-9 w-auto shrink-0"
           />
           <div className={`leading-tight ${hideOnCollapse}`}>
-            <div className="text-base font-semibold">SOC-L1</div>
+            <div className="text-base font-semibold">zSOC</div>
             <div className="text-[11px] tracking-wide text-muted-foreground">
               Zebra<span className="font-bold text-foreground">Security</span>
             </div>
           </div>
         </div>
+
+        {mode && (
+          <div className={`px-5 pb-1 ${hideOnCollapse}`}>
+            <ModeChip mode={mode} />
+          </div>
+        )}
 
         <nav className="flex flex-col gap-1 px-3 py-2">
           {NAV.map((n) => (

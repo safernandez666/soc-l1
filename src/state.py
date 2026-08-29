@@ -63,6 +63,12 @@ _MIGRATIONS = [
     "ALTER TABLE pending_approvals ADD COLUMN selected_actions TEXT",
     "ALTER TABLE pending_approvals ADD COLUMN invgate_request_id INTEGER",
     "ALTER TABLE pending_approvals ADD COLUMN timeline_json TEXT",
+    # Reconciliación con InvGate como fuente de verdad (2026-07-24): estado real
+    # del ticket, releído periódicamente. status_id crudo, resolved 0/1 derivado
+    # (solved_at/closed_at o status_id en el set de cerrados), y cuándo se chequeó.
+    "ALTER TABLE pending_approvals ADD COLUMN invgate_status_id INTEGER",
+    "ALTER TABLE pending_approvals ADD COLUMN invgate_resolved INTEGER",
+    "ALTER TABLE pending_approvals ADD COLUMN invgate_checked_at TEXT",
 ]
 
 ApprovalStatus = str  # 'pending' | 'approved' | 'rejected' | 'expired' | 'executed'
@@ -423,3 +429,58 @@ async def purge_old_approvals(db_path: str, retention_days: int = 30) -> int:
     if deleted:
         logger.info("state: purga de approvals viejos | borrados=%d", deleted)
     return deleted
+
+
+# ===== Reconciliación con InvGate (fuente de verdad) =====
+
+
+def _cases_needing_invgate_check_sync(
+    db_path: str, limit: int
+) -> list[dict[str, Any]]:
+    """Casos con ticket cuyo estado real en InvGate todavía no sabemos resuelto.
+
+    Reconsulta los que nunca chequeamos o siguen no-resueltos (invgate_resolved
+    NULL o 0). Los ya-resueltos no se vuelven a tocar (InvGate no los reabre solo).
+    Prioriza los nunca-chequeados y luego el chequeo más viejo.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, invgate_request_id, invgate_status_id, "
+            "       invgate_checked_at "
+            "FROM pending_approvals "
+            "WHERE invgate_request_id IS NOT NULL "
+            "  AND (invgate_resolved IS NULL OR invgate_resolved = 0) "
+            "ORDER BY invgate_checked_at IS NOT NULL, invgate_checked_at ASC "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+async def cases_needing_invgate_check(
+    db_path: str, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Casos cuyo ticket InvGate hay que releer (no-resueltos aún)."""
+    return await asyncio.to_thread(_cases_needing_invgate_check_sync, db_path, limit)
+
+
+@_retry_on_locked
+def _update_invgate_status_sync(
+    db_path: str, rowid: int, status_id: int | None, resolved: bool
+) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE pending_approvals "
+            "SET invgate_status_id = ?, invgate_resolved = ?, invgate_checked_at = ? "
+            "WHERE rowid = ?",
+            (status_id, 1 if resolved else 0, _now(), rowid),
+        )
+
+
+async def update_invgate_status(
+    db_path: str, rowid: int, status_id: int | None, resolved: bool
+) -> None:
+    """Persiste el estado real del ticket InvGate para un caso (snapshot)."""
+    await asyncio.to_thread(
+        _update_invgate_status_sync, db_path, rowid, status_id, resolved
+    )

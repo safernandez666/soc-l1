@@ -136,6 +136,69 @@ PUA con riskScore none/low Y no hay señal de credential_access ni de brote (out
 repeat_offender en enrichment.flags), el plan correcto suele ser notify_only (registrar) \
 o, a lo sumo, escalate_l2 para un scan de confirmación - NO un cambio de contraseña.
 
+REGLAS PARA ALERTAS DE CORREO (Defender for Office 365, sin endpoint):
+
+Las reconocés porque alert.emails NO está vacío y alert.device.hostname es null. \
+NO digas "no hay usuarios involucrados" ni "no hay sistemas afectados": el activo \
+afectado son los BUZONES. Usá SIEMPRE estos campos:
+
+  - `alert.emails[].recipient`: a quién le llegó. Nombralos en el executive_summary \
+(hasta 3; si son más, decí "y N destinatarios más").
+  - `alert.emails[].subject`: el asunto es el dato más útil para que el analista \
+reconozca la campaña. Citalo entre comillas.
+  - `alert.emails[].sender_address` y `.sender_ip`: el remitente visible y desde dónde \
+salió. Si threat_intel trae reporte de esa IP, cruzalo.
+  - `alert.emails[].urls`: las URLs maliciosas. Mencioná al menos una. Un acortador \
+(bit.ly, abre.ai, cutt.ly...) o un dominio recién registrado refuerzan el veredicto de \
+phishing.
+  - `alert.emails[].delivery_action` / `.remediation`: si Defender ya sacó el mensaje \
+("removed after delivery", remediation distinto de "none"), decilo explícito — igual que \
+con remediationStatus en endpoint.
+  - `alert.threat.mitre_techniques`: viene del propio Defender (ej. T1566.002 = \
+Spearphishing Link). Citalo; NO afirmes "sin técnicas MITRE asociadas" si esta lista \
+tiene algo, aunque el enrichment de la rule de Wazuh venga vacío.
+
+CRITERIO DE RIESGO para correo: que Defender ya haya borrado el mensaje baja la urgencia \
+pero NO vuelve la alerta irrelevante — el usuario pudo haber hecho click antes del \
+borrado. Si hay URL maliciosa entregada a buzones reales, el piso es `notify_only` \
+nombrando a los destinatarios para que el analista los contacte; subí a `escalate_l2` si \
+hay varios buzones (campaña), si threat_intel marca la IP del sender, o si el mensaje \
+seguía entregado (delivery_action "delivered"/remediation "none").
+
+REGLAS PARA ALERTAS VPN / IDENTIDAD (FortiGate SSL-VPN, sin endpoint):
+
+Detectás una alerta VPN cuando alert.source=wazuh_native Y alert.wazuh_rule.groups \
+contiene un grupo "fortigate_vpn_*". Acá NO hay files ni device.mde_id: la evidencia es \
+el rule_id, el usuario (alert.users_involved, viene del VPN), la IP de origen \
+(alert.network.src_ip_external = remip del cliente) y el país/horario. El umbral para \
+tocar identidad depende de la FUERZA de la señal del rule:
+
+  - rule 196104 (fortigate_vpn_monitored_user, fuera de horario) / 196105 (fin de semana): \
+señal DÉBIL por sí sola - un usuario legítimo puede conectarse de noche o el finde. \
+Default `notify_only`. Subí a `escalate_l2` SOLO si hay otra señal (threat_intel con \
+abuse score alto en la IP, país inesperado, o varios eventos). NO generes \
+disable_user/force_password_change SOLO por el horario.
+
+  - rule 196107 (fortigate_vpn_multiple_ips, mismo user desde varias IPs en poco tiempo): \
+posible robo de cuenta → `force_password_change` (si found_in_ad=true), citando el patrón \
+multi-IP.
+
+  - rule 196109 (fortigate_vpn_multiple_countries, impossible travel): compromiso FUERTE \
+→ `disable_user` (si found_in_ad=true) + `escalate_l2`. Es lo más cercano a cuenta \
+comprometida en este pipeline.
+
+  - rule 196113 (admin fuera de horario): `escalate_l2`; sumá `force_password_change` si \
+hay otra señal de compromiso.
+
+  - Si threat_intel marca la IP de origen (remip) con abuse_confidence_score alto, o el \
+país de origen es inesperado/restringido, subí el risk_level y considerá \
+force_password_change aunque el rule base sea de horario.
+
+Todas las acciones de identidad acá siguen requiriendo found_in_ad=true (ver \
+PROHIBICIONES). En la duda entre notify_only y una acción de identidad sobre un acceso \
+fuera de horario sin otra señal, elegí notify_only: el costo de un falso disable_user \
+sobre un usuario o cuenta de servicio legítima es alto.
+
 REGLAS PARA `actions`:
 
 Generá `disable_user` cuando:
@@ -215,6 +278,10 @@ además querés revisión humana antes de aislar.
 
 PROHIBICIONES:
   - NO inventes acciones sobre usuarios que no aparecen en enrichment.users
+  - NO inventes el NOMBRE PROPIO de un usuario. Para nombrar a alguien usá \
+enrichment.users[].display_name (el nombre real de AD) SOLO si viene presente; si está \
+vacío/null, referite al usuario por su `sam`. NUNCA deduzcas ni inventes un nombre real a \
+partir del sam, del mail ni de ningún otro dato.
   - NO recomiendes disable_user si found_in_ad=false (no podemos accionar)
   - NO multipliques actions sin necesidad - 1-3 acciones es lo normal
   - NO uses jerga sin explicar en `executive_summary` (el lector puede no ser técnico profundo)

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-UserRole = Literal["logged_on", "file_path_owner", "event_user"]
+UserRole = Literal["logged_on", "file_path_owner", "event_user", "mailbox_owner"]
 AlertSource = Literal["defender_via_wazuh", "wazuh_native"]
 Severity = Literal["informational", "low", "medium", "high", "critical"]
 
@@ -47,6 +47,33 @@ class FileEvidence(BaseModel):
     remediation: str | None = None
 
 
+class EmailEvidence(BaseModel):
+    """Un mensaje de correo reportado por Defender for Office 365.
+
+    Sale de `analyzedMessageEvidence` en el payload de Graph. Es el equivalente
+    de FileEvidence para las alertas de mail: sin esto, una alerta de phishing
+    llega al Narrator sin asunto, sin destinatario y sin URL, y el resumen sale
+    en blanco.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    subject: str | None = None
+    recipient: str | None = None
+    sender_address: str | None = None  # p2Sender (From visible) o p1Sender
+    sender_ip: str | None = None
+    urls: list[str] = Field(default_factory=list)
+    url_count: int = 0
+    attachments_count: int = 0
+    received_at: str | None = None
+    delivery_action: str | None = None
+    delivery_location: str | None = None
+    threats: list[str] = Field(default_factory=list)
+    verdict: str | None = None
+    remediation: str | None = None
+    internet_message_id: str | None = None
+    network_message_id: str | None = None
+
+
 class Network(BaseModel):
     model_config = ConfigDict(extra="forbid")
     src_ip_internal: str | None = None
@@ -63,6 +90,10 @@ class Threat(BaseModel):
     incident_id: str | None = None
     incident_url: str | None = None
     alert_url: str | None = None
+    # MITRE que reporta el propio proveedor (data.mitreTechniques de Graph). Es
+    # distinto del mapping de la rule de Wazuh que mira el Enricher: las reglas
+    # 2000xx de Defender no tienen mapping propio, el dato viene en el payload.
+    mitre_techniques: list[str] = Field(default_factory=list)
 
 
 class WazuhRule(BaseModel):
@@ -85,6 +116,7 @@ class NormalizedAlert(BaseModel):
     device: Device
     users_involved: list[User] = Field(default_factory=list)
     files: list[FileEvidence] = Field(default_factory=list)
+    emails: list[EmailEvidence] = Field(default_factory=list)
     network: Network
     threat: Threat
     raw: dict[str, Any]
@@ -252,3 +284,6 @@ class InvgateTicketResult(BaseModel):
     request_id: int | None = None
     info: str | None = None
     error: str | None = None
+    # status_id real del ticket tras la operación (cuando se pudo verificar por
+    # read-back en close_incident). None si no se leyó o la lectura falló.
+    status_id: int | None = None

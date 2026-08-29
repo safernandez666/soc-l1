@@ -66,6 +66,15 @@ def test_system_prompt_demanda_approval_humano() -> None:
     assert "force_password_change" in SYSTEM_PROMPT
 
 
+def test_system_prompt_tiene_guia_vpn_identidad() -> None:
+    """Guard: la guía de tratamiento VPN/identidad no debe perderse en refactors.
+    Sin ella el Narrator (prompt Defender-céntrico) tiende a notify_only siempre."""
+    assert "fortigate_vpn_" in SYSTEM_PROMPT
+    # mapeo conservador: horario solo → notify_only; multi-país → disable_user
+    assert "196104" in SYSTEM_PROMPT
+    assert "fortigate_vpn_multiple_countries" in SYSTEM_PROMPT
+
+
 def test_bundle_to_prompt_contains_all_inputs(keygen_alert) -> None:
     """El prompt enviado al LLM incluye alert + triage + enrichment + threat_intel."""
     from src.agents.threatintel import ThreatIntelResult

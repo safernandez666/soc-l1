@@ -10,10 +10,11 @@ import asyncio
 import json
 import sqlite3
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from src.config import Settings
+from src.vuln.scoring import EPSS_HIGH_THRESHOLD, PRIORITY_THRESHOLD
 
 # Orden canónico de estados para tablas/gráficos
 STATUS_ORDER = ["pending", "approved", "executed", "rejected", "expired"]
@@ -450,7 +451,12 @@ async def _fortigate_blocks(settings: Settings) -> dict[str, Any]:
 
 
 def _list_cases_sync(
-    db_path: str, status: str | None, limit: int, offset: int, baseline_iso: str = ""
+    db_path: str,
+    status: str | None,
+    limit: int,
+    offset: int,
+    baseline_iso: str = "",
+    since_iso: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -459,7 +465,8 @@ def _list_cases_sync(
     except sqlite3.OperationalError:
         return ([], 0)
 
-    # WHERE dinámico: status (opcional) + baseline de medición (opcional).
+    # WHERE dinámico: status (opcional) + baseline de medición (opcional) +
+    # ventana de tiempo elegida en la cola (opcional).
     # created_at se guarda en ISO8601 con offset uniforme, así que el >= textual
     # equivale al cronológico; las filas con created_at NULL quedan excluidas bajo baseline.
     conds: list[str] = []
@@ -470,6 +477,9 @@ def _list_cases_sync(
     if baseline_iso:
         conds.append("created_at >= ?")
         params.append(baseline_iso)
+    if since_iso:
+        conds.append("created_at >= ?")
+        params.append(since_iso)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
 
     with conn:
@@ -478,7 +488,8 @@ def _list_cases_sync(
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-            "       executed_at, plan_json, alert_json, invgate_request_id "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
@@ -520,7 +531,8 @@ def _cases_in_range_sync(
     with conn:
         rows = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
-            "       executed_at, plan_json, alert_json, invgate_request_id "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             f"FROM pending_approvals{where} ORDER BY created_at DESC LIMIT ?",
             [*params, max(1, min(int(cap), 5000))],
         ).fetchall()
@@ -528,6 +540,29 @@ def _cases_in_range_sync(
     if risk:
         cases = [c for c in cases if c["risk_level"] == risk]
     return cases
+
+
+def _invgate_state(r: dict[str, Any]) -> dict[str, Any]:
+    """Estado del ticket InvGate según el snapshot de reconciliación (fuente de
+    verdad). ``state``: sin_ticket | sin_verificar | resuelto | abierto."""
+    rid = r.get("invgate_request_id")
+    if rid is None:
+        state = "sin_ticket"
+    elif r.get("invgate_checked_at") is None:
+        state = "sin_verificar"
+    elif r.get("invgate_resolved"):
+        state = "resuelto"
+    else:
+        state = "abierto"
+    return {
+        "invgate_request_id": rid,
+        "invgate_status_id": r.get("invgate_status_id"),
+        "invgate_resolved": (
+            None if r.get("invgate_resolved") is None else bool(r.get("invgate_resolved"))
+        ),
+        "invgate_checked_at": r.get("invgate_checked_at"),
+        "invgate_state": state,
+    }
 
 
 def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
@@ -543,11 +578,11 @@ def _summarize_row(r: dict[str, Any]) -> dict[str, Any]:
         "decided_at": r.get("decided_at"),
         "decided_by_ip": r.get("decided_by_ip"),
         "executed_at": r.get("executed_at"),
-        "invgate_request_id": r.get("invgate_request_id"),
         "risk_level": plan.get("risk_level") or "unknown",
         "title": alert.get("title") or "(no title)",
         "host": device.get("hostname") or device.get("fqdn") or "—",
         "n_actions": len(plan.get("actions") or []),
+        **_invgate_state(r),
     }
 
 
@@ -563,7 +598,8 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
             "       decided_by_ua, selected_actions, executed_at, execution_result, "
-            "       plan_json, alert_json, timeline_json, invgate_request_id "
+            "       plan_json, alert_json, timeline_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
             "FROM pending_approvals WHERE rowid=?",
             (rowid,),
         ).fetchone()
@@ -579,13 +615,50 @@ def _get_case_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
         "decided_by_ip": r["decided_by_ip"],
         "decided_by_ua": r["decided_by_ua"],
         "executed_at": r["executed_at"],
-        "invgate_request_id": r["invgate_request_id"],
         "selected_actions": _loads(r["selected_actions"]),
         "plan": _loads(r["plan_json"]) or {},
         "alert": _loads(r["alert_json"]) or {},
         "timeline": _loads(r["timeline_json"]) or [],
-        "execution_result": _loads(r["execution_result"]) or [],
+        "execution_result": _mark_simulated(_loads(r["execution_result"]) or []),
+        **_invgate_state(r),
     }
+
+
+# El executor marca cada acción simulada con el prefijo "DRY_RUN: " en el message
+# (ver executor.execute_action). Lo derivamos por fila y no del dry_run de HOY,
+# para que un caso viejo siga contando la verdad aunque el modo haya cambiado.
+_DRY_RUN_PREFIX = "DRY_RUN:"
+
+
+def _mark_simulated(results: Any) -> list[dict[str, Any]]:
+    if not isinstance(results, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for er in results:
+        if not isinstance(er, dict):
+            continue
+        message = er.get("message") or ""
+        out.append({**er, "simulated": str(message).startswith(_DRY_RUN_PREFIX)})
+    return out
+
+
+def _get_case_token_sync(db_path: str, rowid: int) -> dict[str, Any] | None:
+    """Token + estado de un caso. SOLO para uso server-side (decidir desde /ui).
+
+    El token nunca sale en las respuestas JSON del dashboard: es la capability que
+    viaja en el link del correo. Acá se resuelve adentro del proceso para poder
+    reusar la misma ruta de decisión sin exponerlo al browser.
+    """
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return None
+    with conn:
+        row = conn.execute(
+            "SELECT token, status, alert_id FROM pending_approvals WHERE rowid=?",
+            (rowid,),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 # ===== Wrappers async =====
@@ -631,11 +704,448 @@ async def list_cases(
     limit: int = 50,
     offset: int = 0,
     baseline_iso: str = "",
+    since_iso: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     return await asyncio.to_thread(
-        _list_cases_sync, db_path, status, limit, offset, baseline_iso
+        _list_cases_sync, db_path, status, limit, offset, baseline_iso, since_iso
     )
 
 
 async def get_case(db_path: str, rowid: int) -> dict[str, Any] | None:
     return await asyncio.to_thread(_get_case_sync, db_path, rowid)
+
+
+async def get_case_token(db_path: str, rowid: int) -> dict[str, Any] | None:
+    """Token + estado de un caso, para decidir desde /ui. No exponer al browser."""
+    return await asyncio.to_thread(_get_case_token_sync, db_path, rowid)
+
+
+# ===== Reconciliación InvGate (vista "tickets abiertos") =====
+
+
+def _invgate_reconcile_sync(db_path: str) -> dict[str, Any]:
+    """Resumen de reconciliación InvGate + lista de casos con ticket ABIERTO.
+
+    InvGate es la fuente de verdad: el snapshot lo escribe el sweeper. La lista
+    prioriza la discrepancia que importa — casos cuyo lado nuestro ya terminó
+    (executed/rejected/expired) pero cuyo ticket sigue abierto en InvGate."""
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return {"counts": {}, "open_cases": [], "last_checked": None}
+    with conn:
+        rows = conn.execute(
+            "SELECT rowid, alert_id, status, created_at, decided_at, decided_by_ip, "
+            "       executed_at, plan_json, alert_json, invgate_request_id, "
+            "       invgate_status_id, invgate_resolved, invgate_checked_at "
+            "FROM pending_approvals WHERE invgate_request_id IS NOT NULL"
+        ).fetchall()
+
+    counts = {"resuelto": 0, "abierto": 0, "sin_verificar": 0}
+    open_cases: list[dict[str, Any]] = []
+    last_checked: str | None = None
+    for row in rows:
+        c = _summarize_row(dict(row))
+        st = c["invgate_state"]
+        counts[st] = counts.get(st, 0) + 1
+        if c["invgate_checked_at"] and (not last_checked or c["invgate_checked_at"] > last_checked):
+            last_checked = c["invgate_checked_at"]
+        if st in ("abierto", "sin_verificar"):
+            open_cases.append(c)
+    # Los ya-terminales de nuestro lado primero (la discrepancia real), luego por fecha.
+    _terminal = {"executed", "rejected", "expired"}
+    open_cases.sort(
+        key=lambda c: (c["status"] not in _terminal, c["created_at"] or ""),
+    )
+    return {
+        "counts": counts,
+        "total_with_ticket": len(rows),
+        "open_cases": open_cases,
+        "last_checked": last_checked,
+    }
+
+
+async def invgate_reconcile_view(db_path: str) -> dict[str, Any]:
+    """Datos para la vista de reconciliación InvGate del dashboard."""
+    return await asyncio.to_thread(_invgate_reconcile_sync, db_path)
+
+
+# ===== Vulnerabilidades (vuln_lifecycle.db) =====
+#
+# Base aparte de state.db: la escribe el pipeline de vuln (indexer → store) y acá
+# se lee SOLO en modo lectura, igual que el resto del panel.
+
+# Buckets de severidad. Wazuh reporta severity '-' (con cvss_score -1) para los CVE
+# que todavía no puntuó: no es riesgo cero, es riesgo DESCONOCIDO, así que va a su
+# propio bucket en vez de mezclarse con Low o desaparecer del total.
+VULN_UNTRIAGED = "Untriaged"
+VULN_SEVERITIES = ("Critical", "High", "Medium", "Low", VULN_UNTRIAGED)
+
+# El corte que importa para remediar: un hallazgo de OS se cierra con un
+# acumulativo/KB, uno de Packages actualizando la aplicación.
+VULN_CATEGORIES = ("OS", "Packages")
+
+VULN_PER_PAGE = 50
+_VULN_MAX_HOSTS = 5  # nombres de agente que se muestran por CVE
+
+# Un hallazgo cuenta como activo mientras el ciclo de vida no lo dé por resuelto.
+_VULN_ACTIVE = "lifecycle_status != 'resolved'"
+
+# Normalización de severidad a los 5 buckets, del lado SQL para no traer 16k filas.
+_SEV_BUCKET = (
+    "CASE WHEN severity IN ('Critical','High','Medium','Low') "
+    f"THEN severity ELSE '{VULN_UNTRIAGED}' END"
+)
+
+# Ranking de severidad (1 = peor). Un CVE puede aparecer con distinta severidad en
+# distintos hosts: el grupo se muestra con la PEOR, que es la que manda para priorizar.
+_SEV_RANK_SQL = (
+    "CASE severity WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 "
+    "WHEN 'Medium' THEN 3 WHEN 'Low' THEN 4 ELSE 5 END"
+)
+_SEV_BY_RANK = {1: "Critical", 2: "High", 3: "Medium", 4: "Low", 5: VULN_UNTRIAGED}
+
+# Estado del grupo: si algo apareció nuevo o reapareció, eso es lo que hay que ver;
+# "ongoing" es el caso aburrido y por eso queda último.
+_LIFECYCLE_PRIORITY = ("new", "reopened", "ongoing")
+
+
+def _vuln_columns(conn: sqlite3.Connection) -> set[str]:
+    return {r[1] for r in conn.execute("PRAGMA table_info(vuln_lifecycle)")}
+
+
+def _categoria_expr(cols: set[str]) -> str:
+    """Expresión SQL para `categoria`, que puede no existir todavía.
+
+    La base se abre read-only: si el pipeline aún no corrió con el esquema nuevo,
+    no podemos migrarla desde el panel y la columna se lee como ''.
+    """
+    return "categoria" if "categoria" in cols else "''"
+
+
+def _like_term(q: str) -> str:
+    """Término para LIKE ... ESCAPE '\\', con los comodines del usuario neutralizados."""
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _vuln_filters(
+    cols: set[str],
+    severidad: str | None,
+    categoria: str | None,
+    agente: str | None,
+    kev: bool,
+    q: str | None,
+) -> tuple[str, list[Any]]:
+    """WHERE (siempre sobre hallazgos activos) + params, compartido por las dos consultas."""
+    where = [_VULN_ACTIVE]
+    params: list[Any] = []
+    if severidad in VULN_SEVERITIES:
+        where.append(f"{_SEV_BUCKET} = ?")
+        params.append(severidad)
+    if categoria in VULN_CATEGORIES:
+        where.append(f"{_categoria_expr(cols)} = ?")
+        params.append(categoria)
+    if agente:
+        where.append("agent_name = ?")
+        params.append(agente)
+    if kev:
+        where.append("cisa_kev = 1")
+    if q:
+        where.append("(cve LIKE ? ESCAPE '\\' OR package_name LIKE ? ESCAPE '\\')")
+        term = _like_term(q)
+        params += [term, term]
+    return " AND ".join(where), params
+
+
+def _vuln_cobertura(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Snapshot de cobertura que dejó la última ingesta.
+
+    Los agentes SIN ningún hallazgo no dejan rastro en vuln_lifecycle, así que la
+    pantalla no puede deducirlos de la base: si no los mostramos, un servidor que
+    el detector nunca evaluó se ve igual que uno limpio. El snapshot lo escribe
+    persist_coverage() en cada ingesta, con la lista de la API del manager.
+    """
+    try:
+        row = conn.execute(
+            "SELECT updated_at, state FROM vuln_state_cache WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return {"disponible": False}
+    if not row:
+        return {"disponible": False}
+    try:
+        data = json.loads(row["state"])
+    except (TypeError, ValueError):
+        return {"disponible": False}
+    sin_datos = data.get("sin_datos") or []
+    return {
+        "disponible": True,
+        "actualizado": row["updated_at"],
+        "agentes_total": data.get("agentes_total", 0),
+        "agentes_con_datos": data.get("agentes_con_datos", 0),
+        "sin_datos": sin_datos,
+        "desfasados": data.get("desfasados") or [],
+        "hallazgos_dudosos": data.get("hallazgos_dudosos", 0),
+    }
+
+
+def _vulns_summary_sync(db_path: str) -> dict[str, Any]:
+    """Resumen del inventario activo + serie histórica de corridas."""
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        # La base todavía no existe (el pipeline de vuln nunca corrió acá).
+        return {"available": False}
+
+    with conn:
+        cols = _vuln_columns(conn)
+        if not cols:
+            return {"available": False}
+        cat = _categoria_expr(cols)
+
+        totals = conn.execute(
+            f"SELECT count(*) AS activos, count(DISTINCT cve) AS cves_unicos, "
+            f"       count(DISTINCT agent_name) AS agentes "
+            f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE}"
+        ).fetchone()
+        resueltas = conn.execute(
+            "SELECT count(*) FROM vuln_lifecycle WHERE lifecycle_status = 'resolved'"
+        ).fetchone()[0]
+
+        por_severidad = dict.fromkeys(VULN_SEVERITIES, 0)
+        for r in conn.execute(
+            f"SELECT {_SEV_BUCKET} AS bucket, count(*) AS n "
+            f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE} GROUP BY bucket"
+        ):
+            por_severidad[r["bucket"]] = r["n"]
+
+        # Solo OS/Packages: las filas sin categoría (esquema viejo, hallazgo sin el
+        # campo) no se inventan como una ni como otra, quedan fuera del corte.
+        por_categoria = dict.fromkeys(VULN_CATEGORIES, 0)
+        for r in conn.execute(
+            f"SELECT {cat} AS categoria, count(*) AS n "
+            f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE} GROUP BY 1"
+        ):
+            if r["categoria"] in por_categoria:
+                por_categoria[r["categoria"]] = r["n"]
+
+        kev = conn.execute(
+            f"SELECT count(*) AS hallazgos, count(DISTINCT cve) AS cves "
+            f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE} AND cisa_kev = 1"
+        ).fetchone()
+        umbrales = conn.execute(
+            f"SELECT sum(epss_score >= ?) AS epss_alto, sum(priority_score >= ?) AS prio_alta "
+            f"FROM vuln_lifecycle WHERE {_VULN_ACTIVE}",
+            (EPSS_HIGH_THRESHOLD, PRIORITY_THRESHOLD),
+        ).fetchone()
+
+        top_hosts = [
+            {
+                "agent_name": r["agent_name"],
+                "total": r["total"],
+                "criticas": r["criticas"],
+                "kev": r["kev"],
+            }
+            for r in conn.execute(
+                f"SELECT agent_name, count(*) AS total, "
+                f"       sum(severity = 'Critical') AS criticas, "
+                f"       sum(cisa_kev = 1) AS kev "
+                f"FROM vuln_lifecycle "
+                f"WHERE {_VULN_ACTIVE} AND agent_name IS NOT NULL AND agent_name != '' "
+                f"GROUP BY agent_name ORDER BY total DESC, agent_name LIMIT 10"
+            )
+        ]
+
+        last_run = conn.execute(
+            "SELECT started_at, total_active, new_count, resolved_count "
+            "FROM vuln_runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        tendencia = _vuln_tendencia(conn)
+
+        cobertura = _vuln_cobertura(conn)
+
+    return {
+        "available": True,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        # None si nunca corrió el pipeline: es la única forma honesta de decir
+        # "no hay corridas" sin fabricar una de ceros al lado de N activos.
+        "last_run": dict(last_run) if last_run is not None else None,
+        "totals": {
+            "activos": totals["activos"],
+            "cves_unicos": totals["cves_unicos"],
+            "agentes": totals["agentes"],
+            "resueltas_total": resueltas,
+        },
+        "por_severidad": por_severidad,
+        "por_categoria": por_categoria,
+        "kev": {"hallazgos": kev["hallazgos"], "cves": kev["cves"]},
+        "epss_alto": int(umbrales["epss_alto"] or 0),
+        "prioridad_alta": int(umbrales["prio_alta"] or 0),
+        "top_hosts": top_hosts,
+        "tendencia": tendencia,
+        "cobertura": cobertura,
+    }
+
+
+def _vuln_tendencia(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Serie diaria desde vuln_runs. Con menos de 2 corridas devuelve lo que haya."""
+    por_dia: dict[str, dict[str, int]] = {}
+    for r in conn.execute(
+        "SELECT started_at, total_active, new_count, resolved_count "
+        "FROM vuln_runs WHERE started_at IS NOT NULL ORDER BY started_at"
+    ):
+        # Varias corridas el mismo día: los activos son un NIVEL (vale el de la
+        # última corrida), nuevas/resueltas son FLUJO (se acumulan en el día).
+        dia = por_dia.setdefault(
+            str(r["started_at"])[:10], {"activos": 0, "nuevas": 0, "resueltas": 0}
+        )
+        dia["activos"] = int(r["total_active"] or 0)
+        dia["nuevas"] += int(r["new_count"] or 0)
+        dia["resueltas"] += int(r["resolved_count"] or 0)
+    return [
+        {
+            "fecha": fecha,
+            "activos": d["activos"],
+            "nuevas": d["nuevas"],
+            "resueltas": d["resueltas"],
+        }
+        for fecha, d in sorted(por_dia.items())
+    ]
+
+
+def _vulns_cves_sync(
+    db_path: str,
+    severidad: str | None = None,
+    categoria: str | None = None,
+    agente: str | None = None,
+    kev: bool = False,
+    q: str | None = None,
+    page: int = 1,
+) -> dict[str, Any]:
+    """Hallazgos activos agrupados por CVE, filtrados y paginados (50 por página).
+
+    Son ~16k hallazgos y ~4.3k CVEs únicos: sin paginar la pantalla es inusable.
+    """
+    page = max(1, int(page))
+    filtros = {
+        "severidad": severidad if severidad in VULN_SEVERITIES else None,
+        "categoria": categoria if categoria in VULN_CATEGORIES else None,
+        "agente": agente or None,
+        "kev": bool(kev),
+        "q": q or None,
+    }
+    vacio = {"cves": [], "total": 0, "page": page, "per_page": VULN_PER_PAGE, "filtros": filtros}
+
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return vacio
+
+    with conn:
+        cols = _vuln_columns(conn)
+        if not cols:
+            return vacio
+        cat = _categoria_expr(cols)
+        where, params = _vuln_filters(
+            cols, filtros["severidad"], filtros["categoria"],
+            filtros["agente"], filtros["kev"], filtros["q"],
+        )
+
+        total = conn.execute(
+            f"SELECT count(DISTINCT cve) FROM vuln_lifecycle WHERE {where}", params
+        ).fetchone()[0]
+
+        # 1) La página de CVEs con los agregados numéricos.
+        grupos = conn.execute(
+            f"SELECT cve, "
+            f"       max(priority_score) AS priority_score, "
+            f"       max(cvss_score) AS cvss_score, "
+            f"       max(epss_score) AS epss_score, "
+            f"       max(cisa_kev) AS cisa_kev, "
+            f"       min({_SEV_RANK_SQL}) AS sev_rank, "
+            f"       count(DISTINCT agent_name) AS hosts_count, "
+            f"       min(first_seen_at) AS first_seen_at "
+            f"FROM vuln_lifecycle WHERE {where} "
+            f"GROUP BY cve ORDER BY priority_score DESC, cve "
+            f"LIMIT ? OFFSET ?",
+            [*params, VULN_PER_PAGE, (page - 1) * VULN_PER_PAGE],
+        ).fetchall()
+        if not grupos:
+            return {**vacio, "total": total}
+
+        # 2) El detalle textual de esos CVEs (hosts, paquete, categoría, estado).
+        #    Segunda pasada acotada a la página: como mucho unos cientos de filas.
+        cves = [g["cve"] for g in grupos]
+        marcas = ",".join("?" * len(cves))
+        detalle: dict[str, dict[str, Any]] = {
+            c: {"hosts": set(), "paquetes": Counter(), "categorias": Counter(), "estados": set()}
+            for c in cves
+        }
+        for r in conn.execute(
+            f"SELECT cve, agent_name, package_name, {cat} AS categoria, lifecycle_status "
+            f"FROM vuln_lifecycle WHERE {where} AND cve IN ({marcas})",
+            [*params, *cves],
+        ):
+            d = detalle[r["cve"]]
+            if r["agent_name"]:
+                d["hosts"].add(r["agent_name"])
+            if r["package_name"]:
+                d["paquetes"][r["package_name"]] += 1
+            if r["categoria"]:
+                d["categorias"][r["categoria"]] += 1
+            d["estados"].add(r["lifecycle_status"])
+
+    return {
+        "cves": [_vuln_cve_row(g, detalle[g["cve"]]) for g in grupos],
+        "total": total,
+        "page": page,
+        "per_page": VULN_PER_PAGE,
+        "filtros": filtros,
+    }
+
+
+def _vuln_cve_row(grupo: sqlite3.Row, detalle: dict[str, Any]) -> dict[str, Any]:
+    estados = detalle["estados"]
+    return {
+        "cve": grupo["cve"],
+        "priority_score": float(grupo["priority_score"] or 0),
+        "cvss_score": float(grupo["cvss_score"] or 0),
+        "epss_score": float(grupo["epss_score"] or 0),
+        "cisa_kev": bool(grupo["cisa_kev"]),
+        "severity": _SEV_BY_RANK.get(grupo["sev_rank"], VULN_UNTRIAGED),
+        "categoria": _mas_frecuente(detalle["categorias"]),
+        "hosts_count": grupo["hosts_count"],
+        "hosts": sorted(detalle["hosts"])[:_VULN_MAX_HOSTS],
+        "package_name": _mas_frecuente(detalle["paquetes"]),
+        "first_seen_at": grupo["first_seen_at"],
+        "lifecycle_status": next(
+            (st for st in _LIFECYCLE_PRIORITY if st in estados),
+            next(iter(estados), ""),
+        ),
+    }
+
+
+def _mas_frecuente(contador: Counter) -> str:
+    return contador.most_common(1)[0][0] if contador else ""
+
+
+# ===== Wrappers async (vulns) =====
+
+
+async def vulns_summary(db_path: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_vulns_summary_sync, db_path)
+
+
+async def vulns_cves(
+    db_path: str,
+    severidad: str | None = None,
+    categoria: str | None = None,
+    agente: str | None = None,
+    kev: bool = False,
+    q: str | None = None,
+    page: int = 1,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _vulns_cves_sync, db_path, severidad, categoria, agente, kev, q, page
+    )

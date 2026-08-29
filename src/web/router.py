@@ -12,6 +12,7 @@ y react-router resuelve /ui/queue, /ui/case/{id}, /ui/kpis client-side.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -141,6 +142,26 @@ async def logout() -> Response:
 _QUEUE_STATUSES = {"pending", "approved", "executed", "rejected", "expired"}
 _QUEUE_PER_PAGE = 50
 
+# Ventanas del picker de tiempo de la cola. La clave viaja en la query string y
+# el SPA la muestra tal cual; "" (o cualquier valor no listado) = sin recorte.
+_QUEUE_RANGES: dict[str, timedelta] = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+
+
+def _range_since_iso(since: str | None) -> tuple[str, str]:
+    """(clave normalizada, corte ISO8601 UTC) para la ventana pedida.
+
+    created_at se guarda como ISO con offset +00:00, así que el corte se compara
+    textualmente contra ese mismo formato."""
+    key = since if since in _QUEUE_RANGES else ""
+    if not key:
+        return ("", "")
+    cutoff = datetime.now(timezone.utc) - _QUEUE_RANGES[key]
+    return (key, cutoff.isoformat())
+
 
 def _api_unauthorized() -> JSONResponse:
     return JSONResponse(
@@ -150,8 +171,27 @@ def _api_unauthorized() -> JSONResponse:
 
 @router.get("/api/session")
 async def api_session(request: Request, settings: SettingsDep) -> Response:
-    """Chequeo liviano de sesión para el bootstrap del SPA."""
-    return JSONResponse({"authed": _authed(request, settings)})
+    """Chequeo liviano de sesión para el bootstrap del SPA.
+
+    Devuelve además el modo de ejecución efectivo, para que la UI pueda decir en
+    todo momento si las contenciones se aplican o se simulan. Sin esto el panel
+    mostraba "ok" en acciones que nunca tocaron FortiGate, AD ni Defender.
+    """
+    authed = _authed(request, settings)
+    if not authed:
+        return JSONResponse({"authed": False})
+    families = settings.dry_run_state()
+    return JSONResponse({
+        "authed": True,
+        "dry_run_master": settings.dry_run_mode,
+        "dry_run_families": families,
+        # "dry_run" = se simula todo; "live" = se ejecuta todo; "mixed" = por familia.
+        "mode": (
+            "dry_run" if all(families.values())
+            else "live" if not any(families.values())
+            else "mixed"
+        ),
+    })
 
 
 @router.get("/api/metrics")
@@ -174,6 +214,9 @@ async def api_fgt_observations(request: Request, settings: SettingsDep) -> Respo
     path = fortigate_autoblock._observation_path(settings)
     return JSONResponse({
         "summary": fortigate_autoblock.summarize(path),
+        "tickets": fortigate_autoblock.summarize_tickets(
+            fortigate_autoblock._ticket_path(settings)
+        ),
         "recent": fortigate_autoblock.load_recent(path, limit=50),
         "enabled": settings.fortigate_autoblock_enabled,
         "rules_count": len(settings.fortigate_auto_block_rules_set()),
@@ -259,18 +302,24 @@ async def api_kpis(request: Request, settings: SettingsDep) -> Response:
 
 @router.get("/api/queue")
 async def api_queue(
-    request: Request, settings: SettingsDep, status: str | None = None, page: int = 1
+    request: Request,
+    settings: SettingsDep,
+    status: str | None = None,
+    page: int = 1,
+    since: str | None = None,
 ) -> Response:
     if not _authed(request, settings):
         return _api_unauthorized()
     page = max(1, page)
     status = status if status in _QUEUE_STATUSES else None
+    since_key, since_iso = _range_since_iso(since)
     cases, total = await queries.list_cases(
         settings.state_db_path,
         status=status,
         limit=_QUEUE_PER_PAGE,
         offset=(page - 1) * _QUEUE_PER_PAGE,
         baseline_iso=settings.metrics_baseline_at,
+        since_iso=since_iso,
     )
     return JSONResponse(
         {
@@ -279,8 +328,57 @@ async def api_queue(
             "page": page,
             "per_page": _QUEUE_PER_PAGE,
             "status": status,
+            "since": since_key,
         }
     )
+
+
+@router.get("/api/invgate")
+async def api_invgate(request: Request, settings: SettingsDep) -> Response:
+    """Reconciliación InvGate: InvGate como fuente de verdad. Resumen + casos con
+    ticket abierto (snapshot escrito por el sweeper periódico)."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    data = await queries.invgate_reconcile_view(settings.state_db_path)
+    return JSONResponse(data)
+
+
+@router.get("/api/vulns/summary")
+async def api_vulns_summary(request: Request, settings: SettingsDep) -> Response:
+    """Resumen del inventario de vulnerabilidades activo (vuln_lifecycle.db)."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    return JSONResponse(await queries.vulns_summary(settings.vuln_state_db_path))
+
+
+@router.get("/api/vulns/cves")
+async def api_vulns_cves(
+    request: Request,
+    settings: SettingsDep,
+    severidad: str | None = None,
+    categoria: str | None = None,
+    agente: str | None = None,
+    kev: int = 0,
+    q: str | None = None,
+    page: int = 1,
+) -> Response:
+    """Hallazgos activos agrupados por CVE, filtrados y paginados.
+
+    Los filtros desconocidos se ignoran (la consulta los normaliza a None) en vez
+    de devolver 400: un filtro viejo en un link no debería romper la pantalla.
+    """
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    data = await queries.vulns_cves(
+        settings.vuln_state_db_path,
+        severidad=severidad,
+        categoria=categoria,
+        agente=agente,
+        kev=bool(kev),
+        q=(q or "").strip()[:100] or None,
+        page=max(1, page),
+    )
+    return JSONResponse(data)
 
 
 @router.get("/api/case/{rowid}")
@@ -293,6 +391,109 @@ async def api_case(request: Request, settings: SettingsDep, rowid: int) -> Respo
             {"error": "not_found"}, status_code=http_status.HTTP_404_NOT_FOUND
         )
     return JSONResponse(case)
+
+
+_DECISIONS = {"approved", "rejected"}
+
+# state de DecisionOutcome → (HTTP, mensaje para el analista)
+_DECIDE_HTTP = {
+    "not_found": (http_status.HTTP_404_NOT_FOUND, "El caso ya no tiene un approval pendiente."),
+    "expired": (http_status.HTTP_409_CONFLICT, "El approval venció y no se puede decidir."),
+    "already": (http_status.HTTP_409_CONFLICT, "Este caso ya fue decidido."),
+    "plan_error": (
+        http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "Quedó registrada la decisión, pero el plan guardado no se pudo leer: no se ejecutó nada.",
+    ),
+}
+
+
+@router.post("/api/case/{rowid}/decide")
+async def api_case_decide(request: Request, settings: SettingsDep, rowid: int) -> Response:
+    """Aprobar o rechazar un caso desde el panel.
+
+    Hasta acá el panel era solo-lectura y la única forma de decidir era el link del
+    correo. Esto no abre un segundo camino: reusa la misma ruta de decisión que
+    /approve, /reject y /decide (_decide_and_apply), así que valen los mismos
+    guardrails, el mismo TTL, el mismo single-use y los mismos efectos — InvGate,
+    mail de cierre y executor. El token no viaja nunca al browser: se resuelve
+    server-side a partir del rowid, para no convertir el panel en un repartidor de
+    capabilities de aprobación.
+    """
+    if not _authed(request, settings):
+        return _api_unauthorized()
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    decision = str(body.get("decision") or "")
+    if decision not in _DECISIONS:
+        return JSONResponse(
+            {"error": "bad_decision"}, status_code=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    selected = body.get("selected_action_indices")
+    if selected is not None and not (
+        isinstance(selected, list)
+        and all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in selected)
+    ):
+        return JSONResponse(
+            {"error": "bad_selection"}, status_code=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    found = await queries.get_case_token(settings.state_db_path, rowid)
+    if found is None:
+        return JSONResponse(
+            {"error": "not_found", "message": "No existe ese caso."},
+            status_code=http_status.HTTP_404_NOT_FOUND,
+        )
+
+    # Import tardío: src.main monta este router, importarlo arriba sería circular.
+    from src.main import _decide_and_apply
+
+    ip = request.client.host if request.client else None
+    logger.info(
+        "DASHBOARD_DECISION | rowid=%s alert=%s decision=%s ip=%s selected=%s",
+        rowid, found.get("alert_id"), decision, ip, selected,
+    )
+
+    outcome = await _decide_and_apply(
+        request, settings, found["token"], decision, selected
+    )
+
+    if outcome.state != "ok":
+        code, message = _DECIDE_HTTP[outcome.state]
+        return JSONResponse(
+            {
+                "error": outcome.state,
+                "message": message,
+                "prev_status": outcome.prev_status,
+            },
+            status_code=code,
+        )
+
+    n = len(outcome.actions_to_run)
+    if decision == "rejected":
+        message = "Caso rechazado. No se ejecuta ninguna acción."
+    elif n == 0:
+        message = "Aprobado sin acciones seleccionadas: no se ejecutó nada."
+    else:
+        simulated = all(settings.dry_run_for(a.type) for a in outcome.actions_to_run)
+        verbo = "simulando" if simulated else "ejecutando"
+        message = f"Aprobado. {verbo.capitalize()} {n} acción{'' if n == 1 else 'es'}."
+
+    return JSONResponse({
+        "ok": True,
+        "state": "ok",
+        "decision": decision,
+        "alert_id": outcome.alert_id,
+        "n_actions": n,
+        "skipped": outcome.skipped,
+        "message": message,
+    })
 
 
 @router.get("/api/config")

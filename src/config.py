@@ -17,7 +17,7 @@ import logging
 import os
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -227,6 +227,13 @@ class Settings(BaseSettings):
     invgate_customer_id: int = Field(default=5, validation_alias="CUSTOMER_ID_INVGATE")
     invgate_category_id: int = Field(default=59, validation_alias="CATEGORY_ID_INVGATE")
     invgate_verify_ssl: bool = Field(default=True, validation_alias="INVGATE_VERIFY_SSL")
+    # status_id de InvGate que cuentan como "resuelto/cerrado" para la verificación
+    # read-back de close_incident. En la instancia de Grupo Alemana, status 5 =
+    # "Resuelto" (setea solved_at); 7 y 8 = abierto. La señal primaria es igual
+    # solved_at/closed_at != null; esto es el fallback si esos campos faltaran.
+    invgate_closed_status_ids: str = Field(
+        default="5", validation_alias="INVGATE_CLOSED_STATUS_IDS"
+    )
 
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
@@ -268,6 +275,15 @@ class Settings(BaseSettings):
     # lo lee solo-lectura (descomprimir en cada request sería inviable).
     wazuh_alerts_archive_dir: str = Field(default="/var/ossec/logs/alerts")
     alert_volume_cache_path: str = Field(default="/var/lib/soc-l1/alert_volume.json")
+
+    # Ciclo de vida de vulnerabilidades. La escribe el pipeline de vuln (indexer →
+    # store); el panel /ui la lee solo-lectura. El nombre de la env var es el que ya
+    # usa src/vuln/store.py (VULN_STATE_DB): se acepta también el nombre del campo
+    # para poder construir Settings(vuln_state_db_path=...) en los tests.
+    vuln_state_db_path: str = Field(
+        default="/opt/soc-l1/vuln_lifecycle.db",
+        validation_alias=AliasChoices("VULN_STATE_DB", "vuln_state_db_path"),
+    )
 
     # ===== GUI / Dashboard (ZebraSecurity) =====
     # Panel de revisión solo-lectura sobre state.db, servido en /ui detrás de login.
@@ -331,6 +347,16 @@ class Settings(BaseSettings):
             for host in self.protected_hosts.split(",")
             if host.strip()
         }
+
+    def invgate_closed_status_ids_set(self) -> set[int]:
+        """status_id que cuentan como resuelto/cerrado (fallback de la verificación
+        read-back si solved_at/closed_at no vinieran). Ignora valores no numéricos."""
+        out: set[int] = set()
+        for tok in self.invgate_closed_status_ids.split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                out.add(int(tok))
+        return out
 
     def defender_configured(self) -> bool:
         """True si están los 3 datos para hablar con la API de MDE."""

@@ -99,9 +99,9 @@ def _maybe_send_digest_email(cfg: HealthConfig, audit: AuditStore) -> bool:
     notifier = _build_email_notifier(cfg)
     if notifier is None:
         return False
-    from src.wazuh_health.digest import build_email_digest
-    subject, markdown = build_email_digest(audit)
-    notifier.notify_digest(subject=subject, markdown=markdown)
+    from src.wazuh_health.digest import build_email_digest_html
+    subject, html, markdown = build_email_digest_html(audit)
+    notifier.notify_digest(subject=subject, markdown=markdown, html=html)
     return True
 
 

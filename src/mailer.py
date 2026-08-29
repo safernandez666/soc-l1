@@ -21,9 +21,11 @@ import smtplib
 import ssl
 from datetime import datetime
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid, parseaddr
 from typing import TYPE_CHECKING, Any
 
 from src.agents.narrator import NarratorPlan
+from src import report_theme as _theme
 from src.config import Settings
 from src.models import NormalizedAlert
 
@@ -159,8 +161,13 @@ def _build_text_body(
     lines.append("")
     lines.append("CONTEXTO")
     lines.append(f"  Alert ID:  {alert.alert_id}")
-    lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}"
-                 + (f" ({alert.device.fqdn})" if alert.device.fqdn else ""))
+    if alert.device.hostname or not alert.emails:
+        lines.append(f"  Host:      {alert.device.hostname or '(sin host)'}"
+                     + (f" ({alert.device.fqdn})" if alert.device.fqdn else ""))
+    else:
+        buzones = list(dict.fromkeys(m.recipient for m in alert.emails if m.recipient))
+        lines.append(f"  Buzones:   {', '.join(buzones[:5]) or '-'}"
+                     + (f" (+{len(buzones) - 5})" if len(buzones) > 5 else ""))
     if alert.threat and (alert.threat.display_name or alert.threat.family):
         lines.append(f"  Amenaza:   {alert.threat.display_name or ''}"
                      + (f" [{alert.threat.family}]" if alert.threat.family else ""))
@@ -178,6 +185,21 @@ def _build_text_body(
         lines.append(f"  Incidente: {alert.threat.incident_url}")
     if alert.threat and alert.threat.alert_url:
         lines.append(f"  Alerta MDE: {alert.threat.alert_url}")
+    if alert.threat and alert.threat.mitre_techniques:
+        lines.append(f"  MITRE:     {', '.join(alert.threat.mitre_techniques)}")
+    if alert.emails:
+        lines.append("")
+        lines.append(f"CORREOS INVOLUCRADOS ({len(alert.emails)})")
+        for m in alert.emails[:5]:
+            lines.append(f"  - Asunto: {m.subject or '(sin asunto)'}")
+            lines.append(f"    Para:   {m.recipient or '-'}")
+            lines.append(f"    De:     {m.sender_address or '-'} ({m.sender_ip or 'sin IP'})")
+            if m.urls:
+                lines.append(f"    URLs:   {', '.join(m.urls[:5])}")
+            if m.attachments_count:
+                lines.append(f"    Adjuntos: {m.attachments_count}")
+        if len(alert.emails) > 5:
+            lines.append(f"  (+{len(alert.emails) - 5} mensaje(s) más)")
     lines.append("")
     lines.append(f"ACCIONES PROPUESTAS ({len(plan.actions)})")
     if not plan.actions:
@@ -206,7 +228,9 @@ def _build_text_body(
                 if getattr(u, "found_in_ad", False):
                     st = "enabled" if getattr(u, "enabled", None) else "DISABLED"
                     lk = " locked" if getattr(u, "locked_out", None) else ""
-                    lines.append(f"  AD {getattr(u, 'sam', '?')}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
+                    ad_name = getattr(u, "display_name", None)
+                    name_part = f" ({ad_name})" if ad_name else ""
+                    lines.append(f"  AD {getattr(u, 'sam', '?')}{name_part}: {st}{lk} (bad_pwd={getattr(u, 'bad_pwd_count', 0)})")
                 else:
                     lines.append(f"  AD {getattr(u, 'sam', '?')}: no en AD")
             if flags:
@@ -261,9 +285,21 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         host_html += "<br>" + " ".join(ip_bits)
 
     rows: list[tuple[str, str]] = [
-        ("Alert ID",       f"<code>{_esc(alert.alert_id)}</code>"),
-        ("Host",           host_html),
+        ("Alert ID", f"<code>{_esc(alert.alert_id)}</code>"),
     ]
+    # Las alertas de mail (Office 365) no tienen host: en vez de una fila "Host: -"
+    # mostramos los buzones alcanzados, que es el activo afectado real.
+    if alert.device.hostname:
+        rows.append(("Host", host_html))
+    elif alert.emails:
+        buzones = list(dict.fromkeys(m.recipient for m in alert.emails if m.recipient))
+        rows.append((
+            "Buzones",
+            ", ".join(f"<code>{_esc(b)}</code>" for b in buzones[:5])
+            + (f" <span style='color:#6b7280;'>+{len(buzones) - 5}</span>" if len(buzones) > 5 else ""),
+        ))
+    else:
+        rows.append(("Host", host_html))
 
     # Amenaza (clasificación real de Defender): display_name + family
     if alert.threat and (alert.threat.display_name or alert.threat.family):
@@ -292,6 +328,14 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
         if alert.device.os:
             posture_bits.append(f"<span style='color:#6b7280;'>{_esc(alert.device.os)}</span>")
         rows.append(("Postura equipo", " · ".join(posture_bits)))
+
+    # MITRE que reporta el propio Defender: las reglas 2000xx no tienen mapping en
+    # Wazuh, así que sin esto el correo decía "sin técnicas MITRE asociadas".
+    if alert.threat and alert.threat.mitre_techniques:
+        rows.append((
+            "MITRE (vendor)",
+            " ".join(_badge(t, "warning") for t in alert.threat.mitre_techniques[:6]),
+        ))
 
     rows += [
         ("Wazuh rule",     f"{_esc(alert.wazuh_rule.id)} (level {alert.wazuh_rule.level})"),
@@ -330,10 +374,10 @@ def _ctx_rows(alert: NormalizedAlert, plan: NarratorPlan) -> str:
             files_html += f"<br><em style='color:#6b7280;'>+{len(alert.files) - 3} más…</em>"
         rows.append(("Archivos", files_html))
 
-    return "\n".join(
-        f"<tr><td class='label'>{label}:</td><td class='value'>{value}</td></tr>"
-        for label, value in rows
-    )
+    # Devuelve la tabla entera, no <tr> sueltos: las clases .info-table/.label
+    # vivían en el <style> del shell viejo, y al unificar el diseño las filas
+    # quedaron sin columnas ni padding — se veían como texto corrido.
+    return _theme.kv_rows(rows)
 
 
 def _actions_html(plan: NarratorPlan) -> str:
@@ -387,12 +431,101 @@ def _defender_section(alert: NormalizedAlert) -> str:
         if has_actions else ""
     )
     links_html = f"<div style='margin-top:10px;'>{''.join(links)}</div>" if links else ""
-    return (
-        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
-        "border-left:4px solid #64748b;'>"
-        "<div style='font-weight:bold;color:#57606a;margin-bottom:8px;font-size:14px;'>"
-        "🛡️ Defender — guía y pivots</div>"
-        f"{guidance}{links_html}</div>"
+    return _theme.section(
+        "Defender &mdash; gu&iacute;a y pivots",
+        "Lo que recomienda el vendor y d&oacute;nde seguir la investigaci&oacute;n",
+        guidance + links_html,
+    )
+
+
+def _pivot_value(alert: NormalizedAlert) -> str:
+    """El titular del correo: lo más jugoso de la alerta, en una línea.
+
+    Endpoint → host + archivo/usuarios. Mail (Office 365) → asunto + buzones,
+    porque esas alertas no traen host y el titular quedaba en "-".
+    """
+    if not alert.device.hostname and alert.emails:
+        m0 = alert.emails[0]
+        pivot = f"<strong>{_esc(m0.subject or alert.title)}</strong>"
+        buzones = [m.recipient for m in alert.emails if m.recipient]
+        if buzones:
+            extra = f" +{len(buzones) - 2}" if len(buzones) > 2 else ""
+            pivot += f" → {_esc(', '.join(buzones[:2]))}{extra}"
+        return pivot
+
+    pivot = f"<strong>{_esc(alert.device.hostname)}</strong>"
+    if alert.files:
+        f0 = alert.files[0]
+        verdict_txt = (f0.verdict or "unknown").lower()
+        verdict_style = "critical" if verdict_txt == "malicious" else "warning"
+        pivot += (
+            f" → {_badge(verdict_txt, verdict_style)} <code>{_esc(f0.name)}</code>"
+        )
+    elif alert.users_involved:
+        sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
+        pivot += f" → usuarios: {sams}"
+    return pivot
+
+
+def _email_section(alert: NormalizedAlert) -> str:
+    """Card con los correos de la alerta (Defender for Office 365).
+
+    Vacío si la alerta no trae mailEvidence. Es la "información principal" de una
+    alerta de phishing: sin esta sección el correo llegaba con el host en None y
+    sin destinatarios, aunque el payload traía asunto, remitente y URL.
+    """
+    if not alert.emails:
+        return ""
+    bloques: list[str] = []
+    for m in alert.emails[:5]:
+        rows: list[tuple[str, str]] = []
+        if m.recipient:
+            rows.append(("Destinatario", f"<code>{_esc(m.recipient)}</code>"))
+        if m.sender_address:
+            rows.append(("Remitente", f"<code>{_esc(m.sender_address)}</code>"))
+        if m.sender_ip:
+            rows.append(("IP origen", f"<code>{_esc(m.sender_ip)}</code>"))
+        if m.urls:
+            urls_html = "<br>".join(
+                f"<code style='font-size:11px;word-break:break-all;'>{_esc(u)}</code>"
+                for u in m.urls[:5]
+            )
+            if len(m.urls) > 5:
+                urls_html += (
+                    f"<br><em style='color:{_theme.C_MUTED};'>"
+                    f"+{len(m.urls) - 5} m&aacute;s&hellip;</em>"
+                )
+            rows.append((f"URLs ({m.url_count})", urls_html))
+        if m.attachments_count:
+            rows.append(("Adjuntos", str(m.attachments_count)))
+        if m.received_at:
+            rows.append(("Recibido", f"<code style='font-size:12px;'>{_esc(m.received_at)}</code>"))
+        entrega = " · ".join(
+            x for x in (m.delivery_action, m.delivery_location) if x and x != "unknown"
+        )
+        if entrega:
+            rows.append(("Entrega", _esc(entrega)))
+        if m.threats:
+            rows.append(("Amenazas", _badge(", ".join(m.threats), "critical")))
+        asunto = (
+            f'<div style="font-family:{_theme.FONT};font-size:14px;line-height:20px;'
+            f'font-weight:bold;color:{_theme.C_TEXT};padding-bottom:8px;">'
+            f'&#9993;&nbsp; {_esc(m.subject or "(sin asunto)")}</div>'
+        )
+        bloques.append(asunto + _theme.kv_rows(rows))
+
+    body = _theme.spacer(14).join(bloques)
+    if len(alert.emails) > 5:
+        body += (
+            f'<div style="font-family:{_theme.FONT};font-size:12px;'
+            f'color:{_theme.C_MUTED};padding-top:8px;">'
+            f'+{len(alert.emails) - 5} mensaje(s) m&aacute;s en la alerta de Defender.</div>'
+        )
+    destinatarios = len({m.recipient for m in alert.emails if m.recipient})
+    return _theme.section(
+        f"Correos involucrados ({len(alert.emails)})",
+        f"{destinatarios} buz&oacute;n(es) alcanzado(s) &mdash; evidencia de Defender for Office 365",
+        body,
     )
 
 
@@ -431,6 +564,10 @@ def _enrichment_section(enrichment: "EnrichmentResult | None") -> str:
             )
             continue
         bits = [f"<code>{_esc(getattr(u, 'sam', '?'))}</code>"]
+        # Nombre real de AD (displayName). Es deterministico (backfilled), no inventado.
+        ad_name = getattr(u, "display_name", None)
+        if ad_name:
+            bits.append(f"<strong>{_esc(ad_name)}</strong>")
         enabled = getattr(u, "enabled", None)
         if enabled is True:
             bits.append(_badge("habilitada", "success"))
@@ -467,12 +604,10 @@ def _enrichment_section(enrichment: "EnrichmentResult | None") -> str:
 
     if not blocks:
         return ""
-    return (
-        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
-        "border-left:4px solid #8b949e;'>"
-        "<div style='font-weight:bold;color:#1f2328;margin-bottom:10px;font-size:14px;'>"
-        "🧩 Contexto local (AD + Wazuh)</div>"
-        f"{''.join(blocks)}</div>"
+    return _theme.section(
+        "Contexto local (AD + Wazuh)",
+        "Qu&eacute; sabe la propia infraestructura sobre los involucrados",
+        "".join(blocks),
     )
 
 
@@ -551,12 +686,10 @@ def _threat_intel_section(ti: "ThreatIntelResult | None") -> str:
 
     if not blocks:
         return ""
-    return (
-        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
-        "border-left:4px solid #8b5cf6;'>"
-        "<div style='font-weight:bold;color:#1f2328;margin-bottom:10px;font-size:14px;'>"
-        "🛰️ Inteligencia externa</div>"
-        f"{''.join(blocks)}</div>"
+    return _theme.section(
+        "Inteligencia externa",
+        "Reputaci&oacute;n de los indicadores en fuentes de terceros",
+        "".join(blocks),
     )
 
 
@@ -595,18 +728,9 @@ def _build_html_body(
     )
 
     # Pivot value: lo más jugoso de la alerta. Host + archivo malicious (si hay).
-    pivot_value = f"<strong>{_esc(alert.device.hostname)}</strong>"
-    if alert.files:
-        f0 = alert.files[0]
-        verdict_txt = (f0.verdict or "unknown").lower()
-        verdict_style = "critical" if verdict_txt == "malicious" else "warning"
-        pivot_value += (
-            f" → {_badge(verdict_txt, verdict_style)} "
-            f"<code>{_esc(f0.name)}</code>"
-        )
-    elif alert.users_involved:
-        sams = ", ".join(_esc(u.sam) for u in alert.users_involved[:3])
-        pivot_value += f" → usuarios: {sams}"
+    # En las alertas de mail (Defender for Office 365) NO hay host: el pivot es el
+    # asunto del mensaje y a quién le llegó.
+    pivot_value = _pivot_value(alert)
 
     # Si tenemos review_url, mandamos UN solo botón "Revisar y decidir" que abre la
     # página con checkboxes per-action. Si no, fallback al patrón viejo (2 botones).
@@ -632,111 +756,69 @@ def _build_html_body(
             f"❌ RECHAZAR</a>"
         )
 
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>SOC L1 — {_esc(alert.title)}</title>
-  <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
-    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
-    .title {{ font-size: 24px; font-weight: bold; margin-bottom: 8px; }}
-    .pivot-section {{ background: #fef2f2; padding: 16px; margin: 20px; border-radius: 8px; border-left: 4px solid {color}; }}
-    .pivot-label {{ font-weight: bold; color: #374151; margin-bottom: 4px; }}
-    .pivot-value {{ font-family: monospace; font-size: 16px; font-weight: bold; color: #1f2937; }}
-    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-    .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
-    .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; }}
-    .approval-section {{ background: #f8fafc; padding: 24px; margin: 20px; border-radius: 8px; border: 1px solid #e5e7eb; text-align: center; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
-    code {{ font-family:'SF Mono',Monaco,monospace; font-size: 12px; color: #475569; }}
-  </style>
-</head>
-<body>
-  <div class="container">
+    # El badge del header sale del riesgo que evaluó el Narrator, no del nivel
+    # crudo de la regla: es la lectura del SOC, que es la que hay que decidir.
+    _BADGE_POR_RIESGO = {
+        "critical": "critico", "high": "alto", "medium": "medio",
+        "low": "bajo", "info": "info", "informational": "info",
+    }
+    badge_kind = _BADGE_POR_RIESGO.get((plan.risk_level or "").lower(), "medio")
 
-    <!-- Header con border-left por severidad (idéntico a Unified Email Notifier v4.9) -->
-    <div class="header">
-      <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:14px;color:#64748b;margin-top:4px;">
-        {_esc(alert.wazuh_rule.description)}
-      </div>
-      <div style="margin-top:10px;">
-        {rule_badge_html}
-        {risk_badge_html}
-        {_badge(f"TICKET #{invgate_request_id}", "info") if invgate_request_id else ""}
-      </div>
-    </div>
+    cuerpo = _theme.section(
+        "Informaci&oacute;n principal",
+        _esc(alert.wazuh_rule.description),
+        _theme.callout(pivot_value, accent=color)
+        + '<div style="padding-top:4px;">'
+        + rule_badge_html + " " + risk_badge_html
+        + (" " + _badge(f"TICKET #{invgate_request_id}", "info") if invgate_request_id else "")
+        + "</div>",
+    )
 
-    <!-- Pivot section: info principal destacada -->
-    <div class="pivot-section">
-      <div class="pivot-label">Información Principal:</div>
-      <div class="pivot-value">{pivot_value}</div>
-    </div>
+    cuerpo += _theme.section(
+        "Resumen ejecutivo",
+        "",
+        f'<div style="font-family:{_theme.FONT};font-size:13px;line-height:21px;'
+        f'color:{_theme.C_TEXT};white-space:pre-line;">{_esc(plan.executive_summary)}</div>'
+        + _theme.spacer(18)
+        + _ctx_rows(alert, plan),
+    )
 
-    <!-- Resumen ejecutivo del Narrator (estilo párrafo, fuera de tabla) -->
-    <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin-bottom:8px;">
-        📝 Resumen ejecutivo
-      </div>
-      <div style="color:#57606a;font-size:14px;line-height:1.6;white-space:pre-line;">
-        {_esc(plan.executive_summary)}
-      </div>
-    </div>
+    cuerpo += _email_section(alert)
+    cuerpo += _defender_section(alert)
+    cuerpo += _enrichment_section(enrichment)
+    cuerpo += _threat_intel_section(threat_intel)
 
-    <!-- Info-table (estilo Wazuh exacto) -->
-    <div style="padding:0 24px;">
-      <table class="info-table">
-        {_ctx_rows(alert, plan)}
-      </table>
-    </div>
+    cuerpo += _theme.section(
+        "An&aacute;lisis del incidente",
+        "Por qu&eacute; el SOC lo lee as&iacute;",
+        _theme.notice(
+            f'<span style="white-space:pre-line;">{_esc(plan.rationale)}</span>',
+            accent=_theme.C_HIGH, bg=_theme.C_WARN_BG,
+        ),
+    )
 
-    {_defender_section(alert)}
+    cuerpo += _theme.section(
+        f"Acciones propuestas ({len(plan.actions)})",
+        "",
+        f'<ul style="margin:0;padding-left:20px;font-family:{_theme.FONT};'
+        f'font-size:13px;line-height:23px;color:{_theme.C_TEXT};">{_actions_html(plan)}</ul>',
+    )
 
-    {_enrichment_section(enrichment)}
+    cuerpo += _theme.section(
+        "Esta alerta requiere tu aprobaci&oacute;n",
+        f"Link de un solo uso, v&aacute;lido por {ttl_hours} h. El primer click decide.",
+        f'<div style="text-align:center;padding-top:6px;">{cta_buttons}</div>',
+    )
 
-    {_threat_intel_section(threat_intel)}
-
-    <!-- Card "Recomendación" (= Análisis del Narrator) — paleta v4.9 -->
-    <div style="background:#fef3c7;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #f59e0b;">
-      <div style="font-weight:bold;color:#92400e;margin-bottom:8px;font-size:14px;">
-        💡 Análisis del incidente:
-      </div>
-      <div style="color:#78350f;font-size:13px;line-height:1.6;white-space:pre-line;">
-        {_esc(plan.rationale)}
-      </div>
-    </div>
-
-    <!-- Card "Acciones Sugeridas" (= ProposedActions del Narrator) — paleta v4.9 -->
-    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
-      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
-        📋 Acciones propuestas ({len(plan.actions)}):
-      </div>
-      <ul style="margin:8px 0;padding-left:24px;color:#075985;font-size:13px;line-height:1.8;">
-        {_actions_html(plan)}
-      </ul>
-    </div>
-
-    <!-- Approval section: sutil, sin banner fuerte -->
-    <div class="approval-section">
-      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin-bottom:6px;">
-        ⚠️ Esta alerta requiere tu aprobación
-      </div>
-      <div style="color:#6b7280;font-size:12px;margin-bottom:16px;">
-        Link single-use, válido por {ttl_hours}h. Primer click decide.
-      </div>
-      {cta_buttons}
-    </div>
-
-    <div class="footer">
-      <strong>SOC L1 · Wazuh + Defender</strong> • Pipeline multi-agente<br>
-      Generado automáticamente — no responder a este email.
-    </div>
-  </div>
-</body>
-</html>
-"""
+    return _theme.document(
+        title=_esc(alert.title),
+        subtitle=f"Notificaci&oacute;n de incidente &nbsp;&middot;&nbsp; {_esc(alert.wazuh_rule.description)}",
+        body=cuerpo,
+        footer="SOC L1 &middot; Wazuh + Defender &mdash; pipeline multi-agente<br>Generado autom&aacute;ticamente, no responder a este correo.",
+        doc_title=f"SOC L1 - {_esc(alert.title)}",
+        badge_kind=badge_kind,
+        preheader=f"{plan.risk_level} &middot; {_esc(alert.title)} &middot; requiere decisi&oacute;n",
+    )
 
 
 # ===== Message build + send =====
@@ -760,9 +842,12 @@ def _build_message(
 
     ticket_tag = f" [ticket #{invgate_request_id}]" if invgate_request_id else ""
     msg = EmailMessage()
-    msg["Subject"] = (
-        f"[SOC L1][{plan.risk_level.upper()}] {alert.device.hostname or 'unknown'} - "
-        f"{alert.title[:60]}{ticket_tag}"
+    msg["Subject"] = _theme.subject(
+        "INCIDENTE",
+        plan.risk_level.upper(),
+        alert.title,
+        alert.device.hostname or "unknown",
+        f"ticket #{invgate_request_id}" if invgate_request_id else "",
     )
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
@@ -789,8 +874,46 @@ def _build_message(
     return msg
 
 
+def _stamp_headers(settings: Settings, msg: EmailMessage) -> None:
+    """Agrega Date y Message-ID si faltan.
+
+    El stdlib no los pone y smtplib tampoco: sin ellos varios filtros antispam
+    penalizan el mensaje (verificado contra el Exchange de Grupo Alemana, donde
+    los reportes en HTML caían en No Deseado). Ver src/report_theme.py.
+    """
+    if "Date" not in msg:
+        msg["Date"] = formatdate(localtime=True)
+    if "Message-ID" not in msg:
+        addr = parseaddr(settings.smtp_from or "")[1] or ""
+        domain = addr.split("@")[-1] if "@" in addr else None
+        msg["Message-ID"] = make_msgid(domain=domain) if domain else make_msgid()
+
+
+def _embed_logo(msg: EmailMessage) -> None:
+    """Adjunta el logo por Content-ID si el HTML lo referencia.
+
+    El shell de report_theme apunta a `cid:logoalemana`. Sin esta parte el
+    correo llega con el ícono de imagen rota; con ella Outlook lo pinta sin
+    pedir "descargar imágenes", que es justamente por qué se usa CID y no URL.
+    """
+    raw = _theme.load_logo()
+    if not raw:
+        return
+    for part in msg.walk():
+        if part.get_content_type() != "text/html":
+            continue
+        if f"cid:{_theme.LOGO_CID}" not in part.get_content():
+            continue
+        part.add_related(
+            raw, maintype="image", subtype="png", cid=f"<{_theme.LOGO_CID}>"
+        )
+        return
+
+
 def _send_sync(settings: Settings, msg: EmailMessage) -> None:
     """Conexión SMTP sincrónica con STARTTLS opcional. Corre bajo to_thread."""
+    _stamp_headers(settings, msg)
+    _embed_logo(msg)
     if settings.smtp_use_starttls:
         ctx = ssl.create_default_context()
         if not settings.smtp_ssl_verify:
@@ -873,7 +996,11 @@ async def send_fgt_observation_email(
         return
 
     h = html.escape
-    subject = f"[SOC L1][FortiGate · OBSERVACIÓN] Bloquearía {ip}"
+    # El asunto es texto plano: nada de entidades HTML acá.
+    subject = _theme.subject(
+        "BLOQUEOS", "OBSERVACION", ip,
+        f"regla {rule_id}" if rule_id else "",
+    )
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
@@ -893,40 +1020,57 @@ async def send_fgt_observation_email(
     )
     msg.set_content(text)
 
-    rows = "".join(
-        f'<tr><td style="padding:6px 12px;color:#6b7280;font-size:13px;white-space:nowrap;">{h(k)}</td>'
-        f'<td style="padding:6px 12px;color:#1f2328;font-size:13px;font-family:monospace;">{h(v)}</td></tr>'
-        for k, v in (
-            ("Bloquearía IP", ip),
-            ("Regla IPS", rule_id or "—"),
-            ("Host / origen", host or "—"),
-            ("Alerta", alert_id),
-            ("TTL del ban", f"{ttl_hours}h"),
+    detalle = "".join(
+        _theme.table_row(
+            [
+                (h(k), "left", f"color:{_theme.C_MUTED};white-space:nowrap;"),
+                (_theme.code(h(v)), "left", ""),
+            ],
+            idx,
+        )
+        for idx, (k, v) in enumerate(
+            (
+                ("Bloquear&iacute;a la IP", ip),
+                ("Regla IPS", rule_id or "&mdash;"),
+                ("Host / origen", host or "&mdash;"),
+                ("Alerta", alert_id),
+                ("TTL del ban", f"{ttl_hours}h"),
+            ),
+            1,
         )
     )
-    body_html = f"""<!doctype html><html><body style="margin:0;background:#f6f8fa;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden;">
-    <tr><td style="background:#9a6700;color:#ffffff;padding:18px 24px;font-weight:bold;font-size:15px;">
-      🔭 FortiGate · OBSERVACIÓN (Fase 0)
-    </td></tr>
-    <tr><td style="padding:20px 24px 8px;color:#1f2328;font-size:14px;line-height:1.6;">
-      SOC-L1 detectó una alerta IPS que <strong>bloquearía</strong> esta IP — pero
-      <strong>no ejecutó nada</strong> (todavía estamos en Fase 0, solo observación).
-    </td></tr>
-    <tr><td style="padding:4px 12px 12px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
-    </td></tr>
-    <tr><td style="padding:0 24px 20px;color:#57606a;font-size:12px;line-height:1.5;">
-      Hoy el bloqueo real lo hace el integration <code style="background:#eff2f5;padding:1px 5px;border-radius:3px;">custom-email-unified</code>
-      de Wazuh. Cuando pasemos a Fase 1, SOC-L1 ejecuta el quarantine y este aviso se
-      reemplaza por el flujo completo (ticket + aprobación).
-    </td></tr>
-    <tr><td style="background:#f6f8fa;padding:14px 24px;text-align:center;color:#6b7280;font-size:12px;">
-      SOC L1 · ZebraSecurity — aviso temporal de Fase 0
-    </td></tr>
-  </table>
-</body></html>"""
-    msg.add_alternative(body_html, subtype="html")
+
+    cuerpo = _theme.section(
+        "Nada se ejecut&oacute;",
+        "Fase 0 &mdash; solo observaci&oacute;n",
+        _theme.notice(
+            "SOC-L1 detect&oacute; una alerta IPS que <strong>bloquear&iacute;a</strong> esta IP, "
+            "pero <strong>no toc&oacute; el firewall</strong>.",
+            accent=_theme.C_HIGH,
+        )
+        + _theme.table_open([("Dato", "170", "left"), ("Valor", None, "left")])
+        + detalle
+        + _theme.TABLE_CLOSE,
+    )
+    cuerpo += _theme.section(
+        "Por qu&eacute; recib&iacute;s este aviso",
+        "",
+        "Hoy el bloqueo real lo sigue haciendo el integration "
+        + _theme.code("custom-email-unified")
+        + " de Wazuh. Cuando pasemos a Fase 1, SOC-L1 ejecuta el quarantine y este "
+        "aviso se reemplaza por el flujo completo, con ticket y aprobaci&oacute;n.",
+    )
+
+    body_html = _theme.document(
+        title="FortiGate &middot; observaci&oacute;n",
+        subtitle=f"Bloquear&iacute;a {h(ip)} &nbsp;&middot;&nbsp; no se ejecut&oacute; nada",
+        body=cuerpo,
+        footer="SOC L1 &mdash; aviso temporal de Fase 0",
+        doc_title=f"FortiGate - observaci&oacute;n {ip}",
+        badge_kind="atencion",
+        preheader=f"Bloquear&iacute;a {ip} &middot; Fase 0, sin ejecutar",
+    )
+    msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
@@ -947,10 +1091,15 @@ async def send_fgt_block_email(
     host: str | None,
     ttl_hours: int,
     expires_at: str | None = None,
+    invgate_request_id: int | None = None,
+    invgate_closed: bool = False,
+    invgate_description: str | None = None,
 ) -> None:
     """Fase 1: confirma que SOC-L1 BLOQUEÓ la IP en FortiGate (quarantine con TTL).
 
     Reemplaza al aviso de Fase 0. El caller ya hizo el dedup por IP; esto solo arma y manda.
+    Si se creó un ticket InvGate, incluye el número, su estado (cerrado/abierto) y el texto
+    exacto que quedó registrado en el ticket (`invgate_description`).
     """
     if not settings.smtp_host or not settings.smtp_to_approvers:
         logger.warning(
@@ -959,12 +1108,32 @@ async def send_fgt_block_email(
         return
 
     h = html.escape
-    subject = f"[SOC L1][FortiGate · BLOQUEADO] {ip}"
+    # Estado del ticket para subject/cuerpo: cerrado vs abierto (close pudo dar 403).
+    if invgate_request_id:
+        ticket_state = "cerrado" if invgate_closed else "abierto"
+        ticket_value = f"#{invgate_request_id} ({ticket_state})"
+    else:
+        ticket_value = "—"
+    ticket_tag = f" · ticket #{invgate_request_id}" if invgate_request_id else ""
+
+    subject = _theme.subject(
+        "BLOQUEOS", "BLOQUEADA", ip,
+        f"ticket #{invgate_request_id}" if invgate_request_id else "",
+    )
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
 
+    ticket_text = (
+        f"Ticket InvGate:   {ticket_value}\n" if invgate_request_id else ""
+    )
+    ticket_block_text = (
+        f"\n--- Contenido del ticket InvGate #{invgate_request_id} ---\n"
+        f"{invgate_description}\n"
+        if invgate_request_id and invgate_description
+        else ""
+    )
     text = (
         f"SOC-L1 · FortiGate auto-block (Fase 1 — EJECUTADO)\n\n"
         f"IP bloqueada:     {ip}\n"
@@ -972,48 +1141,81 @@ async def send_fgt_block_email(
         f"Host/origen:      {host or '—'}\n"
         f"Alerta:           {alert_id}\n"
         f"TTL del ban:      {ttl_hours}h (quarantine con TTL)\n"
-        f"Expira:           {expires_at or '—'}\n\n"
+        f"Expira:           {expires_at or '—'}\n"
+        f"{ticket_text}\n"
         f"SOC-L1 aplicó un quarantine (banned users con TTL) sobre la IP origen en "
         f"FortiGate. El ban se libera solo al vencer el TTL.\n"
+        f"{ticket_block_text}"
     )
     msg.set_content(text)
 
-    rows = "".join(
-        f'<tr><td style="padding:6px 12px;color:#6b7280;font-size:13px;white-space:nowrap;">{h(k)}</td>'
-        f'<td style="padding:6px 12px;color:#1f2328;font-size:13px;font-family:monospace;">{h(v)}</td></tr>'
-        for k, v in (
-            ("IP bloqueada", ip),
-            ("Regla IPS", rule_id or "—"),
-            ("Host / origen", host or "—"),
-            ("Alerta", alert_id),
-            ("TTL del ban", f"{ttl_hours}h"),
-            ("Expira", expires_at or "—"),
+    # Detalle en el sistema de diseño compartido (ver src/report_theme.py):
+    # tablas para el layout, inline CSS, y el rojo de alerta solo en el encabezado.
+    detalle_rows = "".join(
+        _theme.table_row(
+            [
+                (h(k), "left", f"color:{_theme.C_MUTED};white-space:nowrap;"),
+                (f'<code style="font-size:12px;">{h(v)}</code>', "left", "font-weight:bold;"),
+            ],
+            idx,
+        )
+        for idx, (k, v) in enumerate(
+            (
+                ("IP bloqueada", ip),
+                ("Regla IPS", rule_id or "—"),
+                ("Host / origen", host or "—"),
+                ("Alerta", alert_id),
+                ("TTL del ban", f"{ttl_hours}h"),
+                ("Expira", expires_at or "—"),
+                ("Ticket InvGate", ticket_value),
+            ),
+            1,
         )
     )
-    body_html = f"""<!doctype html><html><body style="margin:0;background:#f6f8fa;padding:24px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d0d7de;border-radius:12px;overflow:hidden;">
-    <tr><td style="background:#b42318;color:#ffffff;padding:18px 24px;font-weight:bold;font-size:15px;">
-      🚫 FortiGate · IP BLOQUEADA (auto-block)
-    </td></tr>
-    <tr><td style="padding:20px 24px 8px;color:#1f2328;font-size:14px;line-height:1.6;">
-      SOC-L1 detectó una alerta IPS de alta confianza y <strong>bloqueó la IP origen</strong>
-      en FortiGate (quarantine con TTL). El ban se libera solo al vencer el TTL.
-    </td></tr>
-    <tr><td style="padding:4px 12px 12px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #d0d7de;border-radius:8px;border-collapse:separate;">{rows}</table>
-    </td></tr>
-    <tr><td style="background:#f6f8fa;padding:14px 24px;text-align:center;color:#6b7280;font-size:12px;">
-      SOC L1 · ZebraSecurity — FortiGate Auto-Block
-    </td></tr>
-  </table>
-</body></html>"""
-    msg.add_alternative(body_html, subtype="html")
+
+    cuerpo = _theme.section(
+        "Acci&oacute;n ejecutada",
+        "Bloqueo autom&aacute;tico aplicado en FortiGate",
+        _theme.notice(
+            "SOC-L1 detect&oacute; una alerta IPS de alta confianza y <strong>bloque&oacute; la IP origen</strong> "
+            "en FortiGate mediante quarantine con TTL. El ban se libera solo al vencer el TTL.",
+            accent=_theme.C_CRIT,
+            bg="#fdf1f2",
+        )
+        + _theme.table_open(
+            [("Dato", "150", "left"), ("Valor", None, "left")]
+        )
+        + detalle_rows
+        + _theme.TABLE_CLOSE,
+    )
+
+    if invgate_request_id and invgate_description:
+        cuerpo += _theme.section(
+            f"Contenido registrado en el ticket InvGate #{h(str(invgate_request_id))}",
+            "",
+            f'''<pre style="margin:0;padding:14px 16px;background:#f6f8fa;border:1px solid {_theme.C_BORDER};'''
+            f'''border-radius:8px;color:{_theme.C_TEXT};font-size:12px;line-height:1.5;white-space:pre-wrap;'''
+            f'''font-family:{_theme.MONO};">{h(invgate_description)}</pre>''',
+        )
+
+    body_html = _theme.document(
+        title="FortiGate &middot; IP bloqueada",
+        subtitle=f"Auto-block ejecutado &nbsp;&middot;&nbsp; {h(ip)}",
+        body=cuerpo,
+        footer="SOC L1 &mdash; auto-block de FortiGate",
+        doc_title=f"FortiGate - IP bloqueada {ip}",
+        # Sin badge explícito caía en el default "INFORMATIVO", con la franja
+        # verde, en un correo que anuncia un bloqueo por una alerta IPS.
+        badge_kind="alto",
+        preheader=f"IP {ip} bloqueada por {ttl_hours}h &middot; sin intervenci&oacute;n necesaria",
+    )
+    msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 
     try:
         await asyncio.to_thread(_send_sync, settings, msg)
         logger.info(
-            "mailer: email FGT-BLOCK enviado | ip=%s rule=%s alert=%s to=%s",
-            ip, rule_id, alert_id, settings.smtp_to_approvers,
+            "mailer: email FGT-BLOCK enviado | ip=%s rule=%s alert=%s ticket=%s to=%s",
+            ip, rule_id, alert_id, invgate_request_id or "n/a", settings.smtp_to_approvers,
         )
     except Exception:
         logger.exception("mailer: send FGT-BLOCK failed | ip=%s alert=%s", ip, alert_id)
@@ -1127,13 +1329,11 @@ def _execution_rows_html(execution_results: list[dict] | None) -> str:
             f"<code style='background:#ddf4ff;padding:2px 6px;border-radius:3px;'>{_esc(r.get('target'))}</code>"
             f"{msg}</li>"
         )
-    return (
-        "<div style='background-color:#f6f8fa;padding:16px;margin:20px;border-radius:8px;"
-        "border-left:4px solid #64748b;'>"
-        "<div style='font-weight:bold;color:#1f2328;margin-bottom:8px;font-size:14px;'>"
-        "⚙️ Resultado de la ejecución</div>"
-        f"<ul style='margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7;'>{''.join(items)}</ul>"
-        "</div>"
+    return _theme.section(
+        "Resultado de la ejecuci&oacute;n",
+        "Qu&eacute; devolvi&oacute; cada acci&oacute;n al aplicarse",
+        f'<ul style="margin:0;padding-left:20px;font-family:{_theme.FONT};'
+        f'font-size:13px;line-height:23px;color:{_theme.C_TEXT};">{"".join(items)}</ul>',
     )
 
 
@@ -1196,75 +1396,44 @@ def _build_closure_html_body(
     decision_badge = _badge(f"CASO CERRADO · {_decision_label(decision)}", decision_style)
     risk_badge_html = _badge(plan.risk_level.upper(), _risk_badge_style(plan.risk_level))
 
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>SOC L1 — Caso cerrado {_esc(alert.alert_id)}</title>
-  <style>
-    body {{ font-family: sans-serif; background: #f8fafc; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; }}
-    .header {{ padding: 24px; border-left: 8px solid {color}; background: #f8fafc; }}
-    .title {{ font-size: 22px; font-weight: bold; margin-bottom: 8px; }}
-    .tl-table {{ width: 100%; border-collapse: collapse; }}
-    .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-    .info-table td {{ padding: 12px 16px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
-    .info-table .label {{ font-weight: bold; width: 160px; background: #f9fafb; }}
-    .footer {{ padding: 16px; background: #f8fafc; text-align: center; font-size: 12px; color: #64748b; }}
-    code {{ font-family:'SF Mono',Monaco,monospace; font-size: 12px; color: #475569; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div class="title">{_esc(alert.title)}</div>
-      <div style="font-size:13px;color:#64748b;margin-top:4px;">
-        Alerta <code>{_esc(alert.alert_id)}</code> · host <strong>{_esc(alert.device.hostname)}</strong>
-      </div>
-      <div style="margin-top:10px;">
-        {decision_badge}
-        {risk_badge_html}
-        {_badge(f"TICKET #{invgate_request_id}", "info") if invgate_request_id else ""}
-      </div>
-    </div>
+    _BADGE_POR_RIESGO = {
+        "critical": "critico", "high": "alto", "medium": "medio",
+        "low": "bajo", "info": "info", "informational": "info",
+    }
+    badge_kind = _BADGE_POR_RIESGO.get((plan.risk_level or "").lower(), "medio")
 
-    <div style="padding:0 24px;">
-      <div style="font-weight:bold;color:#1f2328;font-size:14px;margin:20px 0 8px;">
-        📝 Resumen ejecutivo
-      </div>
-      <div style="color:#57606a;font-size:14px;line-height:1.6;white-space:pre-line;">
-        {_esc(plan.executive_summary)}
-      </div>
-    </div>
+    cuerpo = _theme.section(
+        "Caso cerrado",
+        f"Alerta {_esc(alert.alert_id)} &middot; host {_esc(alert.device.hostname)}",
+        f'<div style="padding-bottom:12px;">{decision_badge} {risk_badge_html}'
+        + (f' {_badge(f"TICKET #{invgate_request_id}", "info")}' if invgate_request_id else "")
+        + "</div>"
+        + f'<div style="font-family:{_theme.FONT};font-size:13px;line-height:21px;'
+        f'color:{_theme.C_TEXT};white-space:pre-line;">{_esc(plan.executive_summary)}</div>'
+        + _theme.spacer(18)
+        + _ctx_rows(alert, plan),
+    )
 
-    <!-- Contexto / evidencia (mismos campos de decisión que el email de aprobación) -->
-    <div style="padding:0 24px;">
-      <table class="info-table">
-        {_ctx_rows(alert, plan)}
-      </table>
-    </div>
+    cuerpo += _email_section(alert)
+    cuerpo += _defender_section(alert)
 
-    {_defender_section(alert)}
+    cuerpo += _theme.section(
+        "Timeline del caso",
+        "Qu&eacute; hizo cada agente y cu&aacute;ndo",
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{_timeline_rows_html(events)}</table>',
+    )
 
-    <div style="background:#f0f9ff;padding:16px;margin:20px;border-radius:8px;border-left:4px solid #0284c7;">
-      <div style="font-weight:bold;color:#0c4a6e;margin-bottom:12px;font-size:14px;">
-        🕐 Timeline del caso
-      </div>
-      <table class="tl-table">
-        {_timeline_rows_html(events)}
-      </table>
-    </div>
+    cuerpo += _execution_rows_html(execution_results)
 
-    {_execution_rows_html(execution_results)}
-
-    <div class="footer">
-      <strong>SOC L1 · Wazuh + Defender</strong> • Pipeline multi-agente<br>
-      Notificación de cierre — generada automáticamente, no responder.
-    </div>
-  </div>
-</body>
-</html>
-"""
+    return _theme.document(
+        title=_esc(alert.title),
+        subtitle=f"Notificaci&oacute;n de cierre &nbsp;&middot;&nbsp; {_decision_label(decision)}",
+        body=cuerpo,
+        footer="SOC L1 &middot; Wazuh + Defender &mdash; pipeline multi-agente<br>Notificaci&oacute;n de cierre, generada autom&aacute;ticamente. No responder.",
+        doc_title=f"SOC L1 - caso cerrado {_esc(alert.alert_id)}",
+        badge_kind=badge_kind,
+        preheader=f"Caso cerrado: {_decision_label(decision)} &middot; {_esc(alert.title)}",
+    )
 
 
 def _build_closure_message(
@@ -1290,9 +1459,12 @@ def _build_closure_message(
     )
     ticket_tag = f" [ticket #{invgate_request_id}]" if invgate_request_id else ""
     msg = EmailMessage()
-    msg["Subject"] = (
-        f"[SOC L1][CERRADO: {_decision_label(decision)}][{plan.risk_level.upper()}] "
-        f"{alert.device.hostname or 'unknown'} - {alert.title[:60]}{ticket_tag}"
+    msg["Subject"] = _theme.subject(
+        "INCIDENTE",
+        "CERRADO",
+        _decision_label(decision),
+        alert.title,
+        f"ticket #{invgate_request_id}" if invgate_request_id else "",
     )
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers

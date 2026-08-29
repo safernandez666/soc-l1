@@ -29,9 +29,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   if (res.status === 401) {
     throw new UnauthorizedError("unauthorized")
   }
-  const data = (await res.json().catch(() => ({}))) as { error?: string }
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string
+    message?: string
+  }
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status} en ${path}`)
+    // El backend manda `message` en castellano para mostrarle al analista;
+    // `error` es el código y solo sirve de fallback.
+    throw new Error(data?.message || data?.error || `HTTP ${res.status} en ${path}`)
   }
   return data as T
 }
@@ -84,13 +89,30 @@ export interface Metrics {
   top_users: [string, number][]
 }
 
+export type ExecMode = "live" | "dry_run" | "mixed"
+
 export interface Session {
   authed: boolean
+  /** Modo efectivo de ejecución. Ausente si no hay sesión. */
+  mode?: ExecMode
+  dry_run_master?: boolean
+  /** Por familia: true = simula, false = ejecuta de verdad. */
+  dry_run_families?: Record<"ad" | "fortigate" | "defender", boolean>
 }
 
 // ===== Cola (espejo de queries._summarize_row + api_queue) =====
 
-export interface CaseSummary {
+export type InvgateState = "sin_ticket" | "sin_verificar" | "resuelto" | "abierto"
+
+export interface InvgateFields {
+  invgate_request_id: number | null
+  invgate_status_id: number | null
+  invgate_resolved: boolean | null
+  invgate_checked_at: string | null
+  invgate_state: InvgateState
+}
+
+export interface CaseSummary extends InvgateFields {
   rowid: number
   alert_id: string
   status: StatusKey
@@ -98,12 +120,21 @@ export interface CaseSummary {
   decided_at: string | null
   decided_by_ip: string | null
   executed_at: string | null
-  invgate_request_id: string | null
   risk_level: string
   title: string
   host: string
   n_actions: number
 }
+
+export interface InvgateReconcile {
+  counts: Record<InvgateState, number>
+  total_with_ticket: number
+  open_cases: CaseSummary[]
+  last_checked: string | null
+}
+
+// Ventanas del picker de tiempo de la cola (espejo de router._QUEUE_RANGES).
+export type QueueRange = "" | "24h" | "7d" | "30d"
 
 export interface QueuePage {
   cases: CaseSummary[]
@@ -111,6 +142,7 @@ export interface QueuePage {
   page: number
   per_page: number
   status: StatusKey | null
+  since: QueueRange
 }
 
 // ===== Detalle de caso (espejo de queries._get_case_sync) =====
@@ -154,9 +186,21 @@ export interface ExecResult {
   target?: string | null
   ok?: boolean
   message?: string | null
+  /** true si la acción se simuló (DRY_RUN) y nunca tocó el sistema destino. */
+  simulated?: boolean
 }
 
-export interface CaseDetail {
+export interface DecisionResult {
+  ok: boolean
+  state: "ok"
+  decision: "approved" | "rejected"
+  alert_id: string | null
+  n_actions: number
+  skipped: number
+  message: string
+}
+
+export interface CaseDetail extends InvgateFields {
   rowid: number
   alert_id: string
   status: StatusKey
@@ -165,7 +209,6 @@ export interface CaseDetail {
   decided_by_ip: string | null
   decided_by_ua: string | null
   executed_at: string | null
-  invgate_request_id: string | null
   selected_actions: number[] | null
   plan: Plan
   alert: Alert
@@ -275,11 +318,20 @@ export interface FgtObservations {
   summary: {
     total_observaciones: number
     would_block: number
+    ejecutados: number
+    ejecutados_fallidos: number
     ips_distintas_que_bloquearia: number
+    ips_distintas_bloqueadas: number
     ips_protegidas_evitadas: string[]
     por_reason: Record<string, number>
     por_regla: Record<string, number>
     ventana: { desde: string | null; hasta: string | null }
+  }
+  tickets: {
+    creados: number
+    cerrados: number
+    abiertos: number
+    ultimo_ts: string | null
   }
   recent: FgtObservationRecord[]
   enabled: boolean
@@ -305,6 +357,131 @@ export interface ReportsResponse {
   }
 }
 
+// ===== Vulnerabilidades (espejo de queries.vuln_summary / vuln_cves) =====
+//
+// El parque es 100% Windows, así que el corte que importa no es el SO sino la
+// categoría: un hallazgo de OS se cierra con un acumulativo/KB y uno de
+// Packages actualizando la app. `Untriaged` son los que Wazuh reporta sin
+// puntuar: severidad desconocida, no inofensiva.
+
+export type VulnSeveridad = "Critical" | "High" | "Medium" | "Low" | "Untriaged"
+export type VulnCategoria = "OS" | "Packages"
+
+export interface VulnRun {
+  started_at: string | null
+  total_active: number
+  new_count: number
+  resolved_count: number
+}
+
+export interface VulnTotals {
+  activos: number
+  cves_unicos: number
+  agentes: number
+  resueltas_total: number
+}
+
+export interface VulnTrendPoint {
+  fecha: string
+  activos: number
+  nuevas: number
+  resueltas: number
+}
+
+export interface VulnHost {
+  agent_name: string
+  total: number
+  criticas: number
+  kev: number
+}
+
+export interface VulnDesfasado {
+  host: string
+  indexado: string
+  actual: string
+  hallazgos: number
+}
+
+/** Cobertura del inventario: qué agentes NO están representados en los datos. */
+export interface VulnCobertura {
+  disponible: boolean
+  actualizado?: string
+  agentes_total?: number
+  agentes_con_datos?: number
+  /** Activos y reportando, pero el detector no genera ningún hallazgo. */
+  sin_datos?: string[]
+  /** El índice tiene un build de SO viejo: sus hallazgos ya podrían estar parcheados. */
+  desfasados?: VulnDesfasado[]
+  hallazgos_dudosos?: number
+}
+
+export interface VulnSummary {
+  available: boolean
+  error?: string
+  generated_at?: string | null
+  last_run?: VulnRun | null
+  totals?: VulnTotals
+  por_severidad?: Partial<Record<VulnSeveridad, number>>
+  por_categoria?: Partial<Record<VulnCategoria, number>>
+  kev?: { hallazgos: number; cves: number }
+  epss_alto?: number
+  prioridad_alta?: number
+  top_hosts?: VulnHost[]
+  tendencia?: VulnTrendPoint[]
+  cobertura?: VulnCobertura
+}
+
+export interface VulnCve {
+  cve: string
+  priority_score: number
+  /** null cuando el hallazgo llega sin puntuar (Untriaged). */
+  cvss_score: number | null
+  /** Probabilidad EPSS en 0..1; se muestra como porcentaje. */
+  epss_score: number | null
+  cisa_kev: boolean
+  severity: string
+  categoria: string
+  hosts_count: number
+  hosts: string[]
+  package_name: string | null
+  first_seen_at: string | null
+  lifecycle_status: string
+}
+
+export interface VulnCvesPage {
+  cves: VulnCve[]
+  total: number
+  page: number
+  per_page: number
+  filtros: {
+    severidad: string | null
+    categoria: string | null
+    agente: string | null
+    kev: boolean
+    q: string | null
+  }
+}
+
+export interface VulnFilters {
+  severidad?: string
+  categoria?: string
+  agente?: string
+  kev?: boolean
+  q?: string
+  page?: number
+}
+
+function vulnQs(f: VulnFilters): string {
+  const qs = new URLSearchParams()
+  if (f.severidad) qs.set("severidad", f.severidad)
+  if (f.categoria) qs.set("categoria", f.categoria)
+  if (f.agente) qs.set("agente", f.agente)
+  if (f.kev) qs.set("kev", "1")
+  if (f.q) qs.set("q", f.q)
+  qs.set("page", String(f.page && f.page > 1 ? f.page : 1))
+  return qs.toString()
+}
+
 function reportQs(f: ReportFilters): string {
   const qs = new URLSearchParams()
   if (f.date_from) qs.set("date_from", f.date_from)
@@ -317,9 +494,10 @@ function reportQs(f: ReportFilters): string {
 export const api = {
   session: () => get<Session>("/session"),
   metrics: () => get<Metrics>("/metrics"),
-  queue: (status: string | null, page: number) => {
+  queue: (status: string | null, page: number, since?: string | null) => {
     const qs = new URLSearchParams()
     if (status) qs.set("status", status)
+    if (since) qs.set("since", since)
     qs.set("page", String(page))
     return get<QueuePage>(`/queue?${qs.toString()}`)
   },
@@ -331,4 +509,16 @@ export const api = {
   fgtObservations: () => get<FgtObservations>("/fgt-observations"),
   reports: (f: ReportFilters) => get<ReportsResponse>(`/reports?${reportQs(f)}`),
   reportsCsvUrl: (f: ReportFilters) => `${BASE}/reports.csv?${reportQs(f)}`,
+  invgate: () => get<InvgateReconcile>("/invgate"),
+  vulnsSummary: () => get<VulnSummary>("/vulns/summary"),
+  vulnsCves: (f: VulnFilters) => get<VulnCvesPage>(`/vulns/cves?${vulnQs(f)}`),
+  decide: (
+    rowid: number | string,
+    decision: "approved" | "rejected",
+    selectedActionIndices: number[] | null,
+  ) =>
+    post<DecisionResult>(`/case/${rowid}/decide`, {
+      decision,
+      selected_action_indices: selectedActionIndices,
+    }),
 }

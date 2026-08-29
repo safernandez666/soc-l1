@@ -62,11 +62,16 @@ Malware o crítica)
 - múltiples usuarios involucrados (lateral movement potencial)
 - IP externa pública sospechosa
 - rule groups: privilege_escalation, credential_access, lateral_movement, exfiltration, persistence
+- alertas de VPN/identidad (rule groups con prefijo `fortigate_vpn_`, o MITRE T1078 \
+Valid Accounts): acceso de usuario monitoreado, fuera de horario, multi-IP o multi-país. \
+El Narrator decide si amerita respuesta de identidad - vos NO las cierres.
 
 NUNCA cierres como benign si:
 - Hay hash de archivo con verdict = malicious
 - Hay múltiples usuarios (logged_on + file_path_owner distintos)
 - La regla pertenece a privilege_escalation, credential_access, lateral_movement, persistence
+- La regla es de VPN/identidad (groups `fortigate_vpn_*`, o MITRE T1078): aunque la \
+categoría no esté en la lista crítica y no haya file evidence, va a `analyze`
 - categoría es "Malware" o "InitialAccess"
 
 Sé conservador: ante la duda → `analyze`. El siguiente agente decide con más contexto."""
