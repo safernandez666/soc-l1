@@ -68,6 +68,7 @@ def _normalize(hit: dict) -> dict:
     pkg = src.get("package", {}) or {}
     agent = src.get("agent", {}) or {}
     score = vuln.get("score", {}) or {}
+    host_os = (src.get("host", {}) or {}).get("os", {}) or {}
     return {
         "finding_key": hit.get("_id")
         or "|".join([agent.get("id", ""), vuln.get("id", ""), pkg.get("name", ""), pkg.get("version", "")]),
@@ -77,6 +78,10 @@ def _normalize(hit: dict) -> dict:
         "package_name": pkg.get("name", ""),
         "package_version": pkg.get("version", ""),
         "severity": vuln.get("severity") or "Unknown",
+        # SO del host ("windows", "linux") y qué se actualiza para cerrar el
+        # hallazgo: "OS" se cierra con un acumulativo/KB, "Packages" tocando la app.
+        "plataforma": (host_os.get("platform") or "").strip().lower(),
+        "categoria": (vuln.get("category") or "").strip(),
         "cvss_score": float(score.get("base") or 0),
         "detected_at": vuln.get("detected_at") or src.get("@timestamp") or _now_iso(),
         "published_at": vuln.get("published_at") or "",

@@ -4,6 +4,7 @@ import { PanelPage } from "@/pages/PanelPage"
 import { QueuePage } from "@/pages/QueuePage"
 import { CasePage } from "@/pages/CasePage"
 import { KpisPage } from "@/pages/KpisPage"
+import { VulnsPage } from "@/pages/VulnsPage"
 import { ConfigPage } from "@/pages/ConfigPage"
 import { ReportPage } from "@/pages/ReportPage"
 import { FgtPage } from "@/pages/FgtPage"
@@ -21,6 +22,7 @@ const router = createBrowserRouter(
         { path: "queue", element: <QueuePage /> },
         { path: "case/:rowid", element: <CasePage /> },
         { path: "kpis", element: <KpisPage /> },
+        { path: "vulns", element: <VulnsPage /> },
         { path: "fortigate", element: <FgtPage /> },
         { path: "invgate", element: <InvgatePage /> },
         { path: "reportes", element: <ReportsPage /> },

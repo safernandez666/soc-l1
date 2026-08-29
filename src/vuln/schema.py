@@ -155,6 +155,10 @@ CREATE TABLE IF NOT EXISTS vuln_priority_brief (
 _ADD_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("vuln_lifecycle", "plataforma", "TEXT NOT NULL DEFAULT ''"),
     ("vuln_lifecycle", "reopened_at", "TEXT"),
+    # vulnerability.category del indexer: "OS" o "Packages". Es el corte que
+    # decide cómo se remedia (acumulativo/KB vs actualizar la app), por eso vale
+    # como columna propia y no enterrada en context_object.
+    ("vuln_lifecycle", "categoria", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

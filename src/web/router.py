@@ -343,6 +343,44 @@ async def api_invgate(request: Request, settings: SettingsDep) -> Response:
     return JSONResponse(data)
 
 
+@router.get("/api/vulns/summary")
+async def api_vulns_summary(request: Request, settings: SettingsDep) -> Response:
+    """Resumen del inventario de vulnerabilidades activo (vuln_lifecycle.db)."""
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    return JSONResponse(await queries.vulns_summary(settings.vuln_state_db_path))
+
+
+@router.get("/api/vulns/cves")
+async def api_vulns_cves(
+    request: Request,
+    settings: SettingsDep,
+    severidad: str | None = None,
+    categoria: str | None = None,
+    agente: str | None = None,
+    kev: int = 0,
+    q: str | None = None,
+    page: int = 1,
+) -> Response:
+    """Hallazgos activos agrupados por CVE, filtrados y paginados.
+
+    Los filtros desconocidos se ignoran (la consulta los normaliza a None) en vez
+    de devolver 400: un filtro viejo en un link no debería romper la pantalla.
+    """
+    if not _authed(request, settings):
+        return _api_unauthorized()
+    data = await queries.vulns_cves(
+        settings.vuln_state_db_path,
+        severidad=severidad,
+        categoria=categoria,
+        agente=agente,
+        kev=bool(kev),
+        q=(q or "").strip()[:100] or None,
+        page=max(1, page),
+    )
+    return JSONResponse(data)
+
+
 @router.get("/api/case/{rowid}")
 async def api_case(request: Request, settings: SettingsDep, rowid: int) -> Response:
     if not _authed(request, settings):

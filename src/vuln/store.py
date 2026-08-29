@@ -113,8 +113,8 @@ def persist_lifecycle(conn: sqlite3.Connection, rows: list[dict]) -> None:
             finding_key, cve, agent_id, agent_name, package_name, package_version,
             severity, cvss_score, epss_score, cisa_kev, priority_score,
             lifecycle_status, first_seen_at, last_seen_at, resolved_at,
-            detection_count, context_object
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            detection_count, context_object, plataforma, categoria
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(finding_key) DO UPDATE SET
             severity=excluded.severity,
             cvss_score=excluded.cvss_score,
@@ -125,7 +125,11 @@ def persist_lifecycle(conn: sqlite3.Connection, rows: list[dict]) -> None:
             last_seen_at=excluded.last_seen_at,
             resolved_at=excluded.resolved_at,
             detection_count=excluded.detection_count,
-            context_object=excluded.context_object
+            context_object=excluded.context_object,
+            -- Si el doc nuevo viene sin estos campos (indexer viejo o parcial) no
+            -- pisamos lo que ya sabíamos: '' es "no lo sé", no "no tiene".
+            plataforma=COALESCE(NULLIF(excluded.plataforma, ''), plataforma),
+            categoria=COALESCE(NULLIF(excluded.categoria, ''), categoria)
         """,
         [
             (
@@ -143,6 +147,7 @@ def persist_lifecycle(conn: sqlite3.Connection, rows: list[dict]) -> None:
                     },
                     ensure_ascii=False,
                 ),
+                r.get("plataforma") or "", r.get("categoria") or "",
             )
             for r in rows
         ],

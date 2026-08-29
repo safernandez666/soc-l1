@@ -357,6 +357,110 @@ export interface ReportsResponse {
   }
 }
 
+// ===== Vulnerabilidades (espejo de queries.vuln_summary / vuln_cves) =====
+//
+// El parque es 100% Windows, así que el corte que importa no es el SO sino la
+// categoría: un hallazgo de OS se cierra con un acumulativo/KB y uno de
+// Packages actualizando la app. `Untriaged` son los que Wazuh reporta sin
+// puntuar: severidad desconocida, no inofensiva.
+
+export type VulnSeveridad = "Critical" | "High" | "Medium" | "Low" | "Untriaged"
+export type VulnCategoria = "OS" | "Packages"
+
+export interface VulnRun {
+  started_at: string | null
+  total_active: number
+  new_count: number
+  resolved_count: number
+}
+
+export interface VulnTotals {
+  activos: number
+  cves_unicos: number
+  agentes: number
+  resueltas_total: number
+}
+
+export interface VulnTrendPoint {
+  fecha: string
+  activos: number
+  nuevas: number
+  resueltas: number
+}
+
+export interface VulnHost {
+  agent_name: string
+  total: number
+  criticas: number
+  kev: number
+}
+
+export interface VulnSummary {
+  available: boolean
+  error?: string
+  generated_at?: string | null
+  last_run?: VulnRun | null
+  totals?: VulnTotals
+  por_severidad?: Partial<Record<VulnSeveridad, number>>
+  por_categoria?: Partial<Record<VulnCategoria, number>>
+  kev?: { hallazgos: number; cves: number }
+  epss_alto?: number
+  prioridad_alta?: number
+  top_hosts?: VulnHost[]
+  tendencia?: VulnTrendPoint[]
+}
+
+export interface VulnCve {
+  cve: string
+  priority_score: number
+  /** null cuando el hallazgo llega sin puntuar (Untriaged). */
+  cvss_score: number | null
+  /** Probabilidad EPSS en 0..1; se muestra como porcentaje. */
+  epss_score: number | null
+  cisa_kev: boolean
+  severity: string
+  categoria: string
+  hosts_count: number
+  hosts: string[]
+  package_name: string | null
+  first_seen_at: string | null
+  lifecycle_status: string
+}
+
+export interface VulnCvesPage {
+  cves: VulnCve[]
+  total: number
+  page: number
+  per_page: number
+  filtros: {
+    severidad: string | null
+    categoria: string | null
+    agente: string | null
+    kev: boolean
+    q: string | null
+  }
+}
+
+export interface VulnFilters {
+  severidad?: string
+  categoria?: string
+  agente?: string
+  kev?: boolean
+  q?: string
+  page?: number
+}
+
+function vulnQs(f: VulnFilters): string {
+  const qs = new URLSearchParams()
+  if (f.severidad) qs.set("severidad", f.severidad)
+  if (f.categoria) qs.set("categoria", f.categoria)
+  if (f.agente) qs.set("agente", f.agente)
+  if (f.kev) qs.set("kev", "1")
+  if (f.q) qs.set("q", f.q)
+  qs.set("page", String(f.page && f.page > 1 ? f.page : 1))
+  return qs.toString()
+}
+
 function reportQs(f: ReportFilters): string {
   const qs = new URLSearchParams()
   if (f.date_from) qs.set("date_from", f.date_from)
@@ -385,6 +489,8 @@ export const api = {
   reports: (f: ReportFilters) => get<ReportsResponse>(`/reports?${reportQs(f)}`),
   reportsCsvUrl: (f: ReportFilters) => `${BASE}/reports.csv?${reportQs(f)}`,
   invgate: () => get<InvgateReconcile>("/invgate"),
+  vulnsSummary: () => get<VulnSummary>("/vulns/summary"),
+  vulnsCves: (f: VulnFilters) => get<VulnCvesPage>(`/vulns/cves?${vulnQs(f)}`),
   decide: (
     rowid: number | string,
     decision: "approved" | "rejected",

@@ -17,7 +17,7 @@ import logging
 import os
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -275,6 +275,15 @@ class Settings(BaseSettings):
     # lo lee solo-lectura (descomprimir en cada request sería inviable).
     wazuh_alerts_archive_dir: str = Field(default="/var/ossec/logs/alerts")
     alert_volume_cache_path: str = Field(default="/var/lib/soc-l1/alert_volume.json")
+
+    # Ciclo de vida de vulnerabilidades. La escribe el pipeline de vuln (indexer →
+    # store); el panel /ui la lee solo-lectura. El nombre de la env var es el que ya
+    # usa src/vuln/store.py (VULN_STATE_DB): se acepta también el nombre del campo
+    # para poder construir Settings(vuln_state_db_path=...) en los tests.
+    vuln_state_db_path: str = Field(
+        default="/opt/soc-l1/vuln_lifecycle.db",
+        validation_alias=AliasChoices("VULN_STATE_DB", "vuln_state_db_path"),
+    )
 
     # ===== GUI / Dashboard (ZebraSecurity) =====
     # Panel de revisión solo-lectura sobre state.db, servido en /ui detrás de login.
