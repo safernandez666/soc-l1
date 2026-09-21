@@ -56,6 +56,42 @@ _AD_ACCOUNT_CHANGE_RULES = frozenset(
 )
 
 
+def _spawn_fgt_observation_notices(
+    settings: Settings, alert: NormalizedAlert, decision
+) -> None:
+    """Avisa "esto bloquearía X" por mail (+ espejo Teams) sin tocar el firewall.
+
+    Lo usan las dos rutas que observan en vez de bloquear: la Fase 0 global
+    (fortigate_autoblock_enabled=False) y el modo sombra por regla
+    (fortigate_observe_only_rules). Fire-and-forget, nunca rompe el ingest.
+    """
+    from src import mailer
+
+    _spawn(
+        mailer.send_fgt_observation_email(
+            settings,
+            alert_id=alert.alert_id,
+            ip=decision.ip,
+            rule_id=decision.rule_id,
+            host=alert.device.hostname,
+            ttl_hours=settings.fortigate_block_ttl_hours,
+        )
+    )
+    if settings.teams_webhook_url:
+        from src.teams import send_teams_observation
+
+        _spawn(
+            send_teams_observation(
+                settings,
+                alert_id=alert.alert_id,
+                ip=decision.ip,
+                rule_id=decision.rule_id,
+                host=alert.device.hostname,
+                ttl_hours=settings.fortigate_block_ttl_hours,
+            )
+        )
+
+
 def _is_ad_account_change(alert: NormalizedAlert) -> bool:
     return (alert.wazuh_rule.id or "") in _AD_ACCOUNT_CHANGE_RULES
 
@@ -308,6 +344,24 @@ async def wazuh_webhook(
     # Fase 1 (enabled=True): SOC-L1 ya bloqueó (o simuló) en el ingest. Short-circuit
     # con email de confirmación, igual que el script viejo: bloquea + avisa, sin pasar
     # por el Narrator (las IPS de FortiGate ya están contenidas, no necesitan criterio).
+    # Modo sombra (fortigate_observe_only_rules): la regla es candidata pero enforce()
+    # no ejecutó nada a propósito. Avisa qué bloquearía y corta acá, sin ticket de
+    # bloqueo (no hubo bloqueo que auditar) y sin pasar por el Narrator.
+    if fgt_decision is not None and fgt_decision.candidate and fgt_decision.observe_only:
+        if fgt_decision.should_block and fgt_decision.ip and not fgt_decision.duplicate:
+            _spawn_fgt_observation_notices(settings, alert, fgt_decision)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "observed_fgt_autoblock",
+                "mode": "observe_only",
+                "alert_id": alert.alert_id,
+                "rule_id": fgt_decision.rule_id,
+                "would_block": fgt_decision.ip,
+                "reason": fgt_decision.reason,
+            },
+        )
+
     if fgt_outcome is not None and fgt_decision is not None and fgt_decision.candidate:
         if fgt_outcome.ok and fgt_decision.ip and not fgt_decision.duplicate:
             # Closed-loop con auditoría: crea+cierra ticket InvGate del bloqueo y manda
@@ -347,32 +401,7 @@ async def wazuh_webhook(
             and fgt_decision.ip
             and not fgt_decision.duplicate
         ):
-            from src import mailer
-
-            _spawn(
-                mailer.send_fgt_observation_email(
-                    settings,
-                    alert_id=alert.alert_id,
-                    ip=fgt_decision.ip,
-                    rule_id=fgt_decision.rule_id,
-                    host=alert.device.hostname,
-                    ttl_hours=settings.fortigate_block_ttl_hours,
-                )
-            )
-            # Espejo por Teams (Fase 0 observe). Fire-and-forget.
-            if settings.teams_webhook_url:
-                from src.teams import send_teams_observation
-
-                _spawn(
-                    send_teams_observation(
-                        settings,
-                        alert_id=alert.alert_id,
-                        ip=fgt_decision.ip,
-                        rule_id=fgt_decision.rule_id,
-                        host=alert.device.hostname,
-                        ttl_hours=settings.fortigate_block_ttl_hours,
-                    )
-                )
+            _spawn_fgt_observation_notices(settings, alert, fgt_decision)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={

@@ -192,6 +192,13 @@ class Settings(BaseSettings):
         )
     )
     fortigate_block_ttl_hours: int = Field(default=1)
+    # Reglas en MODO SOMBRA: se evalúan como candidatas (dedup, registro en el JSONL y
+    # aviso por mail/Teams) pero NUNCA ejecutan el quarantine, aunque
+    # fortigate_autoblock_enabled=True. Sirve para estrenar una familia de reglas nueva
+    # —p. ej. la enumeración de Kong (100207), que es correlación nivel 8 y no una firma
+    # IPS— y medir a quién bloquearíamos antes de promoverla a fortigate_auto_block_rules.
+    # Si un ID aparece en las dos listas gana esta (lo seguro), y se loguea el conflicto.
+    fortigate_observe_only_rules: str = Field(default="")
     # Fase 0: mandar un email de OBSERVACIÓN ("esto bloquearía X") al detectar un
     # candidato a auto-block, sin ejecutar nada. Temporal, para tener visibilidad por
     # mail hasta el cutover a Fase 1 (ahí se apaga). Dedup por IP dentro de la ventana TTL.
@@ -377,9 +384,19 @@ class Settings(BaseSettings):
         ]
 
     def fortigate_auto_block_rules_set(self) -> set[str]:
-        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1))."""
-        return {
+        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1)).
+
+        Excluye las de modo sombra: si un ID está en las dos listas, observe-only manda.
+        """
+        crudas = {
             r.strip() for r in self.fortigate_auto_block_rules.split(",") if r.strip()
+        }
+        return crudas - self.fortigate_observe_only_rules_set()
+
+    def fortigate_observe_only_rules_set(self) -> set[str]:
+        """IDs de reglas candidatas que se observan pero NUNCA bloquean (modo sombra)."""
+        return {
+            r.strip() for r in self.fortigate_observe_only_rules.split(",") if r.strip()
         }
 
     def dry_run_for(self, action_type: str) -> bool:

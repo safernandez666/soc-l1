@@ -97,6 +97,7 @@ class AutoBlockDecision:
     reason: str  # would_block | no_rule_match | no_srcip | protected | invalid_ip
     protected_match: str | None = None  # CIDR protegido que matcheó (si reason=protected)
     duplicate: bool = False  # True si la IP ya se observó/bloqueó dentro de la ventana TTL
+    observe_only: bool = False  # regla en modo sombra: se avisa pero NUNCA se bloquea
 
     @property
     def should_block(self) -> bool:
@@ -106,21 +107,31 @@ class AutoBlockDecision:
 def evaluate(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     """Decide si la alerta dispara auto-block y cuál IP, aplicando PROTECTED_NETWORKS."""
     rule_id = alert.wazuh_rule.id
-    if not rule_id or rule_id not in settings.fortigate_auto_block_rules_set():
+    # Modo sombra: la regla es candidata (se evalúa, registra y avisa) pero enforce()
+    # no toca el firewall. Gana sobre la allowlist de bloqueo si está en las dos.
+    observe_only = bool(rule_id) and rule_id in settings.fortigate_observe_only_rules_set()
+    if not rule_id or (
+        rule_id not in settings.fortigate_auto_block_rules_set() and not observe_only
+    ):
         return AutoBlockDecision(False, None, rule_id, "no_rule_match")
 
     # En las alertas FortiGate IPS el atacante es el srcip (path nativo del normalizer).
     ip = alert.network.src_ip_external or alert.network.src_ip_internal
     if not ip or ip == "-":
-        return AutoBlockDecision(True, None, rule_id, "no_srcip")
+        return AutoBlockDecision(True, None, rule_id, "no_srcip", observe_only=observe_only)
 
     match = _ip_in_protected_networks(ip, settings.protected_networks_list())
     if match == "invalid_ip":
-        return AutoBlockDecision(True, None, rule_id, "invalid_ip")
+        return AutoBlockDecision(
+            True, None, rule_id, "invalid_ip", observe_only=observe_only
+        )
     if match is not None:
-        return AutoBlockDecision(True, None, rule_id, "protected", protected_match=match)
+        return AutoBlockDecision(
+            True, None, rule_id, "protected",
+            protected_match=match, observe_only=observe_only,
+        )
 
-    return AutoBlockDecision(True, ip, rule_id, "would_block")
+    return AutoBlockDecision(True, ip, rule_id, "would_block", observe_only=observe_only)
 
 
 def _record(
@@ -180,11 +191,12 @@ def observe(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     if decision.should_block and decision.ip:
         mark_notified(settings, decision.ip)
     ttl_h = settings.fortigate_block_ttl_hours
+    motivo = "modo sombra" if decision.observe_only else "Fase 0"
     if decision.should_block:
         logger.info(
             "🔭 FGT-AUTOBLOCK OBSERVE | WOULD quarantine ip=%s rule=%s ttl=%sh "
-            "alert=%s (Fase 0: no ejecutado)",
-            decision.ip, decision.rule_id, ttl_h, alert.alert_id,
+            "alert=%s (%s: no ejecutado)",
+            decision.ip, decision.rule_id, ttl_h, alert.alert_id, motivo,
         )
     elif decision.reason == "protected":
         logger.info(
@@ -222,6 +234,15 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
     decision = evaluate(alert, settings)
     if not decision.candidate:
         return EnforceOutcome(decision, executed=False, ok=False)
+
+    # Modo sombra (fortigate_observe_only_rules): la regla todavía no se ganó el derecho
+    # a bloquear sola. Se delega en observe() —mismo dedup, mismo JSONL, mismo log— y se
+    # sale sin tocar FortiGate, aunque el autoblock global esté en Fase 1.
+    if decision.observe_only:
+        return EnforceOutcome(
+            observe(alert, settings), executed=False, ok=False,
+            message="observe-only: regla en modo sombra, no se ejecutó el quarantine",
+        )
 
     ttl_h = settings.fortigate_block_ttl_hours
 

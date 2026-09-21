@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-09-21T09:03:09.779-0300",
+  "rule": {
+    "id": "100207",
+    "level": 8,
+    "description": "Kong: Multiple 404 errors from 62.210.142.163 - Possible endpoint enumeration or scanning",
+    "groups": ["kong", "attack", "enumeration", "scanning"]
+  },
+  "agent": { "id": "000", "name": "seg-vs85-prod01" },
+  "manager": { "name": "wazuh-test-mgr" },
+  "id": "1758445389.987654",
+  "decoder": { "name": "kong-access" },
+  "data": {
+    "protocol": "GET",
+    "srcip": "62.210.142.163",
+    "id": "404",
+    "url": "/login.html"
+  },
+  "location": "/var/log/kong/access.log"
+}
