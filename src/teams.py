@@ -295,29 +295,39 @@ async def send_teams_observation(
     rule_id: str | int | None,
     host: str | None,
     ttl_hours: int | None,
+    observe_only: bool = False,
 ) -> None:
-    """Notifica por Teams una observación Fase 0 (qué bloquearía, sin ejecutar).
+    """Notifica por Teams qué bloquearía SOC-L1, sin ejecutar. Sin botones.
 
-    Espejo de mailer.send_fgt_observation_email. Solo se dispara si el autoblock
-    está en Fase 0 (observe). Informativa, sin botones.
+    Espejo de mailer.send_fgt_observation_email: `observe_only=True` es el modo
+    sombra por regla (el auto-block sigue vivo para las IPS), `False` es la Fase 0
+    global (no bloquea nada).
     """
     if not is_configured(settings):
         return
 
+    modo = "modo sombra" if observe_only else "Fase 0"
+    if observe_only:
+        nota = (
+            f"La regla `{rule_id}` está en modo sombra: se evalúa y se avisa, pero no se "
+            "toca el firewall. Las reglas IPS de FortiGate siguen bloqueando en vivo."
+        )
+    else:
+        nota = (
+            "El auto-block está deshabilitado (Fase 0): nadie bloquea automáticamente "
+            "estas IPs. El aviso es para decidir a mano."
+        )
+
     body = [
         _title_block("👀 SOC-L1 · IP candidata a bloqueo (observación)", "warning"),
-        _text(f"Se bloquearía la IP `{ip}` (Fase 0 — no ejecutado).", weight="Bolder"),
+        _text(f"Se bloquearía la IP `{ip}` ({modo} — no ejecutado).", weight="Bolder"),
         _facts([
             ("IP", ip),
-            ("Regla FortiGate", str(rule_id) if rule_id is not None else None),
+            ("Regla", str(rule_id) if rule_id is not None else None),
             ("Host", host),
             ("TTL propuesto", f"{ttl_hours}h" if ttl_hours else None),
         ]),
-        _text(
-            "Observación: el bloqueo real lo sigue haciendo el integration de Wazuh. "
-            "Sin acción de SOC-L1 hasta el cutover a Fase 1.",
-            spacing="Medium", is_subtle=True,
-        ),
+        _text(nota, spacing="Medium", is_subtle=True),
     ]
 
     await _post_card(settings, _card(body), kind="fgt_observation", alert_id=alert_id)

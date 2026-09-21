@@ -983,10 +983,16 @@ async def send_fgt_observation_email(
     rule_id: str | None,
     host: str | None,
     ttl_hours: int,
+    observe_only: bool = False,
 ) -> None:
-    """Fase 0: avisa por mail qué bloquearía SOC-L1, SIN ejecutar nada.
+    """Avisa por mail qué bloquearía SOC-L1, SIN ejecutar nada.
 
-    Temporal hasta el cutover a Fase 1. Light, alineado al look de los correos.
+    Dos escenarios, con texto distinto porque la razón de no bloquear es distinta:
+
+    - `observe_only=True` — MODO SOMBRA por regla: el auto-block está en Fase 1 y las
+      IPS siguen bloqueando en vivo, pero ESTA regla todavía no se promovió al gatillo.
+    - `observe_only=False` — Fase 0 global: el auto-block está deshabilitado entero.
+
     El caller ya hizo el dedup por IP; esto solo arma y manda.
     """
     if not settings.smtp_host or not settings.smtp_to_approvers:
@@ -1006,17 +1012,32 @@ async def send_fgt_observation_email(
     msg["From"] = settings.smtp_from
     msg["To"] = settings.smtp_to_approvers
 
+    # La razón de no haber bloqueado cambia el texto entero: en sombra el auto-block
+    # está vivo y solo ESTA regla no tiene gatillo; en Fase 0 no bloquea nada.
+    modo = "MODO SOMBRA" if observe_only else "FASE 0"
+    etiqueta_regla = "Regla" if observe_only else "Regla IPS"
+    if observe_only:
+        porque = (
+            f"La regla {rule_id or '—'} está en modo sombra: SOC-L1 la evalúa y avisa, "
+            f"pero NO toca el firewall. Es deliberado — todavía no se promovió a bloqueo "
+            f"automático, y este aviso sirve para medir a quién bloquearía antes de darle "
+            f"el gatillo.\n\n"
+            f"Las reglas IPS de FortiGate siguen bloqueando en vivo, sin cambios.\n"
+        )
+    else:
+        porque = (
+            "Esto es solo observación: SOC-L1 NO tocó el firewall porque el auto-block "
+            "está deshabilitado (Fase 0). Mientras siga así, NADIE bloquea "
+            "automáticamente estas IPs.\n"
+        )
     text = (
-        f"SOC-L1 · FortiGate auto-block (Fase 0 — OBSERVACIÓN, no se ejecutó nada)\n\n"
+        f"SOC-L1 · auto-block FortiGate ({modo} — no se ejecutó nada)\n\n"
         f"Bloquearía la IP: {ip}\n"
-        f"Regla IPS:        {rule_id or '—'}\n"
+        f"{etiqueta_regla + ':':<18}{rule_id or '—'}\n"
         f"Host/origen:      {host or '—'}\n"
         f"Alerta:           {alert_id}\n"
-        f"TTL del ban:      {ttl_hours}h (quarantine con TTL en Fase 1)\n\n"
-        f"Esto es solo observación: SOC-L1 NO tocó el firewall. Hoy el bloqueo real lo "
-        f"sigue haciendo el integration custom-email-unified de Wazuh. Cuando pasemos a "
-        f"Fase 1, SOC-L1 ejecutará el quarantine y este aviso se reemplaza por el flujo "
-        f"completo (ticket + aprobación).\n"
+        f"TTL del ban:      {ttl_hours}h (si se ejecutara)\n\n"
+        + porque
     )
     msg.set_content(text)
 
@@ -1030,9 +1051,9 @@ async def send_fgt_observation_email(
         )
         for idx, (k, v) in enumerate(
             (
-                ("Bloquear&iacute;a la IP", ip),
-                ("Regla IPS", rule_id or "&mdash;"),
-                ("Host / origen", host or "&mdash;"),
+                ("Bloquearía la IP", ip),
+                (etiqueta_regla, rule_id or "—"),
+                ("Host / origen", host or "—"),
                 ("Alerta", alert_id),
                 ("TTL del ban", f"{ttl_hours}h"),
             ),
@@ -1040,35 +1061,51 @@ async def send_fgt_observation_email(
         )
     )
 
+    if observe_only:
+        subtitulo = "Modo sombra &mdash; solo observaci&oacute;n"
+        aviso = (
+            "SOC-L1 evalu&oacute; esta alerta y <strong>bloquear&iacute;a</strong> esta IP, "
+            "pero <strong>no toc&oacute; el firewall</strong>: la regla est&aacute; en modo sombra."
+        )
+        explicacion = (
+            "La regla " + _theme.code(h(str(rule_id or "&mdash;"))) + " todav&iacute;a no "
+            "est&aacute; habilitada para bloquear sola. Este aviso sirve para medir a "
+            "qui&eacute;n bloquear&iacute;a antes de darle el gatillo. Para promoverla hay que "
+            "mover el ID de " + _theme.code("FORTIGATE_OBSERVE_ONLY_RULES") + " a "
+            + _theme.code("FORTIGATE_AUTO_BLOCK_RULES") + ".<br><br>"
+            "Las reglas IPS de FortiGate <strong>siguen bloqueando en vivo</strong>, sin cambios."
+        )
+    else:
+        subtitulo = "Fase 0 &mdash; solo observaci&oacute;n"
+        aviso = (
+            "SOC-L1 detect&oacute; una alerta que <strong>bloquear&iacute;a</strong> esta IP, "
+            "pero <strong>no toc&oacute; el firewall</strong>."
+        )
+        explicacion = (
+            "El auto-block est&aacute; deshabilitado (Fase 0). Mientras siga as&iacute;, "
+            "<strong>nadie</strong> bloquea autom&aacute;ticamente estas IPs: el aviso es "
+            "para que alguien decida a mano."
+        )
+
     cuerpo = _theme.section(
         "Nada se ejecut&oacute;",
-        "Fase 0 &mdash; solo observaci&oacute;n",
-        _theme.notice(
-            "SOC-L1 detect&oacute; una alerta IPS que <strong>bloquear&iacute;a</strong> esta IP, "
-            "pero <strong>no toc&oacute; el firewall</strong>.",
-            accent=_theme.C_HIGH,
-        )
+        subtitulo,
+        _theme.notice(aviso, accent=_theme.C_HIGH)
         + _theme.table_open([("Dato", "170", "left"), ("Valor", None, "left")])
         + detalle
         + _theme.TABLE_CLOSE,
     )
-    cuerpo += _theme.section(
-        "Por qu&eacute; recib&iacute;s este aviso",
-        "",
-        "Hoy el bloqueo real lo sigue haciendo el integration "
-        + _theme.code("custom-email-unified")
-        + " de Wazuh. Cuando pasemos a Fase 1, SOC-L1 ejecuta el quarantine y este "
-        "aviso se reemplaza por el flujo completo, con ticket y aprobaci&oacute;n.",
-    )
+    cuerpo += _theme.section("Por qu&eacute; recib&iacute;s este aviso", "", explicacion)
 
+    etiqueta_modo = "modo sombra" if observe_only else "Fase 0"
     body_html = _theme.document(
-        title="FortiGate &middot; observaci&oacute;n",
+        title="Auto-block &middot; observaci&oacute;n",
         subtitle=f"Bloquear&iacute;a {h(ip)} &nbsp;&middot;&nbsp; no se ejecut&oacute; nada",
         body=cuerpo,
-        footer="SOC L1 &mdash; aviso temporal de Fase 0",
-        doc_title=f"FortiGate - observaci&oacute;n {ip}",
+        footer=f"SOC L1 &mdash; aviso de {etiqueta_modo}",
+        doc_title=f"Auto-block - observacion {ip}",
         badge_kind="atencion",
-        preheader=f"Bloquear&iacute;a {ip} &middot; Fase 0, sin ejecutar",
+        preheader=f"Bloquear&iacute;a {ip} &middot; {etiqueta_modo}, sin ejecutar",
     )
     msg.add_alternative(body_html, subtype="html", cte="quoted-printable")
 

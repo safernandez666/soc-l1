@@ -75,6 +75,7 @@ def _spawn_fgt_observation_notices(
             rule_id=decision.rule_id,
             host=alert.device.hostname,
             ttl_hours=settings.fortigate_block_ttl_hours,
+            observe_only=decision.observe_only,
         )
     )
     if settings.teams_webhook_url:
@@ -88,6 +89,7 @@ def _spawn_fgt_observation_notices(
                 rule_id=decision.rule_id,
                 host=alert.device.hostname,
                 ttl_hours=settings.fortigate_block_ttl_hours,
+                observe_only=decision.observe_only,
             )
         )
 

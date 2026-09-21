@@ -387,3 +387,60 @@ def test_endpoint_email_has_no_email_section(alert, plan) -> None:
     """Las alertas de endpoint siguen igual: sin sección de correos."""
     html = _build_html_body(alert, plan, "http://x/a", "http://x/r", ttl_hours=24)
     assert "Correos involucrados" not in html
+
+
+# ===== Correo de observación: modo sombra vs Fase 0 =====
+# El texto viejo afirmaba "el bloqueo real lo sigue haciendo custom-email-unified",
+# que es falso desde el 2026-07-07, y llamaba "Regla IPS" a cualquier regla —
+# incluida 100207 (Kong), que es correlación de 404, no una firma IPS.
+
+
+def _render_observacion(**kw) -> tuple[str, str]:
+    """Devuelve (texto_plano, html) del correo de observación."""
+    import asyncio
+    import html as H
+    import re
+    from unittest.mock import patch
+
+    from src import mailer
+
+    cap: dict = {}
+    s = Settings(smtp_host="x", smtp_to_approvers="a@b.c", smtp_from="soc@x")
+    base = dict(
+        alert_id="1790012345.999", ip="62.210.142.163", rule_id="100207",
+        host="seg-vs85-prod01", ttl_hours=1,
+    )
+    base.update(kw)
+    with patch.object(mailer, "_send_sync", lambda st, m: cap.__setitem__("m", m)):
+        asyncio.run(mailer.send_fgt_observation_email(s, **base))
+    msg = cap["m"]
+    plano = msg.get_body(preferencelist=("plain",)).get_content()
+    crudo = msg.get_body(preferencelist=("html",)).get_content()
+    visible = H.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", crudo)))
+    return plano, visible
+
+
+def test_observacion_sombra_no_dice_IPS_ni_fase_0() -> None:
+    plano, visible = _render_observacion(observe_only=True)
+    for texto in (plano, visible):
+        assert "MODO SOMBRA" in texto or "modo sombra" in texto
+        assert "Regla IPS" not in texto, "100207 no es una regla IPS"
+        assert "Fase 0" not in texto, "el autoblock está en Fase 1"
+        assert "custom-email-unified" not in texto, "ese integration se retiró el 07/07"
+    # Dice explícitamente que las IPS siguen bloqueando: es la duda que genera el aviso.
+    assert "siguen bloqueando en vivo" in visible
+
+
+def test_observacion_fase0_no_miente_sobre_quien_bloquea() -> None:
+    plano, visible = _render_observacion(observe_only=False, rule_id="196201")
+    for texto in (plano, visible):
+        assert "custom-email-unified" not in texto
+        assert "deshabilitado" in texto  # nadie bloquea, que es la verdad en Fase 0
+
+
+def test_observacion_no_deja_entidades_html_sin_resolver() -> None:
+    """Las etiquetas pasan por html.escape(): si traen &iacute; salen literales."""
+    _, visible = _render_observacion(observe_only=True)
+    for entidad in ("&iacute;", "&mdash;", "&aacute;", "&oacute;"):
+        assert entidad not in visible, f"{entidad} quedó sin resolver en el correo"
+    assert "Bloquearía la IP" in visible
