@@ -748,14 +748,14 @@
       }
     },
     {
-      "type": "table",
+      "type": "bargauge",
       "title": "Rutas con más errores (rango visible)",
       "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Ordenado por volumen de error en el rango que estés mirando.",
+      "description": "Top 10 por volumen de error en el rango que estés mirando. Vacío = no hubo errores, que es la respuesta correcta.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -768,48 +768,44 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sort_desc(sum by (service, route, code) (increase(kong_http_requests_total{code=~\"[45]..\"}[$__range])))",
-          "legendFormat": "__auto",
+          "expr": "topk(10, sum by (service, route, code) (increase(kong_http_requests_total{code=~\"[45]..\"}[$__range])))",
+          "legendFormat": "{{service}} · {{route}} · {{code}}",
           "refId": "A",
           "instant": true,
           "range": false
         }
       ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "workspace": true
-            },
-            "renameByName": {
-              "service": "Servicio",
-              "route": "Ruta",
-              "code": "Código",
-              "Value": "Requests"
-            }
-          }
-        }
-      ],
       "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ]
-        }
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 12,
+        "maxVizHeight": 300,
+        "namePlacement": "left",
+        "sizing": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
@@ -1066,14 +1062,14 @@
       }
     },
     {
-      "type": "table",
+      "type": "bargauge",
       "title": "p99 por ruta (rango visible)",
       "id": 39,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Qué ruta arrastra la latencia. Vacío = no hubo tráfico en el rango.",
+      "description": "Qué ruta arrastra la latencia. Verde bajo 500 ms, ámbar hasta 2 s, rojo arriba. Vacío = no hubo tráfico en el rango.",
       "gridPos": {
         "h": 7,
         "w": 24,
@@ -1086,94 +1082,55 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sort_desc(histogram_quantile(0.99, sum by (le, service, route) (rate(kong_request_latency_ms_bucket[$__range]))))",
-          "legendFormat": "__auto",
+          "expr": "topk(10, histogram_quantile(0.99, sum by (le, service, route) (rate(kong_request_latency_ms_bucket[$__range]))))",
+          "legendFormat": "{{service}} · {{route}}",
           "refId": "M",
           "instant": true,
           "range": false
         }
       ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "workspace": true
-            },
-            "renameByName": {
-              "service": "Servicio",
-              "route": "Ruta",
-              "Value": "p99 (ms)"
-            }
-          }
-        }
-      ],
       "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ]
-        }
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 12,
+        "maxVizHeight": 300,
+        "namePlacement": "left",
+        "sizing": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "p99 (ms)"
-            },
-            "properties": [
+          "unit": "ms",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "unit",
-                "value": "ms"
+                "color": "green",
+                "value": null
               },
               {
-                "id": "decimals",
-                "value": 0
+                "color": "orange",
+                "value": 500
               },
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background",
-                  "mode": "gradient"
-                }
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "orange",
-                      "value": 500
-                    },
-                    {
-                      "color": "red",
-                      "value": 2000
-                    }
-                  ]
-                }
+                "color": "red",
+                "value": 2000
               }
             ]
           }
-        ]
+        },
+        "overrides": []
       }
     },
     {
@@ -1394,14 +1351,14 @@
       }
     },
     {
-      "type": "table",
+      "type": "bargauge",
       "title": "Requests por ruta (rango visible)",
       "id": 48,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "Top 10 rutas por volumen en el rango visible.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1414,47 +1371,44 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sort_desc(sum by (service, route) (increase(kong_http_requests_total[$__range])))",
-          "legendFormat": "__auto",
+          "expr": "topk(10, sum by (service, route) (increase(kong_http_requests_total[$__range])))",
+          "legendFormat": "{{service}} · {{route}}",
           "refId": "V",
           "instant": true,
           "range": false
         }
       ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "workspace": true
-            },
-            "renameByName": {
-              "service": "Servicio",
-              "route": "Ruta",
-              "Value": "Requests"
-            }
-          }
-        }
-      ],
       "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ]
-        }
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 12,
+        "maxVizHeight": 300,
+        "namePlacement": "left",
+        "sizing": "auto"
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "filterable": true
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
@@ -1759,17 +1713,17 @@
       },
       "panels": [
         {
-          "type": "table",
-          "title": "Estado de los targets",
-          "id": 60,
+          "type": "stat",
+          "title": "Targets de los upstreams",
+          "id": 59,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "description": "1 en la fila que corresponde al estado real de cada target. state=healthy en 0 con el target arriba = el health check está mal armado.",
+          "description": "Filtra state=healthy: su valor es directamente la respuesta. Si marca CAIDO pero el backend responde, lo que está mal es el health check, no el target.",
           "gridPos": {
-            "h": 8,
-            "w": 24,
+            "h": 6,
+            "w": 12,
             "x": 0,
             "y": 57
           },
@@ -1779,34 +1733,89 @@
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "kong_upstream_target_health",
+              "expr": "kong_upstream_target_health{state=\"healthy\"}",
               "legendFormat": "__auto",
-              "refId": "H",
+              "refId": "I",
               "instant": true,
               "range": false
             }
           ],
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "__name__": true,
-                  "job": true,
-                  "instance": true,
-                  "workspace": true
-                },
-                "renameByName": {
-                  "upstream": "Upstream",
-                  "target": "Target",
-                  "address": "Dirección",
-                  "state": "Estado",
-                  "Value": "Activo"
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": null,
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "CAIDO",
+                      "color": "red",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "SANO",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
                 }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
               }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "table",
+          "title": "Detalle por estado",
+          "id": 62,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Solo los estados anómalos que estén activos (== 1). Vacío es lo que se espera ver.",
+          "gridPos": {
+            "h": 6,
+            "w": 12,
+            "x": 12,
+            "y": 57
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kong_upstream_target_health{state!=\"healthy\"} == 1",
+              "legendFormat": "{{upstream}} → {{target}}: {{state}}",
+              "refId": "J",
+              "instant": true,
+              "range": false
             }
           ],
+          "transformations": [],
           "options": {
             "showHeader": true,
             "cellHeight": "sm",
@@ -1832,7 +1841,7 @@
     {
       "type": "text",
       "title": "Antes de sacar conclusiones",
-      "id": 61,
+      "id": 63,
       "gridPos": {
         "h": 5,
         "w": 24,

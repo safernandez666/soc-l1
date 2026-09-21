@@ -161,6 +161,42 @@ def table(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: int =
     }
 
 
+def bargauge(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: int = 8, *,
+             unit: str = "short", decimals: int | None = 0, desc: str = "",
+             thresholds: list | None = None) -> dict:
+    """Ranking horizontal. Se usa donde antes habia tablas.
+
+    Por que no una tabla: Prometheus devuelve por la API frames `numeric-multi`, un
+    frame por serie con los labels colgados del campo Value. El panel Table no los
+    convierte en columnas solo: hace falta encadenar labelsToFields + merge + organize,
+    y cualquier cambio en los labels lo desarma en silencio. Un bargauge consume esas
+    series tal cual, usa legendFormat para el nombre de la fila y ademas ORDENA visual-
+    mente, que es lo unico que se le pide a un top-N. Las queries llevan topk() para que
+    no crezca sin limite.
+    """
+    return {
+        "type": "bargauge", "title": title, "id": nid(), "datasource": DS,
+        "description": desc,
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
+        "targets": targets,
+        "options": {
+            "orientation": "horizontal", "displayMode": "gradient",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            "showUnfilled": True, "valueMode": "color",
+            "minVizWidth": 8, "minVizHeight": 12, "maxVizHeight": 300,
+            "namePlacement": "left", "sizing": "auto",
+        },
+        "fieldConfig": {
+            "defaults": {
+                "unit": unit, "decimals": decimals, "min": 0,
+                "thresholds": {"mode": "absolute",
+                               "steps": thresholds or [{"color": AZUL, "value": None}]},
+            },
+            "overrides": [],
+        },
+    }
+
+
 def texto(title: str, md: str, x: int, y: int, w: int = 24, h: int = 4) -> dict:
     return {
         "type": "text", "title": title, "id": nid(),
@@ -258,19 +294,14 @@ def build() -> dict:
              "respondió mal y hay que mirar la aplicación, no Kong.",
     ))
     y += 8
-    P.append(table(
+    P.append(bargauge(
         "Rutas con más errores (rango visible)",
-        [target('sort_desc(sum by (service, route, code) '
+        [target('topk(10, sum by (service, route, code) '
                 '(increase(kong_http_requests_total{code=~"[45].."}[$__range])))',
-                instant=True)],
+                "{{service}} · {{route}} · {{code}}", instant=True)],
         0, y, w=12,
-        desc="Ordenado por volumen de error en el rango que estés mirando.",
-        transformations=[
-            {"id": "organize", "options": {
-                "excludeByName": {"Time": True, "__name__": True, "job": True,
-                                  "instance": True, "workspace": True},
-                "renameByName": {"service": "Servicio", "route": "Ruta",
-                                 "code": "Código", "Value": "Requests"}}}],
+        desc="Top 10 por volumen de error en el rango que estés mirando. Vacío = no "
+             "hubo errores, que es la respuesta correcta.",
     ))
     P.append(ts(
         "Códigos de estado en detalle",
@@ -302,27 +333,17 @@ def build() -> dict:
              "y el upstream no, el costo está en los plugins.",
     ))
     y += 8
-    P.append(table(
+    P.append(bargauge(
         "p99 por ruta (rango visible)",
-        [target("sort_desc(histogram_quantile(0.99, sum by (le, service, route) "
-                "(rate(kong_request_latency_ms_bucket[$__range]))))", instant=True)],
-        0, y, w=24, h=7,
-        desc="Qué ruta arrastra la latencia. Vacío = no hubo tráfico en el rango.",
-        transformations=[
-            {"id": "organize", "options": {
-                "excludeByName": {"Time": True, "__name__": True, "job": True,
-                                  "instance": True, "workspace": True},
-                "renameByName": {"service": "Servicio", "route": "Ruta",
-                                 "Value": "p99 (ms)"}}}],
-        overrides=[{"matcher": {"id": "byName", "options": "p99 (ms)"},
-                    "properties": [{"id": "unit", "value": "ms"},
-                                   {"id": "decimals", "value": 0},
-                                   {"id": "custom.cellOptions",
-                                    "value": {"type": "color-background", "mode": "gradient"}},
-                                   {"id": "thresholds", "value": {"mode": "absolute", "steps": [
-                                       {"color": VERDE, "value": None},
-                                       {"color": AMBAR, "value": 500},
-                                       {"color": ROJO, "value": 2000}]}}]}],
+        [target("topk(10, histogram_quantile(0.99, sum by (le, service, route) "
+                "(rate(kong_request_latency_ms_bucket[$__range]))))",
+                "{{service}} · {{route}}", instant=True)],
+        0, y, w=24, h=7, unit="ms",
+        thresholds=[{"color": VERDE, "value": None},
+                    {"color": AMBAR, "value": 500},
+                    {"color": ROJO, "value": 2000}],
+        desc="Qué ruta arrastra la latencia. Verde bajo 500 ms, ámbar hasta 2 s, rojo "
+             "arriba. Vacío = no hubo tráfico en el rango.",
     ))
     y += 7
 
@@ -347,17 +368,13 @@ def build() -> dict:
                 "{{direction}}")],
         0, y, w=12, unit="Bps",
     ))
-    P.append(table(
+    P.append(bargauge(
         "Requests por ruta (rango visible)",
-        [target("sort_desc(sum by (service, route) "
-                "(increase(kong_http_requests_total[$__range])))", instant=True)],
+        [target("topk(10, sum by (service, route) "
+                "(increase(kong_http_requests_total[$__range])))",
+                "{{service}} · {{route}}", instant=True)],
         12, y, w=12,
-        transformations=[
-            {"id": "organize", "options": {
-                "excludeByName": {"Time": True, "__name__": True, "job": True,
-                                  "instance": True, "workspace": True},
-                "renameByName": {"service": "Servicio", "route": "Ruta",
-                                 "Value": "Requests"}}}],
+        desc="Top 10 rutas por volumen en el rango visible.",
     ))
     y += 8
 
@@ -387,19 +404,25 @@ def build() -> dict:
 
     # ------------------------------------------------------------- 6. upstream --
     P.append(row("Salud de los upstreams", y, collapsed=True)); y += 1
+    # Un tile por target en vez de una tabla: kong_upstream_target_health emite UNA
+    # serie por cada estado posible (healthy, unhealthy, dns_error, healthchecks_off)
+    # y solo una vale 1. Filtrando a state="healthy" el valor ya es la respuesta —
+    # 1 sano, 0 no — y se lee sin interpretar cuatro filas por target.
     P[-1]["panels"] = [
-        table("Estado de los targets",
-              [target("kong_upstream_target_health", instant=True)],
-              0, y, w=24, h=8,
-              desc="1 en la fila que corresponde al estado real de cada target. "
-                   "state=healthy en 0 con el target arriba = el health check está mal armado.",
-              transformations=[
-                  {"id": "organize", "options": {
-                      "excludeByName": {"Time": True, "__name__": True, "job": True,
-                                        "instance": True, "workspace": True},
-                      "renameByName": {"upstream": "Upstream", "target": "Target",
-                                       "address": "Dirección", "state": "Estado",
-                                       "Value": "Activo"}}}]),
+        stat("Targets de los upstreams",
+             'kong_upstream_target_health{state="healthy"}', 0, y, w=12, h=6,
+             mappings=[{"type": "value", "options": {
+                 "0": {"text": "CAIDO", "color": ROJO, "index": 0},
+                 "1": {"text": "SANO", "color": VERDE, "index": 1}}}],
+             desc="Filtra state=healthy: su valor es directamente la respuesta. "
+                  "Si marca CAIDO pero el backend responde, lo que está mal es el "
+                  "health check, no el target."),
+        table("Detalle por estado",
+              [target('kong_upstream_target_health{state!="healthy"} == 1',
+                      "{{upstream}} → {{target}}: {{state}}", instant=True)],
+              12, y, w=12, h=6,
+              desc="Solo los estados anómalos que estén activos (== 1). Vacío es lo "
+                   "que se espera ver."),
     ]
     y += 1
 
