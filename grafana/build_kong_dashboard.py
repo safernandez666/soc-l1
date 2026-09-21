@@ -98,6 +98,9 @@ def stat(title: str, expr: str, x: int, y: int, w: int = 4, h: int = 4, *,
             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
             "textMode": "auto", "colorMode": "value", "graphMode": "area",
             "justifyMode": "auto",
+            # Fija la tipografia: con auto-size, 8 tiles con valores de largo distinto
+            # ("1" vs "ARRIBA" vs "0.00") quedan cada uno con un tamaño diferente.
+            "text": {"valueSize": 26, "titleSize": 12},
         },
         "fieldConfig": {
             "defaults": {
@@ -183,8 +186,12 @@ def bargauge(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: in
             "orientation": "horizontal", "displayMode": "gradient",
             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
             "showUnfilled": True, "valueMode": "color",
-            "minVizWidth": 8, "minVizHeight": 12, "maxVizHeight": 300,
-            "namePlacement": "left", "sizing": "auto",
+            "minVizWidth": 8, "minVizHeight": 10, "maxVizHeight": 26,
+            "namePlacement": "left",
+            # sizing manual + text.*: sin esto Grafana auto-escala la tipografia hasta
+            # llenar el panel, y con 2-3 barras en 12-24 columnas queda gigante.
+            "sizing": "manual",
+            "text": {"valueSize": 18, "titleSize": 12},
         },
         "fieldConfig": {
             "defaults": {

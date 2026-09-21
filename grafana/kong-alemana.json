@@ -73,7 +73,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -148,7 +152,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -223,7 +231,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -282,7 +294,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -349,7 +365,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -416,7 +436,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -475,7 +499,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -534,7 +562,11 @@
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
-        "justifyMode": "auto"
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -788,10 +820,14 @@
         "showUnfilled": true,
         "valueMode": "color",
         "minVizWidth": 8,
-        "minVizHeight": 12,
-        "maxVizHeight": 300,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
         "namePlacement": "left",
-        "sizing": "auto"
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1102,10 +1138,14 @@
         "showUnfilled": true,
         "valueMode": "color",
         "minVizWidth": 8,
-        "minVizHeight": 12,
-        "maxVizHeight": 300,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
         "namePlacement": "left",
-        "sizing": "auto"
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1391,10 +1431,14 @@
         "showUnfilled": true,
         "valueMode": "color",
         "minVizWidth": 8,
-        "minVizHeight": 12,
-        "maxVizHeight": 300,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
         "namePlacement": "left",
-        "sizing": "auto"
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1751,7 +1795,11 @@
             "textMode": "auto",
             "colorMode": "value",
             "graphMode": "area",
-            "justifyMode": "auto"
+            "justifyMode": "auto",
+            "text": {
+              "valueSize": 26,
+              "titleSize": 12
+            }
           },
           "fieldConfig": {
             "defaults": {
