@@ -1,6 +1,6 @@
 # Enumeración de endpoints en Kong (100207) → SOC-L1
 
-**Fecha:** 2026-09-21 · **Estado:** código y scripts listos; faltan 2 comandos con root + el rate-limit en Kong.
+**Fecha:** 2026-09-21 · **Estado:** ✅ en producción desde el 2026-09-21 13:56. Falta el rate-limit en Kong.
 
 ## El disparador
 
@@ -87,24 +87,29 @@ sin root) y su regla hija 100307 suprime a nivel 0 lo que venga del bridge de Do
 Doble red: aunque ese tuning se cayera, `172.18.0.1` está dentro de `172.16.0.0/12` →
 `PROTECTED_NETWORKS` lo frena igual. Hay un test que fija ese segundo cinturón.
 
-## Pendiente: lo que necesita root o acceso al box de Kong
+## ✅ Aplicado en producción — 2026-09-21
 
-### 1. Rutear la regla y reiniciar Wazuh
+Con `/tmp/implementar-kong-socl1.sh`. Backup del `ossec.conf` en
+`/var/ossec/etc/ossec.conf.bak-pre-kong-20260921-135252`.
 
-```bash
-sudo /var/ossec/framework/python/bin/python3 deploy/route-kong-enumeration-rule.py --dry-run
-sudo /var/ossec/framework/python/bin/python3 deploy/route-kong-enumeration-rule.py --restart
-```
+- `wazuh-analysisd` reiniciado **13:53:32** → 100207 se rutea a SOC-L1.
+- `soc-l1.service` reiniciado **13:56:45**, arranque limpio, `/health` 200.
 
-### 2. Tomar el `FORTIGATE_OBSERVE_ONLY_RULES` nuevo
+### Lección: el orden de los reinicios
 
-Ya está escrito en el `.env` (backup en `.env.bak-pre-kong-*`), pero se lee al arrancar:
+El script reiniciaba **wazuh primero y soc-l1 después**, y eso abrió una ventana de
+**3m13s** (13:53:32 → 13:56:45) en la que wazuh ya ruteaba 100207 pero SOC-L1 corría
+código viejo, sin modo sombra. Una alerta en ese hueco habría caído al pipeline completo
+—Narrator, enriquecimiento, ticket InvGate y mail de aprobación—, justo lo que el modo
+sombra evita. No entró ninguna (las últimas 100207 del día fueron 01:55 y 06:03), pero
+fue suerte, no diseño.
 
-```bash
-sudo systemctl restart soc-l1.service
-```
+**Regla general: primero el consumidor, después el productor.** Desplegar el código
+nuevo con el ruteo viejo es inocuo (la alerta simplemente no llega); al revés, no.
+El script ya está corregido, y ahora además verifica que el proceso nuevo trate 100207
+como sombra **antes** de abrirle el grifo a wazuh.
 
-### 3. Rate-limit en Kong — el fix de fondo
+### Rate-limit en Kong — el fix de fondo (sigue pendiente)
 
 Banear escáneres con TTL de 1h es tapar el sol con la mano: vuelven con otra IP (71 en
 30 días ya lo muestran). Lo que corta la enumeración de raíz es limitar la tasa en el
