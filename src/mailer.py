@@ -984,6 +984,7 @@ async def send_fgt_observation_email(
     host: str | None,
     ttl_hours: int,
     observe_only: bool = False,
+    rule_desc: str | None = None,
 ) -> None:
     """Avisa por mail qué bloquearía SOC-L1, SIN ejecutar nada.
 
@@ -1034,7 +1035,8 @@ async def send_fgt_observation_email(
         f"SOC-L1 · auto-block FortiGate ({modo} — no se ejecutó nada)\n\n"
         f"Bloquearía la IP: {ip}\n"
         f"{etiqueta_regla + ':':<18}{rule_id or '—'}\n"
-        f"Host/origen:      {host or '—'}\n"
+        + (f"Qué detectó:      {rule_desc}\n" if rule_desc else "")
+        + f"Host/origen:      {host or '—'}\n"
         f"Alerta:           {alert_id}\n"
         f"TTL del ban:      {ttl_hours}h (si se ejecutara)\n\n"
         + porque
@@ -1053,6 +1055,7 @@ async def send_fgt_observation_email(
             (
                 ("Bloquearía la IP", ip),
                 (etiqueta_regla, rule_id or "—"),
+                ("Qué detectó", rule_desc or "—"),
                 ("Host / origen", host or "—"),
                 ("Alerta", alert_id),
                 ("TTL del ban", f"{ttl_hours}h"),

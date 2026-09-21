@@ -409,6 +409,8 @@ def _render_observacion(**kw) -> tuple[str, str]:
     base = dict(
         alert_id="1790012345.999", ip="62.210.142.163", rule_id="100207",
         host="seg-vs85-prod01", ttl_hours=1,
+        rule_desc="Kong: Multiple 404 errors from 62.210.142.163 - "
+                  "Possible endpoint enumeration or scanning",
     )
     base.update(kw)
     with patch.object(mailer, "_send_sync", lambda st, m: cap.__setitem__("m", m)):
@@ -444,3 +446,11 @@ def test_observacion_no_deja_entidades_html_sin_resolver() -> None:
     for entidad in ("&iacute;", "&mdash;", "&aacute;", "&oacute;"):
         assert entidad not in visible, f"{entidad} quedó sin resolver en el correo"
     assert "Bloquearía la IP" in visible
+
+
+def test_observacion_dice_QUE_detecto_no_solo_el_numero_de_regla() -> None:
+    """Un "regla 100207" pelado no le dice nada a quien lee el correo a las 3 AM."""
+    plano, visible = _render_observacion(observe_only=True)
+    for texto in (plano, visible):
+        assert "Kong" in texto
+        assert "endpoint enumeration" in texto

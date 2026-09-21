@@ -296,6 +296,7 @@ async def send_teams_observation(
     host: str | None,
     ttl_hours: int | None,
     observe_only: bool = False,
+    rule_desc: str | None = None,
 ) -> None:
     """Notifica por Teams qué bloquearía SOC-L1, sin ejecutar. Sin botones.
 
@@ -324,6 +325,7 @@ async def send_teams_observation(
         _facts([
             ("IP", ip),
             ("Regla", str(rule_id) if rule_id is not None else None),
+            ("Qué detectó", rule_desc),
             ("Host", host),
             ("TTL propuesto", f"{ttl_hours}h" if ttl_hours else None),
         ]),
