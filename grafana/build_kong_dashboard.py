@@ -203,15 +203,23 @@ def bargauge(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: in
     mente, que es lo unico que se le pide a un top-N. Las queries llevan topk() para que
     no crezca sin limite.
     """
+    # Loki NO llega como Prometheus: el frontend junta las N series instant en UNA
+    # tabla (Time, <label>, Value). Reducida con lastNotNull da un solo numero — el de
+    # la ultima fila — sin nombre. Para Loki: una barra por fila, ordenadas a mano.
+    es_loki = targets[0]["datasource"] is LOKI
     return {
         "type": "bargauge", "title": title, "id": nid(),
         "datasource": targets[0]["datasource"],
         "description": desc,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "targets": targets,
+        "transformations": [
+            {"id": "sortBy", "options": {"sort": [{"field": "Value #" + targets[0]["refId"], "desc": True}]}},
+        ] if es_loki else [],
         "options": {
             "orientation": "horizontal", "displayMode": "gradient",
-            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            "reduceOptions": {"calcs": ["lastNotNull"], "values": es_loki,
+                              "fields": ""},
             "showUnfilled": True, "valueMode": "color",
             "minVizWidth": 8, "minVizHeight": 10, "maxVizHeight": 26,
             "namePlacement": "left",
@@ -363,6 +371,14 @@ def build() -> dict:
         desc="2xx = uso con API key válida · 4xx = rechazado por Kong (401 sin key, "
              "404 ruta inexistente, 429 rate-limit) · 5xx = falla del backend.",
     ))
+    # Sin piso de intervalo, en 24h Loki devuelve buckets de ~1 min con 0-2 hits y
+    # las barras quedan de un pixel. 10m da ~150 barras legibles en 24h.
+    P[-1]["interval"] = "10m"
+    P[-1]["fieldConfig"]["overrides"] = [
+        {"matcher": {"id": "byName", "options": c},
+         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": col}}]}
+        for c, col in (("2xx", VERDE), ("3xx", AZUL), ("4xx", AMBAR), ("5xx", ROJO))
+    ]
     y += 7
     P.append(bargauge(
         "Top IPs (rango visible)",
@@ -389,8 +405,13 @@ def build() -> dict:
              "casi nunca es un cliente real de la API.",
     ))
     y += 9
+    # label_format detected_level: Loki 3 ya guarda detected_level=unknown al ingerir
+    # y Grafana lo prioriza sobre `level`, por eso se pisa ese. Sin esto dice
+    # "UNK" en cada linea. Se deriva de la clase de status: 4xx ambar, 5xx rojo.
+    nivel = ('| label_format detected_level=`{{ if eq .status_class "5xx" }}error'
+             '{{ else if eq .status_class "4xx" }}warning{{ else }}info{{ end }}`')
     P.append(logs(
-        "Log de acceso en vivo", LOG_SEL, 0, y, w=24, h=12,
+        "Log de acceso en vivo", f"{LOG_SEL} {nivel}", 0, y, w=24, h=12,
         desc="Líneas crudas de Kong, la más nueva arriba. Click en una línea para ver "
              "IP, método, ruta, status y user-agent parseados.",
     ))

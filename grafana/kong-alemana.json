@@ -923,8 +923,70 @@
             ]
           }
         },
-        "overrides": []
-      }
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "2xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "3xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "interval": "10m"
     },
     {
       "type": "bargauge",
@@ -953,6 +1015,19 @@
           "queryType": "instant"
         }
       ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #C",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -960,8 +1035,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": true,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
@@ -1020,6 +1095,19 @@
           "queryType": "instant"
         }
       ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #E",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -1027,8 +1115,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": true,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
@@ -1087,6 +1175,19 @@
           "queryType": "instant"
         }
       ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #G",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -1094,8 +1195,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": true,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
@@ -1148,7 +1249,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}`",
+          "expr": "{job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | label_format detected_level=`{{ if eq .status_class \"5xx\" }}error{{ else if eq .status_class \"4xx\" }}warning{{ else }}info{{ end }}`",
           "legendFormat": "__auto",
           "refId": "J",
           "queryType": "range"
@@ -1384,6 +1485,7 @@
           "range": false
         }
       ],
+      "transformations": [],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -1391,8 +1493,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": false,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
@@ -1702,6 +1804,7 @@
           "range": false
         }
       ],
+      "transformations": [],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -1709,8 +1812,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": false,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
@@ -1995,6 +2098,7 @@
           "range": false
         }
       ],
+      "transformations": [],
       "options": {
         "orientation": "horizontal",
         "displayMode": "gradient",
@@ -2002,8 +2106,8 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
-          "values": false
+          "values": false,
+          "fields": ""
         },
         "showUnfilled": true,
         "valueMode": "color",
