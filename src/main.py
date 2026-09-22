@@ -953,18 +953,23 @@ def _build_fgt_block_ticket(
     El MISMO texto se inyecta en el ticket y se muestra en el email de bloqueo,
     para que el analista vea exactamente qué quedó registrado en InvGate.
     """
+    from src.fortigate_autoblock import detection_source
+
     ttl_h = settings.fortigate_block_ttl_hours
+    etiqueta, deteccion = detection_source(decision.rule_id)
+    rule_desc = alert.wazuh_rule.description
     title = (
         f"[SOC-L1][FortiGate] IP bloqueada {decision.ip} — "
-        f"regla IPS {decision.rule_id or '—'}"
+        f"{etiqueta.lower()} {decision.rule_id or '—'}"
     )
     description = (
-        "SOC-L1 detectó una alerta IPS de alta confianza y bloqueó automáticamente "
+        f"SOC-L1 detectó {deteccion} y bloqueó automáticamente "
         "la IP origen en FortiGate (quarantine con TTL). El ataque ya está contenido "
         "— no requiere acción humana.\n\n"
         f"IP bloqueada:   {decision.ip}\n"
-        f"Regla IPS:      {decision.rule_id or '—'}\n"
-        f"Host / origen:  {alert.device.hostname or '—'}\n"
+        f"{etiqueta + ':':<16}{decision.rule_id or '—'}\n"
+        + (f"Qué detectó:    {rule_desc}\n" if rule_desc else "")
+        + f"Host / origen:  {alert.device.hostname or '—'}\n"
         f"Alerta:         {alert.alert_id}\n"
         f"TTL del ban:    {ttl_h}h\n"
         f"Expira:         {outcome.expires_at or '—'}\n\n"
@@ -1059,6 +1064,7 @@ async def _fgt_block_ticket_and_notify(
         invgate_request_id=request_id,
         invgate_closed=closed,
         invgate_description=description,
+        rule_desc=alert.wazuh_rule.description,
     )
 
     # Espejo por Teams (Fase 1): el auto-block cortocircuita antes del Narrator, así
@@ -1077,6 +1083,7 @@ async def _fgt_block_ticket_and_notify(
                 expires_at=outcome.expires_at,
                 invgate_request_id=request_id,
                 invgate_closed=closed,
+                rule_desc=alert.wazuh_rule.description,
             )
         except Exception:
             logger.exception("teams: fgt_block falló para alert=%s", alert.alert_id)

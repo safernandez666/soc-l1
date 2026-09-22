@@ -454,3 +454,50 @@ def test_observacion_dice_QUE_detecto_no_solo_el_numero_de_regla() -> None:
     for texto in (plano, visible):
         assert "Kong" in texto
         assert "endpoint enumeration" in texto
+
+
+# --- Correo de BLOQUEO ejecutado: mismo template para IPS y para Kong -------------
+
+
+def _render_bloqueo(**kw) -> tuple[str, str]:
+    """Devuelve (texto_plano, html_visible) del correo de bloqueo ejecutado."""
+    import asyncio
+    import html as H
+    import re
+    from unittest.mock import patch
+
+    from src import mailer
+
+    cap: dict = {}
+    s = Settings(smtp_host="x", smtp_to_approvers="a@b.c", smtp_from="soc@x")
+    base = dict(
+        alert_id="1790088849.68371440", ip="216.180.246.205", rule_id="100207",
+        host="seg-vs85-prod01", ttl_hours=1,
+        expires_at="2026-09-22T15:54:11+00:00",
+        rule_desc="Kong: Multiple 404 errors from 216.180.246.205 - "
+                  "Possible endpoint enumeration or scanning",
+    )
+    base.update(kw)
+    with patch.object(mailer, "_send_sync", lambda st, m: cap.__setitem__("m", m)):
+        asyncio.run(mailer.send_fgt_block_email(s, **base))
+    msg = cap["m"]
+    plano = msg.get_body(preferencelist=("plain",)).get_content()
+    crudo = msg.get_body(preferencelist=("html",)).get_content()
+    visible = H.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", crudo)))
+    return plano, visible
+
+
+def test_bloqueo_kong_no_dice_IPS_y_dice_que_detecto() -> None:
+    plano, visible = _render_bloqueo()
+    for texto in (plano, visible):
+        assert "Regla IPS" not in texto, "100207 es correlación de Kong, no firma IPS"
+        assert "Regla Kong" in texto
+        assert "endpoint enumeration" in texto
+    assert "FortiGate · IP bloqueada" in visible  # mismo template que las IPS
+    assert "alerta IPS" not in visible
+
+
+def test_bloqueo_ips_conserva_el_texto_de_siempre() -> None:
+    plano, visible = _render_bloqueo(rule_id="196210", rule_desc=None)
+    assert "Regla IPS" in plano
+    assert "alerta IPS de alta confianza" in visible

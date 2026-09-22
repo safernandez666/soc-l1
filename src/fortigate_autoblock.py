@@ -87,6 +87,21 @@ def mark_notified(settings: Settings, ip: str) -> None:
         logger.exception("fgt-autoblock: no pude registrar la notificación")
 
 
+def detection_source(rule_id: str | None) -> tuple[str, str]:
+    """(etiqueta de la regla, frase de detección) según de dónde viene la alerta.
+
+    El auto-block nació para las IPS de FortiGate (1961xx/1962xx) y los textos decían
+    "alerta IPS" a secas; con Kong (1002xx, decoder/reglas 100200-100241) eso es falso.
+    """
+    try:
+        n = int(rule_id or "")
+    except ValueError:
+        n = -1
+    if 100200 <= n <= 100299:
+        return "Regla Kong", "una alerta de alta confianza en Kong (API gateway)"
+    return "Regla IPS", "una alerta IPS de alta confianza"
+
+
 @dataclass(frozen=True)
 class AutoBlockDecision:
     """Resultado de evaluar una alerta contra la política de auto-block."""

@@ -1134,6 +1134,7 @@ async def send_fgt_block_email(
     invgate_request_id: int | None = None,
     invgate_closed: bool = False,
     invgate_description: str | None = None,
+    rule_desc: str | None = None,
 ) -> None:
     """Fase 1: confirma que SOC-L1 BLOQUEÓ la IP en FortiGate (quarantine con TTL).
 
@@ -1148,6 +1149,9 @@ async def send_fgt_block_email(
         return
 
     h = html.escape
+    from src.fortigate_autoblock import detection_source
+
+    etiqueta, deteccion = detection_source(rule_id)
     # Estado del ticket para subject/cuerpo: cerrado vs abierto (close pudo dar 403).
     if invgate_request_id:
         ticket_state = "cerrado" if invgate_closed else "abierto"
@@ -1177,8 +1181,9 @@ async def send_fgt_block_email(
     text = (
         f"SOC-L1 · FortiGate auto-block (Fase 1 — EJECUTADO)\n\n"
         f"IP bloqueada:     {ip}\n"
-        f"Regla IPS:        {rule_id or '—'}\n"
-        f"Host/origen:      {host or '—'}\n"
+        f"{etiqueta + ':':<18}{rule_id or '—'}\n"
+        + (f"Qué detectó:      {rule_desc}\n" if rule_desc else "")
+        + f"Host/origen:      {host or '—'}\n"
         f"Alerta:           {alert_id}\n"
         f"TTL del ban:      {ttl_hours}h (quarantine con TTL)\n"
         f"Expira:           {expires_at or '—'}\n"
@@ -1202,7 +1207,8 @@ async def send_fgt_block_email(
         for idx, (k, v) in enumerate(
             (
                 ("IP bloqueada", ip),
-                ("Regla IPS", rule_id or "—"),
+                (etiqueta, rule_id or "—"),
+                ("Qué detectó", rule_desc or "—"),
                 ("Host / origen", host or "—"),
                 ("Alerta", alert_id),
                 ("TTL del ban", f"{ttl_hours}h"),
@@ -1217,7 +1223,7 @@ async def send_fgt_block_email(
         "Acci&oacute;n ejecutada",
         "Bloqueo autom&aacute;tico aplicado en FortiGate",
         _theme.notice(
-            "SOC-L1 detect&oacute; una alerta IPS de alta confianza y <strong>bloque&oacute; la IP origen</strong> "
+            f"SOC-L1 detect&oacute; {h(deteccion)} y <strong>bloque&oacute; la IP origen</strong> "
             "en FortiGate mediante quarantine con TTL. El ban se libera solo al vencer el TTL.",
             accent=_theme.C_CRIT,
             bg="#fdf1f2",
@@ -1245,7 +1251,7 @@ async def send_fgt_block_email(
         footer="SOC L1 &mdash; auto-block de FortiGate",
         doc_title=f"FortiGate - IP bloqueada {ip}",
         # Sin badge explícito caía en el default "INFORMATIVO", con la franja
-        # verde, en un correo que anuncia un bloqueo por una alerta IPS.
+        # verde, en un correo que anuncia un bloqueo automático.
         badge_kind="alto",
         preheader=f"IP {ip} bloqueada por {ttl_hours}h &middot; sin intervenci&oacute;n necesaria",
     )

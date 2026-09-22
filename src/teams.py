@@ -245,6 +245,7 @@ async def send_teams_block(
     expires_at: str | None = None,
     invgate_request_id: int | None = None,
     invgate_closed: bool | None = None,
+    rule_desc: str | None = None,
 ) -> None:
     """Notifica por Teams un auto-bloqueo de IP ya ejecutado en FortiGate.
 
@@ -262,12 +263,18 @@ async def send_teams_block(
         # Best-effort: si el cierre falló (estado no soluble / API), queda abierto.
         ticket_state = "cerrado" if invgate_closed else "abierto (cierre pendiente)"
 
+    from src.fortigate_autoblock import detection_source
+
+    etiqueta, _ = detection_source(str(rule_id) if rule_id is not None else None)
+    es_kong = etiqueta == "Regla Kong"
     body = [
         _title_block("🚫 SOC-L1 · IP bloqueada automáticamente", "attention"),
         _text(f"IP `{ip}` puesta en quarantine en FortiGate.", weight="Bolder"),
         _facts([
             ("IP bloqueada", ip),
-            ("Regla FortiGate", str(rule_id) if rule_id is not None else None),
+            (etiqueta if es_kong else "Regla FortiGate",
+             str(rule_id) if rule_id is not None else None),
+            ("Qué detectó", rule_desc),
             ("Host", host),
             ("TTL", f"{ttl_hours}h" if ttl_hours else None),
             ("Vence", expires_at),
@@ -275,7 +282,10 @@ async def send_teams_block(
             ("Estado ticket", ticket_state),
         ]),
         _text(
-            "Contención automática por SOC-L1 (ataque IPS de baja severidad, ya bloqueado). "
+            ("Contención automática por SOC-L1 (actividad hostil contra Kong, IP ya bloqueada). "
+             if es_kong else
+             "Contención automática por SOC-L1 (ataque IPS de baja severidad, ya bloqueado). ")
+            +
             "No requiere acción humana — queda como registro de auditoría.",
             spacing="Medium", is_subtle=True,
         ),
