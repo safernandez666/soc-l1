@@ -54,6 +54,18 @@ import urllib.request
 
 UID = "kong-alemana"
 DS = {"type": "prometheus", "uid": "prometheus"}
+# Logs de acceso de Kong (Loki + Alloy en el mismo host, ver logs/). Es la unica
+# fuente que ve el trafico de Internet: el plugin de Prometheus no lo instrumenta.
+LOKI = {"type": "loki", "uid": "loki"}
+
+# Parseo de la linea de acceso de nginx/Kong al consultar (no como labels: IP, ruta
+# y user-agent tienen cardinalidad ilimitada y Loki se degrada si van en el indice).
+# El filtro de linea ancla la variable $ip al comienzo: vacia = todo, "213.209." =
+# ese rango, IP completa = esa IP (para pivotear desde el correo de bloqueo).
+LOG_SEL = '{job="kong", kind="acceso"} |~ `^${ip:regex}`'
+LOG_RE = ('| regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] '
+          '"(?P<method>\\S+) (?P<path>[^ "]+)[^"]*" (?P<status>\\d{3}) \\S+ '
+          '"[^"]*" "(?P<ua>[^"]*)"`')
 
 # Paleta: verde para lo bueno, ambar para lo que hay que mirar, rojo para lo roto.
 VERDE, AMBAR, ROJO, AZUL = "green", "orange", "red", "blue"
@@ -78,6 +90,17 @@ def target(expr: str, legend: str = "", instant: bool = False) -> dict:
     }
 
 
+def ltarget(expr: str, legend: str = "", instant: bool = False) -> dict:
+    """Target de Loki. Instant para los top-N (una cifra por rango visible)."""
+    return {
+        "datasource": LOKI,
+        "expr": expr,
+        "legendFormat": legend or "__auto",
+        "refId": chr(65 + (nid() % 26)),
+        "queryType": "instant" if instant else "range",
+    }
+
+
 def row(title: str, y: int, collapsed: bool = False) -> dict:
     return {
         "type": "row", "title": title, "id": nid(), "collapsed": collapsed,
@@ -88,12 +111,13 @@ def row(title: str, y: int, collapsed: bool = False) -> dict:
 def stat(title: str, expr: str, x: int, y: int, w: int = 4, h: int = 4, *,
          unit: str = "short", decimals: int | None = None,
          thresholds: list | None = None, mappings: list | None = None,
-         desc: str = "") -> dict:
+         desc: str = "", ds: dict = DS) -> dict:
+    tgt = ltarget(expr, instant=True) if ds is LOKI else target(expr, instant=True)
     return {
-        "type": "stat", "title": title, "id": nid(), "datasource": DS,
+        "type": "stat", "title": title, "id": nid(), "datasource": ds,
         "description": desc,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
-        "targets": [target(expr, instant=True)],
+        "targets": [tgt],
         "options": {
             "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
             "textMode": "auto", "colorMode": "value", "graphMode": "area",
@@ -118,9 +142,10 @@ def stat(title: str, expr: str, x: int, y: int, w: int = 4, h: int = 4, *,
 
 def ts(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: int = 8, *,
        unit: str = "short", desc: str = "", stack: bool = False,
-       legend_bottom: bool = True, min_: float | None = 0) -> dict:
+       legend_bottom: bool = True, min_: float | None = 0, bars: bool = False) -> dict:
     return {
-        "type": "timeseries", "title": title, "id": nid(), "datasource": DS,
+        "type": "timeseries", "title": title, "id": nid(),
+        "datasource": targets[0]["datasource"],
         "description": desc,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "targets": targets,
@@ -136,7 +161,8 @@ def ts(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: int = 8,
             "defaults": {
                 "unit": unit, "min": min_,
                 "custom": {
-                    "drawStyle": "line", "lineWidth": 2, "fillOpacity": 12 if not stack else 40,
+                    "drawStyle": "bars" if bars else "line", "lineWidth": 2,
+                    "fillOpacity": 70 if bars else (12 if not stack else 40),
                     "showPoints": "never", "spanNulls": True,
                     "stacking": {"mode": "normal" if stack else "none", "group": "A"},
                 },
@@ -178,7 +204,8 @@ def bargauge(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: in
     no crezca sin limite.
     """
     return {
-        "type": "bargauge", "title": title, "id": nid(), "datasource": DS,
+        "type": "bargauge", "title": title, "id": nid(),
+        "datasource": targets[0]["datasource"],
         "description": desc,
         "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "targets": targets,
@@ -201,6 +228,19 @@ def bargauge(title: str, targets: list[dict], x: int, y: int, w: int = 12, h: in
             },
             "overrides": [],
         },
+    }
+
+
+def logs(title: str, expr: str, x: int, y: int, w: int = 24, h: int = 10, *,
+         desc: str = "") -> dict:
+    return {
+        "type": "logs", "title": title, "id": nid(), "datasource": LOKI,
+        "description": desc,
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
+        "targets": [ltarget(expr)],
+        "options": {"showTime": True, "wrapLogMessage": False, "sortOrder": "Descending",
+                    "enableLogDetails": True, "dedupStrategy": "none",
+                    "prettifyLogMessage": False},
     }
 
 
@@ -277,6 +317,84 @@ def build() -> dict:
         "Nodos Kong", 'count(up{job="kong"} == 1) or vector(0)', 21, y, w=3,
     ))
     y += 4
+
+    # ------------------------------------------------ 1b. que le esta pegando --
+    # La seccion que faltaba: lo que entra de Internet por gateway.grupoalemana.com.
+    # Sale de los LOGS de acceso (Loki), no de Prometheus, que no ve este trafico.
+    P.append(row("¿Qué le está pegando? — tráfico real de Internet (logs de acceso)", y))
+    y += 1
+    rango = f"{LOG_SEL} {LOG_RE}"
+    P.append(stat(
+        "Requests de Internet", f"sum(count_over_time({LOG_SEL} [$__range])) or vector(0)",
+        0, y, w=6, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
+        desc="Todas las líneas de acceso del rango visible, sin el tráfico interno de "
+             "Docker (172.x: Konga, health checks). Filtrable por la variable IP.",
+    ))
+    P.append(stat(
+        "IPs distintas", f"count(sum by (ip) (count_over_time({rango} [$__range]))) or vector(0)",
+        6, y, w=6, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
+    ))
+    P.append(stat(
+        "Respuestas 404",
+        f'sum(count_over_time({{job="kong", kind="acceso", status_class="4xx"}} '
+        f'|~ `^${{ip:regex}}` {LOG_RE} | status="404" [$__range])) or vector(0)',
+        12, y, w=6, ds=LOKI,
+        thresholds=[{"color": VERDE, "value": None}, {"color": AMBAR, "value": 100},
+                    {"color": ROJO, "value": 1000}],
+        desc="Rutas inexistentes. Es la materia prima de la regla Wazuh 100207 "
+             "(N x 404 = enumeración), que SOC-L1 bloquea en FortiGate.",
+    ))
+    P.append(stat(
+        "% respondido 2xx",
+        f'100 * (sum(count_over_time({{job="kong", kind="acceso", status_class="2xx"}} '
+        f'|~ `^${{ip:regex}}` [$__range])) or vector(0)) / '
+        f"sum(count_over_time({LOG_SEL} [$__range]))",
+        18, y, w=6, ds=LOKI, unit="percent", decimals=1,
+        thresholds=[{"color": AMBAR, "value": None}, {"color": VERDE, "value": 20}],
+        desc="Qué parte del tráfico es uso legítimo con API key válida. Bajo = la "
+             "mayoría es ruido de scanners que Kong ya rechaza (401/404).",
+    ))
+    y += 4
+    P.append(ts(
+        "Requests de Internet por código",
+        [ltarget(f'sum by (status_class) (count_over_time({{job="kong", kind="acceso"}} '
+                 f'|~ `^${{ip:regex}}` [$__interval]))', "{{status_class}}")],
+        0, y, w=24, h=7, stack=True, bars=True,
+        desc="2xx = uso con API key válida · 4xx = rechazado por Kong (401 sin key, "
+             "404 ruta inexistente, 429 rate-limit) · 5xx = falla del backend.",
+    ))
+    y += 7
+    P.append(bargauge(
+        "Top IPs (rango visible)",
+        [ltarget(f"topk(10, sum by (ip) (count_over_time({rango} [$__range])))",
+                 "{{ip}}", instant=True)],
+        0, y, w=8, h=9,
+        desc="Quién más le pega. Copiar la IP en la variable de arriba filtra todo el "
+             "tablero a ella.",
+    ))
+    P.append(bargauge(
+        "Rutas más buscadas con 404",
+        [ltarget(f'topk(10, sum by (path) (count_over_time({rango} | status="404" '
+                 f"[$__range])))", "{{path}}", instant=True)],
+        8, y, w=8, h=9, thresholds=[{"color": AMBAR, "value": None}],
+        desc="Qué buscan los scanners: /.git/config, /.env, /admin/... Ninguna existe "
+             "en el gateway; que aparezcan acá es enumeración, no uso.",
+    ))
+    P.append(bargauge(
+        "User-agents (rango visible)",
+        [ltarget(f"topk(10, sum by (ua) (count_over_time({rango} [$__range])))",
+                 "{{ua}}", instant=True)],
+        16, y, w=8, h=9,
+        desc="Un user-agent vacío (\"-\"), zgrab, curl o python-requests desde Internet "
+             "casi nunca es un cliente real de la API.",
+    ))
+    y += 9
+    P.append(logs(
+        "Log de acceso en vivo", LOG_SEL, 0, y, w=24, h=12,
+        desc="Líneas crudas de Kong, la más nueva arriba. Click en una línea para ver "
+             "IP, método, ruta, status y user-agent parseados.",
+    ))
+    y += 12
 
     # --------------------------------------------------------------- 2. sano --
     P.append(row("¿Está sano? — errores y de quién es la culpa", y)); y += 1
@@ -441,11 +559,11 @@ def build() -> dict:
         "`httpbin-service` y `admin-api` (los servicios de prueba de la POC), y "
         "**cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas "
         "de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\n"
-        "Es decir: lo que entra por `gateway.grupoalemana.com` **no queda instrumentado "
-        "acá**. Hasta habilitar el plugin de forma global, este dashboard describe la POC, "
-        "no el gateway publicado. La vista de seguridad real está hoy en el dashboard de "
-        "OpenSearch *Kong API Gateway Monitoring*.\n\n"
-        "**Retención de Prometheus: 15 días.** Rangos mayores salen vacíos.",
+        "Por eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los "
+        "**logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí "
+        "ve cada request de Internet. Las filas de métricas de abajo siguen describiendo "
+        "la POC hasta que el plugin se habilite de forma global.\n\n"
+        "**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos.",
         0, y, w=24, h=5,
     ))
 
@@ -453,8 +571,8 @@ def build() -> dict:
         "uid": UID,
         "title": "Kong Alemana",
         "description": "Estado operativo de Kong, ordenado por las preguntas que hace "
-                       "un administrador. Ver el panel de notas al pie: el plugin de "
-                       "Prometheus no cubre el tráfico de Internet.",
+                       "un administrador. El tráfico de Internet sale de los logs de "
+                       "acceso (Loki); las métricas de Prometheus cubren solo la POC.",
         "tags": ["kong", "api-gateway", "soc"],
         "timezone": "browser",
         "editable": True,
@@ -468,7 +586,12 @@ def build() -> dict:
         "refresh": "1m",
         "schemaVersion": 39,
         "panels": P,
-        "templating": {"list": []},
+        "templating": {"list": [{
+            "type": "textbox", "name": "ip", "label": "IP (o prefijo)",
+            "query": "", "current": {"text": "", "value": ""},
+            "description": "Filtra la sección de logs. Vacío = todo; '213.209.' = ese "
+                           "rango; una IP completa = solo esa (ej. la del correo de bloqueo).",
+        }]},
         "annotations": {"list": []},
     }
 
@@ -481,7 +604,7 @@ def push(dash: dict) -> None:
         sys.exit("ERROR: falta GRAFANA_PASS en el entorno.")
     payload = json.dumps({
         "dashboard": dash, "overwrite": True,
-        "message": "Rearmado: ordenado por preguntas de administrador, sin duplicados",
+        "message": "Sección de logs de acceso (Loki): tráfico real de Internet",
     }).encode()
     req = urllib.request.Request(
         f"{url}/api/dashboards/db", data=payload, method="POST",

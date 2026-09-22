@@ -1,7 +1,7 @@
 {
   "uid": "kong-alemana",
   "title": "Kong Alemana",
-  "description": "Estado operativo de Kong, ordenado por las preguntas que hace un administrador. Ver el panel de notas al pie: el plugin de Prometheus no cubre el tráfico de Internet.",
+  "description": "Estado operativo de Kong, ordenado por las preguntas que hace un administrador. El tráfico de Internet sale de los logs de acceso (Loki); las métricas de Prometheus cubren solo la POC.",
   "tags": [
     "kong",
     "api-gateway",
@@ -37,7 +37,7 @@
     {
       "type": "stat",
       "title": "Kong",
-      "id": 1,
+      "id": 2,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -57,7 +57,7 @@
           },
           "expr": "up{job=\"kong\"}",
           "legendFormat": "__auto",
-          "refId": "C",
+          "refId": "B",
           "instant": true,
           "range": false
         }
@@ -116,7 +116,7 @@
     {
       "type": "stat",
       "title": "Datastore",
-      "id": 3,
+      "id": 4,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -136,7 +136,7 @@
           },
           "expr": "kong_datastore_reachable",
           "legendFormat": "__auto",
-          "refId": "E",
+          "refId": "D",
           "instant": true,
           "range": false
         }
@@ -195,7 +195,7 @@
     {
       "type": "stat",
       "title": "RPS (5m)",
-      "id": 5,
+      "id": 6,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -215,7 +215,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total[5m])) or vector(0)",
           "legendFormat": "__auto",
-          "refId": "G",
+          "refId": "F",
           "instant": true,
           "range": false
         }
@@ -258,7 +258,7 @@
     {
       "type": "stat",
       "title": "Error 5xx (5m)",
-      "id": 7,
+      "id": 8,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -278,7 +278,7 @@
           },
           "expr": "100 * (sum(rate(kong_http_requests_total{code=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(kong_http_requests_total[5m])) or vector(0), 0.001)",
           "legendFormat": "__auto",
-          "refId": "I",
+          "refId": "H",
           "instant": true,
           "range": false
         }
@@ -329,7 +329,7 @@
     {
       "type": "stat",
       "title": "p99 latencia (5m)",
-      "id": 9,
+      "id": 10,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -349,7 +349,7 @@
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(kong_request_latency_ms_bucket[5m])))",
           "legendFormat": "__auto",
-          "refId": "K",
+          "refId": "J",
           "instant": true,
           "range": false
         }
@@ -400,7 +400,7 @@
     {
       "type": "stat",
       "title": "Rate-limited (5m)",
-      "id": 11,
+      "id": 12,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -420,7 +420,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=\"429\"}[5m])) or vector(0)",
           "legendFormat": "__auto",
-          "refId": "M",
+          "refId": "L",
           "instant": true,
           "range": false
         }
@@ -463,7 +463,7 @@
     {
       "type": "stat",
       "title": "Conexiones activas",
-      "id": 13,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -483,7 +483,7 @@
           },
           "expr": "sum(kong_nginx_connections_total{state=\"active\"}) or vector(0)",
           "legendFormat": "__auto",
-          "refId": "O",
+          "refId": "N",
           "instant": true,
           "range": false
         }
@@ -526,7 +526,7 @@
     {
       "type": "stat",
       "title": "Nodos Kong",
-      "id": 15,
+      "id": 16,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -546,7 +546,7 @@
           },
           "expr": "count(up{job=\"kong\"} == 1) or vector(0)",
           "legendFormat": "__auto",
-          "refId": "Q",
+          "refId": "P",
           "instant": true,
           "range": false
         }
@@ -588,7 +588,7 @@
     },
     {
       "type": "row",
-      "title": "¿Está sano? — errores y de quién es la culpa",
+      "title": "¿Qué le está pegando? — tráfico real de Internet (logs de acceso)",
       "id": 17,
       "collapsed": false,
       "gridPos": {
@@ -600,9 +600,586 @@
       "panels": []
     },
     {
+      "type": "stat",
+      "title": "Requests de Internet",
+      "id": 19,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Todas las líneas de acceso del rango visible, sin el tráfico interno de Docker (172.x: Konga, health checks). Filtrable por la variable IP.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` [$__range])) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "S",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "IPs distintas",
+      "id": 21,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "count(sum by (ip) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range]))) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "U",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Respuestas 404",
+      "id": 23,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Rutas inexistentes. Es la materia prima de la regla Wazuh 100207 (N x 404 = enumeración), que SOC-L1 bloquea en FortiGate.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"4xx\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "W",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "% respondido 2xx",
+      "id": 25,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Qué parte del tráfico es uso legítimo con API key válida. Bajo = la mayoría es ruido de scanners que Kong ya rechaza (401/404).",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "100 * (sum(count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"2xx\"} |~ `^${ip:regex}` [$__range])) or vector(0)) / sum(count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` [$__range]))",
+          "legendFormat": "__auto",
+          "refId": "Y",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests de Internet por código",
+      "id": 27,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "2xx = uso con API key válida · 4xx = rechazado por Kong (401 sin key, 404 ruta inexistente, 429 rate-limit) · 5xx = falla del backend.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (status_class) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` [$__interval]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 70,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Top IPs (rango visible)",
+      "id": 29,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Quién más le pega. Copiar la IP en la variable de arriba filtra todo el tablero a ella.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (ip) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
+          "legendFormat": "{{ip}}",
+          "refId": "C",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Rutas más buscadas con 404",
+      "id": 31,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Qué buscan los scanners: /.git/config, /.env, /admin/... Ninguna existe en el gateway; que aparezcan acá es enumeración, no uso.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (path) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])))",
+          "legendFormat": "{{path}}",
+          "refId": "E",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "User-agents (rango visible)",
+      "id": 33,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Un user-agent vacío (\"-\"), zgrab, curl o python-requests desde Internet casi nunca es un cliente real de la API.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (ua) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
+          "legendFormat": "{{ua}}",
+          "refId": "G",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Log de acceso en vivo",
+      "id": 34,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Líneas crudas de Kong, la más nueva arriba. Click en una línea para ver IP, método, ruta, status y user-agent parseados.",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}`",
+          "legendFormat": "__auto",
+          "refId": "J",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": false,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      }
+    },
+    {
+      "type": "row",
+      "title": "¿Está sano? — errores y de quién es la culpa",
+      "id": 36,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "panels": []
+    },
+    {
       "type": "timeseries",
       "title": "Requests por clase de código",
-      "id": 22,
+      "id": 41,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -612,7 +1189,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 5
+        "y": 38
       },
       "targets": [
         {
@@ -622,7 +1199,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"2..\"}[$__rate_interval]))",
           "legendFormat": "2xx OK",
-          "refId": "S",
+          "refId": "L",
           "instant": false,
           "range": true
         },
@@ -633,7 +1210,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"3..\"}[$__rate_interval]))",
           "legendFormat": "3xx redirect",
-          "refId": "T",
+          "refId": "M",
           "instant": false,
           "range": true
         },
@@ -644,7 +1221,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"4..\"}[$__rate_interval]))",
           "legendFormat": "4xx cliente",
-          "refId": "U",
+          "refId": "N",
           "instant": false,
           "range": true
         },
@@ -655,7 +1232,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"5..\"}[$__rate_interval]))",
           "legendFormat": "5xx servidor",
-          "refId": "V",
+          "refId": "O",
           "instant": false,
           "range": true
         }
@@ -703,7 +1280,7 @@
     {
       "type": "timeseries",
       "title": "¿Quién devolvió el error? Kong vs upstream",
-      "id": 25,
+      "id": 44,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -713,7 +1290,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 5
+        "y": 38
       },
       "targets": [
         {
@@ -723,7 +1300,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{source=\"kong\", code=~\"[45]..\"}[$__rate_interval]))",
           "legendFormat": "Kong (auth, rate-limit, ruta inexistente)",
-          "refId": "X",
+          "refId": "Q",
           "instant": false,
           "range": true
         },
@@ -734,7 +1311,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{source=\"service\", code=~\"[45]..\"}[$__rate_interval]))",
           "legendFormat": "Upstream (el backend)",
-          "refId": "Y",
+          "refId": "R",
           "instant": false,
           "range": true
         }
@@ -782,7 +1359,7 @@
     {
       "type": "bargauge",
       "title": "Rutas con más errores (rango visible)",
-      "id": 27,
+      "id": 46,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -792,7 +1369,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 13
+        "y": 46
       },
       "targets": [
         {
@@ -802,7 +1379,7 @@
           },
           "expr": "topk(10, sum by (service, route, code) (increase(kong_http_requests_total{code=~\"[45]..\"}[$__range])))",
           "legendFormat": "{{service}} · {{route}} · {{code}}",
-          "refId": "A",
+          "refId": "T",
           "instant": true,
           "range": false
         }
@@ -850,7 +1427,7 @@
     {
       "type": "timeseries",
       "title": "Códigos de estado en detalle",
-      "id": 29,
+      "id": 48,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -860,7 +1437,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 13
+        "y": 46
       },
       "targets": [
         {
@@ -870,7 +1447,7 @@
           },
           "expr": "sum by (code) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{code}}",
-          "refId": "C",
+          "refId": "V",
           "instant": false,
           "range": true
         }
@@ -918,20 +1495,20 @@
     {
       "type": "row",
       "title": "¿Está rápido? — y dónde se va el tiempo",
-      "id": 30,
+      "id": 49,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 54
       },
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Latencia total del request (percentiles)",
-      "id": 34,
+      "id": 53,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -941,7 +1518,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 55
       },
       "targets": [
         {
@@ -951,7 +1528,7 @@
           },
           "expr": "histogram_quantile(0.5, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p50",
-          "refId": "F",
+          "refId": "Y",
           "instant": false,
           "range": true
         },
@@ -962,7 +1539,7 @@
           },
           "expr": "histogram_quantile(0.9, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p90",
-          "refId": "G",
+          "refId": "Z",
           "instant": false,
           "range": true
         },
@@ -973,7 +1550,7 @@
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p99",
-          "refId": "H",
+          "refId": "A",
           "instant": false,
           "range": true
         }
@@ -1021,7 +1598,7 @@
     {
       "type": "timeseries",
       "title": "¿El tiempo es de Kong o del upstream?",
-      "id": 37,
+      "id": 56,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1031,7 +1608,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 55
       },
       "targets": [
         {
@@ -1041,7 +1618,7 @@
           },
           "expr": "sum(rate(kong_kong_latency_ms_sum[$__rate_interval])) / clamp_min(sum(rate(kong_kong_latency_ms_count[$__rate_interval])), 0.001)",
           "legendFormat": "Kong (plugins, routing)",
-          "refId": "J",
+          "refId": "C",
           "instant": false,
           "range": true
         },
@@ -1052,7 +1629,7 @@
           },
           "expr": "sum(rate(kong_upstream_latency_ms_sum[$__rate_interval])) / clamp_min(sum(rate(kong_upstream_latency_ms_count[$__rate_interval])), 0.001)",
           "legendFormat": "Upstream (el backend)",
-          "refId": "K",
+          "refId": "D",
           "instant": false,
           "range": true
         }
@@ -1100,7 +1677,7 @@
     {
       "type": "bargauge",
       "title": "p99 por ruta (rango visible)",
-      "id": 39,
+      "id": 58,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1110,7 +1687,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 63
       },
       "targets": [
         {
@@ -1120,7 +1697,7 @@
           },
           "expr": "topk(10, histogram_quantile(0.99, sum by (le, service, route) (rate(kong_request_latency_ms_bucket[$__range]))))",
           "legendFormat": "{{service}} · {{route}}",
-          "refId": "M",
+          "refId": "F",
           "instant": true,
           "range": false
         }
@@ -1176,20 +1753,20 @@
     {
       "type": "row",
       "title": "¿Quién lo usa?",
-      "id": 40,
+      "id": 59,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 70
       },
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Tráfico por servicio",
-      "id": 42,
+      "id": 61,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1199,7 +1776,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 71
       },
       "targets": [
         {
@@ -1209,7 +1786,7 @@
           },
           "expr": "sum by (service) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{service}}",
-          "refId": "P",
+          "refId": "I",
           "instant": false,
           "range": true
         }
@@ -1257,7 +1834,7 @@
     {
       "type": "timeseries",
       "title": "Tráfico por ruta",
-      "id": 44,
+      "id": 63,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1267,7 +1844,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 71
       },
       "targets": [
         {
@@ -1277,7 +1854,7 @@
           },
           "expr": "sum by (route) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{route}}",
-          "refId": "R",
+          "refId": "K",
           "instant": false,
           "range": true
         }
@@ -1325,7 +1902,7 @@
     {
       "type": "timeseries",
       "title": "Ancho de banda",
-      "id": 46,
+      "id": 65,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1335,7 +1912,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 46
+        "y": 79
       },
       "targets": [
         {
@@ -1345,7 +1922,7 @@
           },
           "expr": "sum by (direction) (rate(kong_bandwidth_bytes[$__rate_interval]))",
           "legendFormat": "{{direction}}",
-          "refId": "T",
+          "refId": "M",
           "instant": false,
           "range": true
         }
@@ -1393,7 +1970,7 @@
     {
       "type": "bargauge",
       "title": "Requests por ruta (rango visible)",
-      "id": 48,
+      "id": 67,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1403,7 +1980,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 79
       },
       "targets": [
         {
@@ -1413,7 +1990,7 @@
           },
           "expr": "topk(10, sum by (service, route) (increase(kong_http_requests_total[$__range])))",
           "legendFormat": "{{service}} · {{route}}",
-          "refId": "V",
+          "refId": "O",
           "instant": true,
           "range": false
         }
@@ -1461,19 +2038,19 @@
     {
       "type": "row",
       "title": "¿Va a aguantar? — capacidad del nodo",
-      "id": 49,
+      "id": 68,
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 87
       },
       "panels": [
         {
           "type": "timeseries",
           "title": "Memoria compartida por diccionario (%)",
-          "id": 51,
+          "id": 70,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1483,7 +2060,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 55
+            "y": 88
           },
           "targets": [
             {
@@ -1493,7 +2070,7 @@
               },
               "expr": "100 * kong_memory_lua_shared_dict_bytes / kong_memory_lua_shared_dict_total_bytes",
               "legendFormat": "{{shared_dict}}",
-              "refId": "Y",
+              "refId": "R",
               "instant": false,
               "range": true
             }
@@ -1541,7 +2118,7 @@
         {
           "type": "timeseries",
           "title": "Memoria Lua por worker",
-          "id": 53,
+          "id": 72,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1551,7 +2128,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 55
+            "y": 88
           },
           "targets": [
             {
@@ -1561,7 +2138,7 @@
               },
               "expr": "kong_memory_workers_lua_vms_bytes",
               "legendFormat": "worker {{pid}}",
-              "refId": "A",
+              "refId": "T",
               "instant": false,
               "range": true
             }
@@ -1609,7 +2186,7 @@
         {
           "type": "timeseries",
           "title": "Conexiones nginx por estado",
-          "id": 55,
+          "id": 74,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1619,7 +2196,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 63
+            "y": 96
           },
           "targets": [
             {
@@ -1629,7 +2206,7 @@
               },
               "expr": "sum by (state) (kong_nginx_connections_total{state=~\"active|reading|writing|waiting\"})",
               "legendFormat": "{{state}}",
-              "refId": "C",
+              "refId": "V",
               "instant": false,
               "range": true
             }
@@ -1677,7 +2254,7 @@
         {
           "type": "timeseries",
           "title": "Timers de nginx (pendientes vs corriendo)",
-          "id": 57,
+          "id": 76,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1687,7 +2264,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 63
+            "y": 96
           },
           "targets": [
             {
@@ -1697,7 +2274,7 @@
               },
               "expr": "kong_nginx_timers",
               "legendFormat": "{{state}}",
-              "refId": "E",
+              "refId": "X",
               "instant": false,
               "range": true
             }
@@ -1747,19 +2324,19 @@
     {
       "type": "row",
       "title": "Salud de los upstreams",
-      "id": 58,
+      "id": 77,
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 89
       },
       "panels": [
         {
           "type": "stat",
           "title": "Targets de los upstreams",
-          "id": 59,
+          "id": 79,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1769,7 +2346,7 @@
             "h": 6,
             "w": 12,
             "x": 0,
-            "y": 57
+            "y": 90
           },
           "targets": [
             {
@@ -1779,7 +2356,7 @@
               },
               "expr": "kong_upstream_target_health{state=\"healthy\"}",
               "legendFormat": "__auto",
-              "refId": "I",
+              "refId": "A",
               "instant": true,
               "range": false
             }
@@ -1838,7 +2415,7 @@
         {
           "type": "table",
           "title": "Detalle por estado",
-          "id": 62,
+          "id": 81,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1848,7 +2425,7 @@
             "h": 6,
             "w": 12,
             "x": 12,
-            "y": 57
+            "y": 90
           },
           "targets": [
             {
@@ -1858,7 +2435,7 @@
               },
               "expr": "kong_upstream_target_health{state!=\"healthy\"} == 1",
               "legendFormat": "{{upstream}} → {{target}}: {{state}}",
-              "refId": "J",
+              "refId": "C",
               "instant": true,
               "range": false
             }
@@ -1889,21 +2466,33 @@
     {
       "type": "text",
       "title": "Antes de sacar conclusiones",
-      "id": 63,
+      "id": 82,
       "gridPos": {
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 91
       },
       "options": {
         "mode": "markdown",
-        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nEs decir: lo que entra por `gateway.grupoalemana.com` **no queda instrumentado acá**. Hasta habilitar el plugin de forma global, este dashboard describe la POC, no el gateway publicado. La vista de seguridad real está hoy en el dashboard de OpenSearch *Kong API Gateway Monitoring*.\n\n**Retención de Prometheus: 15 días.** Rangos mayores salen vacíos."
+        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nPor eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los **logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí ve cada request de Internet. Las filas de métricas de abajo siguen describiendo la POC hasta que el plugin se habilite de forma global.\n\n**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos."
       }
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "type": "textbox",
+        "name": "ip",
+        "label": "IP (o prefijo)",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "description": "Filtra la sección de logs. Vacío = todo; '213.209.' = ese rango; una IP completa = solo esa (ej. la del correo de bloqueo)."
+      }
+    ]
   },
   "annotations": {
     "list": []

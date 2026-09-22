@@ -6,6 +6,7 @@ Dashboard operativo de Kong en la POC (`192.168.38.62:3000`, datasource Promethe
   la fuente de verdad es el script.
 - `kong-alemana.json` — salida generada.
 - `original/` — export del dashboard previo al rearmado, para volver atrás.
+- `logs/` — Loki + Alloy que alimentan la sección de logs de acceso (ver abajo).
 
 ```bash
 python3 build_kong_dashboard.py                              # solo genera el JSON
@@ -38,3 +39,29 @@ Hasta habilitar el plugin de forma global, este dashboard describe la POC, no
 
 Retención de Prometheus: **15 días**. Por eso el selector de tiempo no ofrece más
 de 7d — ofrecer 30d solo produce paneles vacíos.
+
+## Logs de acceso (Loki) — la vista del tráfico real
+
+Desde el 2026-09-22 el dashboard tiene una sección **"¿Qué le está pegando?"** que sale
+de los **logs de acceso de Kong**, no de Prometheus: requests de Internet, IPs
+distintas, 404, % 2xx, requests por código, top IPs, rutas buscadas con 404,
+user-agents y el log en vivo. Una variable **IP (o prefijo)** arriba filtra toda la
+sección; sirve para pegar la IP de un correo de bloqueo de SOC-L1 y ver qué hizo.
+
+Cómo llegan: Kong loguea con el driver `syslog` de Docker hacia Wazuh (UDP 514), y
+Docker igual guarda una copia local (*dual logging*). **Alloy** lee esa copia por la API
+de Docker y la manda a **Loki**. No hubo que tocar ni reiniciar Kong, y Wazuh sigue
+recibiendo lo mismo.
+
+```bash
+# en 192.168.38.62, usuario apimanager
+cd ~/kong-setup/logs && docker compose -f docker-compose.logs.yml up -d
+```
+
+- Loki no publica puerto: solo Grafana lo consulta, por la red `kong-setup_poc-network`.
+- Retención 15 días, igual que Prometheus. Datasource en Grafana: uid `loki`.
+- Labels mínimos (`job`, `container`, `kind` = acceso|interno|error, `status_class`).
+  IP, ruta y user-agent se parsean al consultar con `| regexp`: como labels harían
+  explotar el índice.
+- `kind="interno"` es el tráfico 172.x de la red Docker (Konga, curl al Admin API);
+  la sección lo excluye.

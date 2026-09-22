@@ -1,0 +1,54 @@
+// Alloy: lee los logs del contenedor `kong` por la API de Docker y los manda a Loki.
+// Kong loguea con el driver syslog (a Wazuh); Docker igual guarda una copia local
+// (dual logging), que es lo que se lee acá. No hace falta tocar ni reiniciar Kong.
+
+discovery.docker "kong" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "name"
+    values = ["^kong$"]
+  }
+}
+
+discovery.relabel "kong" {
+  targets = discovery.docker.kong.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "kong" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.relabel.kong.output
+  relabel_rules = discovery.relabel.kong.rules
+  labels        = { job = "kong" }
+  forward_to    = [loki.process.kong.receiver]
+}
+
+// Solo dos labels de baja cardinalidad: el tipo de línea y la clase de status.
+// IP, ruta y user-agent se extraen al consultar (| pattern), no como labels.
+loki.process "kong" {
+  stage.regex {
+    expression = `^(?P<ip>\S+) \S+ \S+ \[[^\]]+\] "(?P<method>\S+) (?P<path>\S+)[^"]*" (?P<status>\d{3}) `
+  }
+  stage.template {
+    source   = "status_class"
+    template = `{{ if .status }}{{ printf "%.1s" .status }}xx{{ else }}{{ end }}`
+  }
+  stage.template {
+    source   = "kind"
+    template = `{{ if .status }}{{ if hasPrefix "172." .ip }}interno{{ else }}acceso{{ end }}{{ else }}error{{ end }}`
+  }
+  stage.labels {
+    values = { status_class = "", kind = "" }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
