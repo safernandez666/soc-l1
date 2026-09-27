@@ -330,6 +330,37 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
                 "🚫 FGT-AUTOBLOCK ENFORCE | quarantine OK ip=%s rule=%s ttl=%sh alert=%s exp=%s",
                 ip, decision.rule_id, ttl_h, alert.alert_id, r.expires_at,
             )
+            # El ban solo frena sesiones NUEVAS: si el atacante tiene una conexión
+            # abierta (keep-alive), sigue entrando hasta que se corte. Se mide y, si el
+            # api-user tiene permiso (fwgrp others read-write), se cierra. Best-effort.
+            # Evidencia del 2026-09-26: 67 requests a Kong tras el ban de 172.104.27.48.
+            try:
+                async with FortigateClient(settings) as fg2:
+                    ses = await fg2.close_sessions(ip)
+                if ses.get("error"):
+                    logger.warning(
+                        "FGT-AUTOBLOCK SESIONES | no pude listar sesiones de ip=%s: %s",
+                        ip, ses["error"],
+                    )
+                elif ses["found"] == 0:
+                    logger.info(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s sin sesiones vivas tras el ban", ip
+                    )
+                elif ses["permission_denied"]:
+                    logger.warning(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s tiene %d sesiones VIVAS (policies=%s) "
+                        "tras el ban y NO tengo permiso para cerrarlas: pedir en el FortiGate "
+                        "accprofile del api-user → fwgrp-permission others read-write",
+                        ip, ses["found"], ses["policies"],
+                    )
+                else:
+                    logger.info(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s sesiones vivas=%d cerradas=%d "
+                        "fallidas=%d policies=%s",
+                        ip, ses["found"], ses["closed"], ses["failed"], ses["policies"],
+                    )
+            except Exception:  # noqa: BLE001 - nunca rompe el bloqueo ya hecho
+                logger.exception("FGT-AUTOBLOCK SESIONES | error revisando sesiones de ip=%s", ip)
         else:
             logger.error(
                 "FGT-AUTOBLOCK ENFORCE | quarantine FALLÓ ip=%s rule=%s alert=%s msg=%s",
