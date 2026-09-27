@@ -11,7 +11,7 @@
   "editable": true,
   "graphTooltip": 1,
   "time": {
-    "from": "now-6h",
+    "from": "now-24h",
     "to": "now"
   },
   "timepicker": {
@@ -610,7 +610,7 @@
       "description": "Todas las líneas de acceso del rango visible, sin el tráfico interno de Docker (172.x: Konga, health checks). Filtrable por la variable IP.",
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 4,
         "x": 0,
         "y": 5
       },
@@ -672,8 +672,8 @@
       "description": "",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 4,
+        "x": 4,
         "y": 5
       },
       "targets": [
@@ -734,8 +734,8 @@
       "description": "Rutas inexistentes. Es la materia prima de la regla Wazuh 100207 (N x 404 = enumeración), que SOC-L1 bloquea en FortiGate.",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 4,
+        "x": 8,
         "y": 5
       },
       "targets": [
@@ -795,8 +795,140 @@
     },
     {
       "type": "stat",
-      "title": "% respondido 2xx",
+      "title": "IPs sobre el umbral de bloqueo",
       "id": 25,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "IPs con 10 o más 404 en el rango visible: el mismo umbral que la regla Wazuh 100207 (10 × 404 en 2 min), que manda la IP a cuarentena en el FortiGate vía SOC-L1. Aproximación: la regla mira una ventana de 2 min, este panel todo el rango, así que puede contar de más, nunca de menos.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "count(sum by (ip) (count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"4xx\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])) >= 10) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "Y",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Requests 2xx (uso legítimo)",
+      "id": 27,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Requests que pasaron el key-auth y llegaron al backend.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"2xx\"} |~ `^${ip:regex}` [$__range])) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "text": {
+          "valueSize": 26,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "% respondido 2xx",
+      "id": 29,
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -804,8 +936,8 @@
       "description": "Qué parte del tráfico es uso legítimo con API key válida. Bajo = la mayoría es ruido de scanners que Kong ya rechaza (401/404).",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 4,
+        "x": 20,
         "y": 5
       },
       "targets": [
@@ -816,7 +948,7 @@
           },
           "expr": "100 * (sum(count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"2xx\"} |~ `^${ip:regex}` [$__range])) or vector(0)) / sum(count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` [$__range]))",
           "legendFormat": "__auto",
-          "refId": "Y",
+          "refId": "C",
           "queryType": "instant"
         }
       ],
@@ -862,7 +994,7 @@
     {
       "type": "timeseries",
       "title": "Requests de Internet por código",
-      "id": 27,
+      "id": 31,
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -882,7 +1014,7 @@
           },
           "expr": "sum by (status_class) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` [$__interval]))",
           "legendFormat": "{{status_class}}",
-          "refId": "A",
+          "refId": "E",
           "queryType": "range"
         }
       ],
@@ -991,12 +1123,12 @@
     {
       "type": "bargauge",
       "title": "Top IPs (rango visible)",
-      "id": 29,
+      "id": 33,
       "datasource": {
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Quién más le pega. Copiar la IP en la variable de arriba filtra todo el tablero a ella.",
+      "description": "Quién más le pega. Click en una barra: filtrar el tablero a esa IP, o abrirla en el dashboard de Wazuh (alertas, país, qué reglas disparó).",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -1011,166 +1143,6 @@
           },
           "expr": "topk(10, sum by (ip) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
           "legendFormat": "{{ip}}",
-          "refId": "C",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "Value #C",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": true,
-          "fields": ""
-        },
-        "showUnfilled": true,
-        "valueMode": "color",
-        "minVizWidth": 8,
-        "minVizHeight": 10,
-        "maxVizHeight": 26,
-        "namePlacement": "left",
-        "sizing": "manual",
-        "text": {
-          "valueSize": 18,
-          "titleSize": 12
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "Rutas más buscadas con 404",
-      "id": 31,
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "description": "Qué buscan los scanners: /.git/config, /.env, /admin/... Ninguna existe en el gateway; que aparezcan acá es enumeración, no uso.",
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 8,
-        "y": 16
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "expr": "topk(10, sum by (path) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])))",
-          "legendFormat": "{{path}}",
-          "refId": "E",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "Value #E",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": true,
-          "fields": ""
-        },
-        "showUnfilled": true,
-        "valueMode": "color",
-        "minVizWidth": 8,
-        "minVizHeight": 10,
-        "maxVizHeight": 26,
-        "namePlacement": "left",
-        "sizing": "manual",
-        "text": {
-          "valueSize": 18,
-          "titleSize": 12
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "orange",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "User-agents (rango visible)",
-      "id": 33,
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "description": "Un user-agent vacío (\"-\"), zgrab, curl o python-requests desde Internet casi nunca es un cliente real de la API.",
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 16,
-        "y": 16
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "expr": "topk(10, sum by (ua) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
-          "legendFormat": "{{ua}}",
           "refId": "G",
           "queryType": "instant"
         }
@@ -1223,23 +1195,195 @@
                 "value": null
               }
             ]
+          },
+          "links": [
+            {
+              "title": "Filtrar el tablero a esta IP",
+              "url": "/d/kong-alemana/kong-alemana?var-ip=${__data.fields.ip}&${__url_time_range}",
+              "targetBlank": false
+            },
+            {
+              "title": "Ver en Wazuh (alertas, país, reglas)",
+              "url": "https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
+              "targetBlank": true
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Rutas más buscadas con 404",
+      "id": 35,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Qué buscan los scanners: /.git/config, /.env, /admin/... Ninguna existe en el gateway; que aparezcan acá es enumeración, no uso.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (path) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])))",
+          "legendFormat": "{{path}}",
+          "refId": "I",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #I",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
           }
         },
         "overrides": []
       }
     },
     {
-      "type": "logs",
-      "title": "Log de acceso en vivo",
-      "id": 34,
+      "type": "bargauge",
+      "title": "User-agents (rango visible)",
+      "id": 37,
       "datasource": {
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Líneas crudas de Kong, la más nueva arriba. Click en una línea para ver IP, método, ruta, status y user-agent parseados.",
+      "description": "Un user-agent vacío (\"-\"), zgrab, curl o python-requests desde Internet casi nunca es un cliente real de la API.",
       "gridPos": {
-        "h": 12,
-        "w": 24,
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (ua) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
+          "legendFormat": "{{ua}}",
+          "refId": "K",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #K",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "IPs con más 404 (candidatas a bloqueo)",
+      "id": 39,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Solo 404: la señal de enumeración. Desde 10 (ámbar) la regla 100207 ya debería haber mandado la IP a cuarentena; si sigue sumando después, la cuarentena no la está cortando. Click: filtrar o ver en Wazuh.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
         "x": 0,
         "y": 25
       },
@@ -1249,9 +1393,269 @@
             "type": "loki",
             "uid": "loki"
           },
+          "expr": "topk(10, sum by (ip) (count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"4xx\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` | status=\"404\" [$__range])))",
+          "legendFormat": "{{ip}}",
+          "refId": "M",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #M",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Filtrar el tablero a esta IP",
+              "url": "/d/kong-alemana/kong-alemana?var-ip=${__data.fields.ip}&${__url_time_range}",
+              "targetBlank": false
+            },
+            {
+              "title": "Ver en Wazuh (alertas, país, reglas)",
+              "url": "https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
+              "targetBlank": true
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Métodos HTTP",
+      "id": 41,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "GET es lo esperado. POST/PUT/DELETE/PROPFIND desde Internet contra un gateway de solo lectura son sondeos. Un 'método' con basura adentro es un exploit mandado como primera línea HTTP (p.ej. el downloader de Mozi).",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(8, sum by (method) (count_over_time({job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
+          "legendFormat": "{{method}}",
+          "refId": "O",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #O",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Rutas con 2xx (uso legítimo)",
+      "id": 43,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Lo que pasó el key-auth y llegó al backend. Vacío = nadie usó la API con credenciales válidas en el rango, que hoy es lo normal en la POC.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (method, path) (count_over_time({job=\"kong\", kind=\"acceso\", status_class=\"2xx\"} |~ `^${ip:regex}` | regexp `^(?P<ip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \"(?P<method>\\S+) (?P<path>[^ \"]+)[^\"]*\" (?P<status>\\d{3}) \\S+ \"[^\"]*\" \"(?P<ua>[^\"]*)\"` [$__range])))",
+          "legendFormat": "{{method}} {{path}}",
+          "refId": "Q",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value #Q",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Log de acceso en vivo",
+      "id": 44,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Líneas crudas de Kong, la más nueva arriba. Click en una línea para ver IP, método, ruta, status y user-agent parseados.",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "expr": "{job=\"kong\", kind=\"acceso\"} |~ `^${ip:regex}` | label_format detected_level=`{{ if eq .status_class \"5xx\" }}error{{ else if eq .status_class \"4xx\" }}warning{{ else }}info{{ end }}`",
           "legendFormat": "__auto",
-          "refId": "J",
+          "refId": "T",
           "queryType": "range"
         }
       ],
@@ -1267,20 +1671,20 @@
     {
       "type": "row",
       "title": "¿Está sano? — errores y de quién es la culpa",
-      "id": 36,
+      "id": 46,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 45
       },
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Requests por clase de código",
-      "id": 41,
+      "id": 51,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1290,7 +1694,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -1300,7 +1704,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"2..\"}[$__rate_interval]))",
           "legendFormat": "2xx OK",
-          "refId": "L",
+          "refId": "V",
           "instant": false,
           "range": true
         },
@@ -1311,7 +1715,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"3..\"}[$__rate_interval]))",
           "legendFormat": "3xx redirect",
-          "refId": "M",
+          "refId": "W",
           "instant": false,
           "range": true
         },
@@ -1322,7 +1726,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"4..\"}[$__rate_interval]))",
           "legendFormat": "4xx cliente",
-          "refId": "N",
+          "refId": "X",
           "instant": false,
           "range": true
         },
@@ -1333,7 +1737,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{code=~\"5..\"}[$__rate_interval]))",
           "legendFormat": "5xx servidor",
-          "refId": "O",
+          "refId": "Y",
           "instant": false,
           "range": true
         }
@@ -1381,7 +1785,7 @@
     {
       "type": "timeseries",
       "title": "¿Quién devolvió el error? Kong vs upstream",
-      "id": 44,
+      "id": 54,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1391,7 +1795,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -1401,7 +1805,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{source=\"kong\", code=~\"[45]..\"}[$__rate_interval]))",
           "legendFormat": "Kong (auth, rate-limit, ruta inexistente)",
-          "refId": "Q",
+          "refId": "A",
           "instant": false,
           "range": true
         },
@@ -1412,7 +1816,7 @@
           },
           "expr": "sum(rate(kong_http_requests_total{source=\"service\", code=~\"[45]..\"}[$__rate_interval]))",
           "legendFormat": "Upstream (el backend)",
-          "refId": "R",
+          "refId": "B",
           "instant": false,
           "range": true
         }
@@ -1460,7 +1864,7 @@
     {
       "type": "bargauge",
       "title": "Rutas con más errores (rango visible)",
-      "id": 46,
+      "id": 56,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1470,7 +1874,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 46
+        "y": 54
       },
       "targets": [
         {
@@ -1480,7 +1884,7 @@
           },
           "expr": "topk(10, sum by (service, route, code) (increase(kong_http_requests_total{code=~\"[45]..\"}[$__range])))",
           "legendFormat": "{{service}} · {{route}} · {{code}}",
-          "refId": "T",
+          "refId": "D",
           "instant": true,
           "range": false
         }
@@ -1529,7 +1933,7 @@
     {
       "type": "timeseries",
       "title": "Códigos de estado en detalle",
-      "id": 48,
+      "id": 58,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1539,7 +1943,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 54
       },
       "targets": [
         {
@@ -1549,7 +1953,7 @@
           },
           "expr": "sum by (code) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{code}}",
-          "refId": "V",
+          "refId": "F",
           "instant": false,
           "range": true
         }
@@ -1597,20 +2001,20 @@
     {
       "type": "row",
       "title": "¿Está rápido? — y dónde se va el tiempo",
-      "id": 49,
+      "id": 59,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 62
       },
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Latencia total del request (percentiles)",
-      "id": 53,
+      "id": 63,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1620,7 +2024,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 55
+        "y": 63
       },
       "targets": [
         {
@@ -1630,7 +2034,7 @@
           },
           "expr": "histogram_quantile(0.5, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p50",
-          "refId": "Y",
+          "refId": "I",
           "instant": false,
           "range": true
         },
@@ -1641,7 +2045,7 @@
           },
           "expr": "histogram_quantile(0.9, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p90",
-          "refId": "Z",
+          "refId": "J",
           "instant": false,
           "range": true
         },
@@ -1652,7 +2056,7 @@
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(kong_request_latency_ms_bucket[$__rate_interval])))",
           "legendFormat": "p99",
-          "refId": "A",
+          "refId": "K",
           "instant": false,
           "range": true
         }
@@ -1700,7 +2104,7 @@
     {
       "type": "timeseries",
       "title": "¿El tiempo es de Kong o del upstream?",
-      "id": 56,
+      "id": 66,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1710,7 +2114,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 63
       },
       "targets": [
         {
@@ -1720,7 +2124,7 @@
           },
           "expr": "sum(rate(kong_kong_latency_ms_sum[$__rate_interval])) / clamp_min(sum(rate(kong_kong_latency_ms_count[$__rate_interval])), 0.001)",
           "legendFormat": "Kong (plugins, routing)",
-          "refId": "C",
+          "refId": "M",
           "instant": false,
           "range": true
         },
@@ -1731,7 +2135,7 @@
           },
           "expr": "sum(rate(kong_upstream_latency_ms_sum[$__rate_interval])) / clamp_min(sum(rate(kong_upstream_latency_ms_count[$__rate_interval])), 0.001)",
           "legendFormat": "Upstream (el backend)",
-          "refId": "D",
+          "refId": "N",
           "instant": false,
           "range": true
         }
@@ -1779,7 +2183,7 @@
     {
       "type": "bargauge",
       "title": "p99 por ruta (rango visible)",
-      "id": 58,
+      "id": 68,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1789,7 +2193,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 71
       },
       "targets": [
         {
@@ -1799,7 +2203,7 @@
           },
           "expr": "topk(10, histogram_quantile(0.99, sum by (le, service, route) (rate(kong_request_latency_ms_bucket[$__range]))))",
           "legendFormat": "{{service}} · {{route}}",
-          "refId": "F",
+          "refId": "P",
           "instant": true,
           "range": false
         }
@@ -1856,20 +2260,20 @@
     {
       "type": "row",
       "title": "¿Quién lo usa?",
-      "id": 59,
+      "id": 69,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 78
       },
       "panels": []
     },
     {
       "type": "timeseries",
       "title": "Tráfico por servicio",
-      "id": 61,
+      "id": 71,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1879,7 +2283,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 79
       },
       "targets": [
         {
@@ -1889,7 +2293,7 @@
           },
           "expr": "sum by (service) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{service}}",
-          "refId": "I",
+          "refId": "S",
           "instant": false,
           "range": true
         }
@@ -1937,7 +2341,7 @@
     {
       "type": "timeseries",
       "title": "Tráfico por ruta",
-      "id": 63,
+      "id": 73,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1947,7 +2351,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 79
       },
       "targets": [
         {
@@ -1957,7 +2361,7 @@
           },
           "expr": "sum by (route) (rate(kong_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{route}}",
-          "refId": "K",
+          "refId": "U",
           "instant": false,
           "range": true
         }
@@ -2005,7 +2409,7 @@
     {
       "type": "timeseries",
       "title": "Ancho de banda",
-      "id": 65,
+      "id": 75,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2015,7 +2419,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 87
       },
       "targets": [
         {
@@ -2025,7 +2429,7 @@
           },
           "expr": "sum by (direction) (rate(kong_bandwidth_bytes[$__rate_interval]))",
           "legendFormat": "{{direction}}",
-          "refId": "M",
+          "refId": "W",
           "instant": false,
           "range": true
         }
@@ -2073,7 +2477,7 @@
     {
       "type": "bargauge",
       "title": "Requests por ruta (rango visible)",
-      "id": 67,
+      "id": 77,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -2083,7 +2487,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 87
       },
       "targets": [
         {
@@ -2093,7 +2497,7 @@
           },
           "expr": "topk(10, sum by (service, route) (increase(kong_http_requests_total[$__range])))",
           "legendFormat": "{{service}} · {{route}}",
-          "refId": "O",
+          "refId": "Y",
           "instant": true,
           "range": false
         }
@@ -2142,19 +2546,19 @@
     {
       "type": "row",
       "title": "¿Va a aguantar? — capacidad del nodo",
-      "id": 68,
+      "id": 78,
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 95
       },
       "panels": [
         {
           "type": "timeseries",
           "title": "Memoria compartida por diccionario (%)",
-          "id": 70,
+          "id": 80,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2164,7 +2568,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 88
+            "y": 96
           },
           "targets": [
             {
@@ -2174,7 +2578,7 @@
               },
               "expr": "100 * kong_memory_lua_shared_dict_bytes / kong_memory_lua_shared_dict_total_bytes",
               "legendFormat": "{{shared_dict}}",
-              "refId": "R",
+              "refId": "B",
               "instant": false,
               "range": true
             }
@@ -2222,7 +2626,7 @@
         {
           "type": "timeseries",
           "title": "Memoria Lua por worker",
-          "id": 72,
+          "id": 82,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2232,7 +2636,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 88
+            "y": 96
           },
           "targets": [
             {
@@ -2242,7 +2646,7 @@
               },
               "expr": "kong_memory_workers_lua_vms_bytes",
               "legendFormat": "worker {{pid}}",
-              "refId": "T",
+              "refId": "D",
               "instant": false,
               "range": true
             }
@@ -2290,7 +2694,7 @@
         {
           "type": "timeseries",
           "title": "Conexiones nginx por estado",
-          "id": 74,
+          "id": 84,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2300,7 +2704,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 96
+            "y": 104
           },
           "targets": [
             {
@@ -2310,7 +2714,7 @@
               },
               "expr": "sum by (state) (kong_nginx_connections_total{state=~\"active|reading|writing|waiting\"})",
               "legendFormat": "{{state}}",
-              "refId": "V",
+              "refId": "F",
               "instant": false,
               "range": true
             }
@@ -2358,7 +2762,7 @@
         {
           "type": "timeseries",
           "title": "Timers de nginx (pendientes vs corriendo)",
-          "id": 76,
+          "id": 86,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2368,7 +2772,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 96
+            "y": 104
           },
           "targets": [
             {
@@ -2378,7 +2782,7 @@
               },
               "expr": "kong_nginx_timers",
               "legendFormat": "{{state}}",
-              "refId": "X",
+              "refId": "H",
               "instant": false,
               "range": true
             }
@@ -2428,19 +2832,19 @@
     {
       "type": "row",
       "title": "Salud de los upstreams",
-      "id": 77,
+      "id": 87,
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 97
       },
       "panels": [
         {
           "type": "stat",
           "title": "Targets de los upstreams",
-          "id": 79,
+          "id": 89,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2450,7 +2854,7 @@
             "h": 6,
             "w": 12,
             "x": 0,
-            "y": 90
+            "y": 98
           },
           "targets": [
             {
@@ -2460,7 +2864,7 @@
               },
               "expr": "kong_upstream_target_health{state=\"healthy\"}",
               "legendFormat": "__auto",
-              "refId": "A",
+              "refId": "K",
               "instant": true,
               "range": false
             }
@@ -2519,7 +2923,7 @@
         {
           "type": "table",
           "title": "Detalle por estado",
-          "id": 81,
+          "id": 91,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2529,7 +2933,7 @@
             "h": 6,
             "w": 12,
             "x": 12,
-            "y": 90
+            "y": 98
           },
           "targets": [
             {
@@ -2539,7 +2943,7 @@
               },
               "expr": "kong_upstream_target_health{state!=\"healthy\"} == 1",
               "legendFormat": "{{upstream}} → {{target}}: {{state}}",
-              "refId": "C",
+              "refId": "M",
               "instant": true,
               "range": false
             }
@@ -2570,16 +2974,16 @@
     {
       "type": "text",
       "title": "Antes de sacar conclusiones",
-      "id": 82,
+      "id": 92,
       "gridPos": {
-        "h": 5,
+        "h": 6,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 99
       },
       "options": {
         "mode": "markdown",
-        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nPor eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los **logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí ve cada request de Internet. Las filas de métricas de abajo siguen describiendo la POC hasta que el plugin se habilite de forma global.\n\n**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos."
+        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nPor eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los **logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí ve cada request de Internet. Las filas de métricas de abajo siguen describiendo la POC hasta que el plugin se habilite de forma global.\n\n**Qué se hace con lo que se ve.** Wazuh correlaciona el mismo log (reglas 100200–100241) y la **100207** (10 × 404 de una IP en 2 min) dispara en SOC-L1 una **cuarentena en el FortiGate (TTL 1 h)** + ticket + correo/Teams. [Dashboard de Wazuh](https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085) con ataques por regla, IPs atacantes y país; desde los rankings por IP de arriba se salta con un click.\n\n**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos."
       }
     }
   ],

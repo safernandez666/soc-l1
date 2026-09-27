@@ -57,6 +57,10 @@ DS = {"type": "prometheus", "uid": "prometheus"}
 # Logs de acceso de Kong (Loki + Alloy en el mismo host, ver logs/). Es la unica
 # fuente que ve el trafico de Internet: el plugin de Prometheus no lo instrumenta.
 LOKI = {"type": "loki", "uid": "loki"}
+# Dashboard de OpenSearch "Kong API Gateway Monitoring" (wazuh_dashboards/build_kong_v2.py):
+# destino de los links por IP. Es el SIEM (seg-vs85-prod01).
+WAZUH_DASH_URL = ("https://192.168.38.60/app/dashboards#/view/"
+                  "55101f30-b526-11f0-b4ab-f10742cb3085")
 
 # Parseo de la linea de acceso de nginx/Kong al consultar (no como labels: IP, ruta
 # y user-agent tienen cardinalidad ilimitada y Loki se degrada si van en el indice).
@@ -252,6 +256,21 @@ def logs(title: str, expr: str, x: int, y: int, w: int = 24, h: int = 10, *,
     }
 
 
+def links_ip() -> list[dict]:
+    """Data links para los rankings por IP (frames de tabla de Loki: la IP viene como
+    columna, por eso ${__data.fields.ip} y no ${__field.labels.ip})."""
+    ip = "${__data.fields.ip}"
+    return [
+        {"title": "Filtrar el tablero a esta IP",
+         "url": f"/d/{UID}/kong-alemana?var-ip={ip}&${{__url_time_range}}",
+         "targetBlank": False},
+        {"title": "Ver en Wazuh (alertas, país, reglas)",
+         "url": (f"{WAZUH_DASH_URL}?_g=(time:(from:now-7d,to:now))"
+                 f"&_a=(query:(language:kuery,query:'data.srcip:\"{ip}\"'))"),
+         "targetBlank": True},
+    ]
+
+
 def texto(title: str, md: str, x: int, y: int, w: int = 24, h: int = 4) -> dict:
     return {
         "type": "text", "title": title, "id": nid(),
@@ -332,32 +351,53 @@ def build() -> dict:
     P.append(row("¿Qué le está pegando? — tráfico real de Internet (logs de acceso)", y))
     y += 1
     rango = f"{LOG_SEL} {LOG_RE}"
+    # Selector de 404 reutilizado por varios paneles: filtra por label (barato) y
+    # despues por el status parseado (exacto).
+    sel_404 = (f'{{job="kong", kind="acceso", status_class="4xx"}} |~ `^${{ip:regex}}` '
+               f'{LOG_RE} | status="404"')
     P.append(stat(
         "Requests de Internet", f"sum(count_over_time({LOG_SEL} [$__range])) or vector(0)",
-        0, y, w=6, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
+        0, y, w=4, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
         desc="Todas las líneas de acceso del rango visible, sin el tráfico interno de "
              "Docker (172.x: Konga, health checks). Filtrable por la variable IP.",
     ))
     P.append(stat(
         "IPs distintas", f"count(sum by (ip) (count_over_time({rango} [$__range]))) or vector(0)",
-        6, y, w=6, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
+        4, y, w=4, ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
     ))
     P.append(stat(
         "Respuestas 404",
-        f'sum(count_over_time({{job="kong", kind="acceso", status_class="4xx"}} '
-        f'|~ `^${{ip:regex}}` {LOG_RE} | status="404" [$__range])) or vector(0)',
-        12, y, w=6, ds=LOKI,
+        f"sum(count_over_time({sel_404} [$__range])) or vector(0)",
+        8, y, w=4, ds=LOKI,
         thresholds=[{"color": VERDE, "value": None}, {"color": AMBAR, "value": 100},
                     {"color": ROJO, "value": 1000}],
         desc="Rutas inexistentes. Es la materia prima de la regla Wazuh 100207 "
              "(N x 404 = enumeración), que SOC-L1 bloquea en FortiGate.",
     ))
     P.append(stat(
+        "IPs sobre el umbral de bloqueo",
+        f"count(sum by (ip) (count_over_time({sel_404} [$__range])) >= 10) or vector(0)",
+        12, y, w=4, ds=LOKI,
+        thresholds=[{"color": VERDE, "value": None}, {"color": AMBAR, "value": 1},
+                    {"color": ROJO, "value": 5}],
+        desc="IPs con 10 o más 404 en el rango visible: el mismo umbral que la regla "
+             "Wazuh 100207 (10 × 404 en 2 min), que manda la IP a cuarentena en el "
+             "FortiGate vía SOC-L1. Aproximación: la regla mira una ventana de 2 min, "
+             "este panel todo el rango, así que puede contar de más, nunca de menos.",
+    ))
+    P.append(stat(
+        "Requests 2xx (uso legítimo)",
+        f'sum(count_over_time({{job="kong", kind="acceso", status_class="2xx"}} '
+        f'|~ `^${{ip:regex}}` [$__range])) or vector(0)',
+        16, y, w=4, ds=LOKI, thresholds=[{"color": VERDE, "value": None}],
+        desc="Requests que pasaron el key-auth y llegaron al backend.",
+    ))
+    P.append(stat(
         "% respondido 2xx",
         f'100 * (sum(count_over_time({{job="kong", kind="acceso", status_class="2xx"}} '
         f'|~ `^${{ip:regex}}` [$__range])) or vector(0)) / '
         f"sum(count_over_time({LOG_SEL} [$__range]))",
-        18, y, w=6, ds=LOKI, unit="percent", decimals=1,
+        20, y, w=4, ds=LOKI, unit="percent", decimals=1,
         thresholds=[{"color": AMBAR, "value": None}, {"color": VERDE, "value": 20}],
         desc="Qué parte del tráfico es uso legítimo con API key válida. Bajo = la "
              "mayoría es ruido de scanners que Kong ya rechaza (401/404).",
@@ -385,9 +425,10 @@ def build() -> dict:
         [ltarget(f"topk(10, sum by (ip) (count_over_time({rango} [$__range])))",
                  "{{ip}}", instant=True)],
         0, y, w=8, h=9,
-        desc="Quién más le pega. Copiar la IP en la variable de arriba filtra todo el "
-             "tablero a ella.",
+        desc="Quién más le pega. Click en una barra: filtrar el tablero a esa IP, o "
+             "abrirla en el dashboard de Wazuh (alertas, país, qué reglas disparó).",
     ))
+    P[-1]["fieldConfig"]["defaults"]["links"] = links_ip()
     P.append(bargauge(
         "Rutas más buscadas con 404",
         [ltarget(f'topk(10, sum by (path) (count_over_time({rango} | status="404" '
@@ -405,6 +446,37 @@ def build() -> dict:
              "casi nunca es un cliente real de la API.",
     ))
     y += 9
+    P.append(bargauge(
+        "IPs con más 404 (candidatas a bloqueo)",
+        [ltarget(f"topk(10, sum by (ip) (count_over_time({sel_404} [$__range])))",
+                 "{{ip}}", instant=True)],
+        0, y, w=8, h=8,
+        thresholds=[{"color": AZUL, "value": None}, {"color": AMBAR, "value": 10},
+                    {"color": ROJO, "value": 50}],
+        desc="Solo 404: la señal de enumeración. Desde 10 (ámbar) la regla 100207 ya "
+             "debería haber mandado la IP a cuarentena; si sigue sumando después, la "
+             "cuarentena no la está cortando. Click: filtrar o ver en Wazuh.",
+    ))
+    P[-1]["fieldConfig"]["defaults"]["links"] = links_ip()
+    P.append(bargauge(
+        "Métodos HTTP",
+        [ltarget(f"topk(8, sum by (method) (count_over_time({rango} [$__range])))",
+                 "{{method}}", instant=True)],
+        8, y, w=8, h=8,
+        desc="GET es lo esperado. POST/PUT/DELETE/PROPFIND desde Internet contra un "
+             "gateway de solo lectura son sondeos. Un 'método' con basura adentro es "
+             "un exploit mandado como primera línea HTTP (p.ej. el downloader de Mozi).",
+    ))
+    P.append(bargauge(
+        "Rutas con 2xx (uso legítimo)",
+        [ltarget(f'topk(10, sum by (method, path) (count_over_time({{job="kong", '
+                 f'kind="acceso", status_class="2xx"}} |~ `^${{ip:regex}}` {LOG_RE} '
+                 f"[$__range])))", "{{method}} {{path}}", instant=True)],
+        16, y, w=8, h=8, thresholds=[{"color": VERDE, "value": None}],
+        desc="Lo que pasó el key-auth y llegó al backend. Vacío = nadie usó la API con "
+             "credenciales válidas en el rango, que hoy es lo normal en la POC.",
+    ))
+    y += 8
     # label_format detected_level: Loki 3 ya guarda detected_level=unknown al ingerir
     # y Grafana lo prioriza sobre `level`, por eso se pisa ese. Sin esto dice
     # "UNK" en cada linea. Se deriva de la clase de status: 4xx ambar, 5xx rojo.
@@ -584,8 +656,13 @@ def build() -> dict:
         "**logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí "
         "ve cada request de Internet. Las filas de métricas de abajo siguen describiendo "
         "la POC hasta que el plugin se habilite de forma global.\n\n"
+        "**Qué se hace con lo que se ve.** Wazuh correlaciona el mismo log (reglas "
+        "100200–100241) y la **100207** (10 × 404 de una IP en 2 min) dispara en SOC-L1 "
+        "una **cuarentena en el FortiGate (TTL 1 h)** + ticket + correo/Teams. "
+        f"[Dashboard de Wazuh]({WAZUH_DASH_URL}) con ataques por regla, IPs atacantes y país; "
+        "desde los rankings por IP de arriba se salta con un click.\n\n"
         "**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos.",
-        0, y, w=24, h=5,
+        0, y, w=24, h=6,
     ))
 
     return {
@@ -598,7 +675,9 @@ def build() -> dict:
         "timezone": "browser",
         "editable": True,
         "graphTooltip": 1,  # cursor compartido entre paneles: alinea picos a simple vista
-        "time": {"from": "now-6h", "to": "now"},
+        # 24h y no 6h: la seccion de logs es la que se mira, y un scanner tipico pega
+        # una vez por dia; en 6h la mitad de las visitas quedan fuera de la foto.
+        "time": {"from": "now-24h", "to": "now"},
         "timepicker": {
             # Prometheus retiene 15d: ofrecer 30d/90d solo invita a paneles vacios.
             "refresh_intervals": ["30s", "1m", "5m", "15m"],
@@ -625,7 +704,7 @@ def push(dash: dict) -> None:
         sys.exit("ERROR: falta GRAFANA_PASS en el entorno.")
     payload = json.dumps({
         "dashboard": dash, "overwrite": True,
-        "message": "Sección de logs de acceso (Loki): tráfico real de Internet",
+        "message": "Umbral de bloqueo, IPs con más 404, métodos, rutas 2xx y links a Wazuh",
     }).encode()
     req = urllib.request.Request(
         f"{url}/api/dashboards/db", data=payload, method="POST",
