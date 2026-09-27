@@ -40,9 +40,15 @@ WF   La regla 81620 NO es web filter: son anomalías SSL (certificate-inspection
      Los 5 paneles pasan a 81644 (bloqueo por categoría, el dato real) y 81620 va a su propia
      sección "SSL / WAF", separada. KPIs arriba.
 Kong Solo nombres (ya rearmado hoy por build_kong_v2.py).
-SQL  SRVSQLPRODA dejó de emitir 18454/18453 el 2026-07-27 10:47 (el agente sigue vivo y manda
-     Application: se apagó el login auditing de SQL Server). El tablero lo dice arriba en vez de
-     mostrar ceros sin explicación. Rango 90d para que se vea el último dato.
+SQL  SRVSQLPRODA dejó de emitir 18454/18453 (logon OK) el 2026-07-27 10:47, pero los fallidos
+     18456 (regla 61071) siguen llegando: el login auditing volvió a "Failed only". OJO: 18453 NO
+     es fallido (es logon OK por Windows auth), el tablero viejo lo contaba mal. Se agregan fallidos
+     por día y tabla de cuenta/motivo/cliente (funcionan con cualquier rango); los de exitosos dan 0
+     con menos de ~60d y el tablero lo explica arriba. Rango 90d para que se vea el último dato.
+
+Idempotente: se puede volver a correr contra el vivo. rename() guarda el título original en
+visState._orig_title (así _by_title lo encuentra) y clone() reutiliza el id si ya hay una viz con
+ese título.
 
 Se borran 10 visualizaciones huérfanas (no colgadas de ningún dashboard): copias y descartes de
 la limpieza de julio. Las 2 de VPN vuelven a usarse. Backup del estado previo en
@@ -101,6 +107,8 @@ Q_WF = "rule.id:81644"
 Q_SSLWAF = "rule.id:81620"
 Q_VPN_UP = 'data.action:"tunnel-up"'
 Q_VPN_FAIL = 'data.action:"ssl-login-fail"'
+Q_SQL = "rule.id:(61071 OR 61072)"        # logon fallido (18456) + logon OK (18454/18453)
+Q_SQL_FAIL = "rule.id:61071"
 
 
 # ------------------------------------------------------------------ infra ----
@@ -165,6 +173,8 @@ class Builder:
 
     def rename(self, vid: str, title: str, desc: str | None = None) -> str:
         v = self.vis(vid); vs = self.state(v)
+        # guarda el título original: así _by_title lo encuentra al re-correr contra el vivo
+        vs.setdefault("_orig_title", self.objs[vid]["attributes"]["title"])
         vs["title"] = title; v["attributes"]["title"] = title
         if desc is not None:
             v["attributes"]["description"] = desc
@@ -185,7 +195,10 @@ class Builder:
     def clone(self, tpl: str, title: str, query: str, aggs: list[dict], *,
               desc: str = "", params: dict | None = None) -> str:
         nuevo = copy.deepcopy(self.objs[tpl])
-        nuevo["id"] = str(uuid.uuid4())
+        # si el vivo ya tiene una viz con este título (re-run), se pisa en lugar de duplicarla
+        previo = next((k for k, o in self.objs.items()
+                       if o.get("type") == "visualization" and o["attributes"]["title"] == title), None)
+        nuevo["id"] = previo or str(uuid.uuid4())
         nuevo.pop("version", None); nuevo.pop("updated_at", None)
         vs = json.loads(nuevo["attributes"]["visState"])
         vs["title"] = title; vs["aggs"] = aggs
@@ -279,7 +292,7 @@ def build_ad(b: Builder) -> None:
     P = "AD"
     kpi_hdr = b.markdown(f"{P} · § Resumen",
                          "### 🛡️ Active Directory — resumen (rango por defecto: 30 días)",
-                         existing=next(k for k, v in b.objs.items() if v.get("attributes", {}).get("title") == "ad-hdr-kpi"))
+                         existing=_by_title(b, "ad-hdr-kpi"))
     auth_hdr = hdr(b, P, "🔐 Autenticación", existing=_by_title(b, "ad-hdr-auth"))
     acct_hdr = hdr(b, P, "👤 Gestión de cuentas y grupos", existing=_by_title(b, "ad-hdr-acct"))
     crit_hdr = hdr(b, P, "🚨 Eventos críticos / ataque", existing=_by_title(b, "ad-hdr-crit"))
@@ -428,7 +441,8 @@ def build_vpn(b: Builder) -> None:
     top20 = b.rename(_by_title(b, "VPN-Gen-Top20Usuarios"), f"{P} · Usuarios con más conexiones")
     tabla = b.rename(_by_title(b, "VPN-Gen-TablaUsuarios"), f"{P} · Usuarios: conexiones, IPs, países, última vez")
     fail_t = b.edit(b.rename(_by_title(b, "VPN - Logins Fallidos SSL"), f"{P} · Logins fallidos por usuario, IP y motivo"),
-                    lambda vs: vs["aggs"].append(terms("9", "data.reason", 2, "Motivo")))
+                    lambda vs: vs["aggs"].append(terms("9", "data.reason", 2, "Motivo"))
+                    if not any(a.get("id") == "9" for a in vs["aggs"]) else None)  # idempotente en re-run
     fail_tl = b.edit(b.rename(_by_title(b, "VPN - Logins Fallidos Timeline"), f"{P} · Logins fallidos por día"), a_barras)
     updown = b.rename(_by_title(b, "VPN - Tuneles Up vs Down"), f"{P} · Túneles arriba vs abajo")
     multi_ip = b.setq(b.rename(V_VPN_MULTI_IP, f"{P} · Usuarios con varias IPs de origen"), Q_VPN_UP)
@@ -530,39 +544,65 @@ def build_kong(b: Builder) -> None:
 # ================================================================ SQL =========
 def build_sql(b: Builder) -> None:
     P = "SQL"
-    top = b.rename(_by_title(b, "SQL Top IPs"), f"{P} · IPs de origen (logons)")
-    ok = b.rename(_by_title(b, "SQL - Logons Exitosos"), f"{P} · Logons exitosos (18454)")
-    fail = b.rename(_by_title(b, "SQL - Logons Fallidos"), f"{P} · Logons fallidos (18453)")
-    tl = b.rename(_by_title(b, "SQL - Logons Timeline"), f"{P} · Logons por día (exitosos vs fallidos)")
-    sa = b.rename(_by_title(b, "SQL - Accesos con sa"), f"{P} · Accesos con 'sa' (IP cliente)")
-    aviso = b.markdown(f"{P} · § Estado de la fuente", """### ⚠️ Sin datos nuevos desde el 2026-07-27 10:47
-`SRVSQLPRODA` **dejó de emitir los eventos 18454/18453** (logon exitoso/fallido de SQL Server) ese día. El agente
-Wazuh sigue vivo y manda el canal *Application* (proveedor `MSSQLSERVER` sigue apareciendo), así que no es el agente:
-**se apagó el *Login auditing* en el SQL Server** (Propiedades del servidor → Seguridad → *Both failed and successful
-logins*). Hasta que se reactive, este tablero muestra el último período con datos (rango por defecto: 90 días).""")
-    nota = b.markdown(f"{P} · Cómo leer este tablero", """### Cómo leer este tablero
-**Fuente.** Application log de `SRVSQLPRODA`, proveedor `MSSQLSERVER`, regla Wazuh **61072** sobre los Event IDs
-**18454** (logon OK) y **18453** (logon fallido). La IP cliente viene dentro de `data.win.eventdata.data`
-(`usuario, [CLIENTE: ip]`), por eso el ranking muestra ese campo tal cual.
+    top = b.setq(b.rename(_by_title(b, "SQL Top IPs"), f"{P} · IPs de origen (logons OK y fallidos)"), Q_SQL)
+    ok = b.setq(b.rename(_by_title(b, "SQL - Logons Exitosos"), f"{P} · Logons OK por SQL auth (18454)"),
+                'data.win.system.eventID:"18454"')
+    okw = b.clone(T_METRIC, f"{P} · Logons OK por Windows auth (18453)", 'data.win.system.eventID:"18453"',
+                  [count("Logons OK (Windows)")])
+    fail = b.setq(b.rename(_by_title(b, "SQL - Logons Fallidos"), f"{P} · Logons fallidos (18456)"),
+                  'data.win.system.eventID:"18456"')
+    tl = b.setq(b.rename(_by_title(b, "SQL - Logons Timeline"),
+                         f"{P} · Logons por día (18454 SQL auth / 18453 Windows / 18456 fallido)"), Q_SQL)
+    fail_tl = b.clone(T_BARS, f"{P} · Logons fallidos por día (18456)", Q_SQL_FAIL,
+                      [count("Fallidos"), por_dia("2")],
+                      desc="Regla 61071. Sigue llegando aunque el auditing de exitosos esté apagado.")
+    fail_t = b.clone(T_TABLE, f"{P} · Logons fallidos: cuenta, motivo y cliente", Q_SQL_FAIL,
+                     [count("Intentos"), maxdate("3"), terms("2", "data.win.eventdata.data", 15, "Cuenta, motivo, [CLIENTE: ip]")],
+                     params={"perPage": 15})
+    sa = b.setq(b.rename(_by_title(b, "SQL - Accesos con sa"), f"{P} · Accesos con 'sa' (OK y fallidos, IP cliente)"),
+                Q_SQL + " AND data.win.eventdata.data:sa*")
+    aviso = b.markdown(f"{P} · § Estado de la fuente", """### ⚠️ Sin logons exitosos desde el 2026-07-27 10:47
+`SRVSQLPRODA` **dejó de emitir 18454/18453** (logon exitoso por SQL auth / Windows auth) ese día. Los **fallidos (18456)
+siguen llegando**, así que el agente está bien: el *Login auditing* del SQL Server volvió al valor por defecto
+(*Failed logins only*) en vez de *Both failed and successful logins* (Propiedades del servidor → Seguridad). Avisar al DBA.
 
-**Para qué sirve.** Ver quién entra a la base y desde dónde. El hallazgo de julio: **`sa` era ~78% de los logons**,
-desde 192.168.38.27 y 10.3.50.36 entre otros. Mala práctica: migrar a cuentas de servicio y deshabilitar `sa` por red.
+**Por eso, con un rango menor a ~60 días los paneles de exitosos y de `sa` dan 0**: no es un error del tablero, no hay
+datos. El rango por defecto es 90 días para que se vea el último período con datos; a partir del 25/10 tampoco alcanza.
+Los paneles de **fallidos** sí funcionan con cualquier rango.""")
+    nota = b.markdown(f"{P} · Cómo leer este tablero", """### Cómo leer este tablero
+**Fuente.** Application log de `SRVSQLPRODA`, proveedor `MSSQLSERVER`. Regla Wazuh **61072** = logon OK
+(**18454** SQL auth, **18453** Windows auth) y **61071** = logon fallido (**18456**, trae el motivo). La IP cliente
+viene dentro de `data.win.eventdata.data` (`usuario, [CLIENTE: ip]`), por eso los rankings muestran ese campo tal cual.
+
+**Para qué sirve.** Ver quién entra a la base y desde dónde, y quién falla y por qué. El hallazgo de julio: **`sa` era
+~78% de los logons**, desde 192.168.38.27 y 10.3.50.36 entre otros. Mala práctica: migrar a cuentas de servicio y
+deshabilitar `sa` por red. En los fallidos, `sa` con contraseña inválida desde *local machine* = algo en el propio
+servidor con credenciales viejas.
 
 *Unificado 2026-09-27 (`wazuh_dashboards/build_unify.py`).*""")
     y = 0
-    L = [(aviso, 0, y, 48, 6, True)]; y += 6
-    L += [(ok, 0, y, 12, 8), (fail, 12, y, 12, 8), (tl, 24, y, 24, 8)]; y += 8
+    L = [(aviso, 0, y, 48, 7, True)]; y += 7
+    L += [(ok, 0, y, 8, 8), (okw, 8, y, 8, 8), (fail, 16, y, 8, 8), (tl, 24, y, 24, 8)]; y += 8
+    L += [(fail_tl, 0, y, 24, 10), (fail_t, 24, y, 24, 10)]; y += 10
     L += [(top, 0, y, 24, 16), (sa, 24, y, 24, 16)]; y += 16
-    L += [(nota, 0, y, 48, 8)]
+    L += [(nota, 0, y, 48, 9)]
     b.dashboard(D_SQL, "SOC · SQL Server",
-                "Accesos a MS SQL Server (SRVSQLPRODA): logons exitosos/fallidos, IPs de origen y uso de 'sa'. "
-                "SIN DATOS desde 2026-07-27 (login auditing apagado). Unificado 2026-09-27.", L, time_from="now-90d")
+                "Accesos a MS SQL Server (SRVSQLPRODA): logons OK (18454/18453) y fallidos (18456), IPs de origen y uso "
+                "de 'sa'. Exitosos SIN DATOS desde 2026-07-27 (login auditing en 'Failed only'). Unificado 2026-09-27.",
+                L, time_from="now-90d")
 
 
 def _by_title(b: Builder, title: str) -> str:
     for k, v in b.objs.items():
-        if v.get("type") == "visualization" and v["attributes"]["title"] == title:
+        if v.get("type") != "visualization":
+            continue
+        if v["attributes"]["title"] == title:
             return k
+        try:  # re-run contra el vivo: la viz ya fue renombrada, matchea por el título original
+            if json.loads(v["attributes"]["visState"]).get("_orig_title") == title:
+                return k
+        except (ValueError, KeyError):
+            pass
     sys.exit(f"ERROR: no encontré la visualización {title!r} en el export")
 
 
@@ -579,6 +619,28 @@ def main() -> int:
             o = json.loads(linea)
             if "type" in o and "id" in o:
                 objs[o["id"]] = o
+    # Primer re-run contra un vivo ya unificado (27/09) que todavía no guarda _orig_title:
+    # se siembra desde el export previo a la unificación (los ids renombrados son los mismos).
+    pre = BASE / "original" / "export_all_pre_unify_20260927.ndjson"
+    if pre.exists():
+        sembrados = 0
+        for linea in pre.read_text(encoding="utf-8").splitlines():
+            if not linea.strip():
+                continue
+            o = json.loads(linea)
+            if o.get("type") != "visualization" or o["id"] not in objs:
+                continue
+            vivo = objs[o["id"]]
+            try:
+                vs = json.loads(vivo["attributes"]["visState"])
+            except (ValueError, KeyError):
+                continue
+            if "_orig_title" not in vs and vivo["attributes"]["title"] != o["attributes"]["title"]:
+                vs["_orig_title"] = o["attributes"]["title"]
+                vivo["attributes"]["visState"] = json.dumps(vs, ensure_ascii=False)
+                sembrados += 1
+        if sembrados:
+            print(f"títulos originales sembrados desde {pre.name}: {sembrados}")
     b = Builder(objs)
     build_ad(b); build_ips(b); build_vpn(b); build_wf(b); build_kong(b); build_sql(b)
 
