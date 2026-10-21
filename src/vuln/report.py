@@ -70,8 +70,9 @@ def render_coverage_notice(cov: dict) -> str:
             f"activos y reportan paquetes y hotfixes, pero el detector no genera datos para ellos, "
             f"as&iacute; que no aparecen en este reporte: {escape(', '.join(sin[:10]))}."
         )
+    caso = "En ambos casos el problema est&aacute;" if desf and sin else "El problema est&aacute;"
     partes.append(
-        "En ambos casos el problema est&aacute; en el detector de Wazuh, no en los datos que env&iacute;an "
+        f"{caso} en el detector de Wazuh, no en los datos que env&iacute;an "
         "los agentes. Los totales de abajo deben leerse con esa salvedad."
     )
 
