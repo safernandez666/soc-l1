@@ -59,7 +59,7 @@ DS = {"type": "prometheus", "uid": "prometheus"}
 LOKI = {"type": "loki", "uid": "loki"}
 # Dashboard de OpenSearch "Kong API Gateway Monitoring" (wazuh_dashboards/build_kong_v2.py):
 # destino de los links por IP. Es el SIEM (seg-vs85-prod01).
-WAZUH_DASH_URL = ("https://192.168.38.60/app/dashboards#/view/"
+WAZUH_DASH_URL = ("https://siem.grupoalemana.com/app/dashboards#/view/"
                   "55101f30-b526-11f0-b4ab-f10742cb3085")
 
 # Parseo de la linea de acceso de nginx/Kong al consultar (no como labels: IP, ruta
@@ -301,8 +301,11 @@ def build() -> dict:
              "pero no toma cambios nuevos.",
     ))
     P.append(stat(
-        "RPS (5m)", "sum(rate(kong_http_requests_total[5m])) or vector(0)", 6, y, w=3,
+        "RPS en rutas (5m)", "sum(rate(kong_http_requests_total[5m])) or vector(0)", 6, y, w=3,
         unit="reqps", decimals=2,
+        desc="Solo requests que matchearon una ruta (uso del API). Prometheus NO cuenta "
+             "los 404 sin ruta, que es casi todo lo que llega de Internet (scanners): "
+             "para eso mirar 'Internet (5m)' y la sección de logs de acceso.",
     ))
     P.append(stat(
         "Error 5xx (5m)",
@@ -337,11 +340,20 @@ def build() -> dict:
              "siempre, el limite esta muy alto para servir de algo.",
     ))
     P.append(stat(
-        "Conexiones activas",
-        'sum(kong_nginx_connections_total{state="active"}) or vector(0)', 18, y, w=3,
+        "Conexiones de clientes",
+        'clamp_min(sum(kong_nginx_connections_total{state="active"}) '
+        '- count(kong_memory_workers_lua_vms_bytes) - 1, 0) or vector(0)', 18, y, w=3,
+        desc="Conexiones activas de nginx MENOS el piso interno: cada worker de Kong "
+             "mantiene una conexión fija al socket de eventos (/usr/local/kong/sockets/we) "
+             "y el scrape de Prometheus suma otra. Sin restar, en reposo marca 5 "
+             "(4 workers + scrape) sin ningún cliente.",
     ))
     P.append(stat(
-        "Nodos Kong", 'count(up{job="kong"} == 1) or vector(0)', 21, y, w=3,
+        "Internet (5m)",
+        'sum(count_over_time({job="kong", kind="acceso"} [5m])) or vector(0)', 21, y, w=3,
+        ds=LOKI, thresholds=[{"color": AZUL, "value": None}],
+        desc="Requests que llegaron al gateway en los últimos 5 min según el log de "
+             "acceso, con o sin ruta. Es el número que Prometheus no ve.",
     ))
     y += 4
 
@@ -596,6 +608,59 @@ def build() -> dict:
     ))
     y += 8
 
+    # ------------------------------------------------------------ 4b. consumidor --
+    # Requiere per_consumer=true en el plugin prometheus (activado 21/10). Solo ve requests
+    # que pasaron key-auth: scanners y 401 no tienen consumidor. La latencia NO se etiqueta
+    # por consumidor en Kong, por eso no hay panel de latencia aca.
+    P.append(row("¿Quién lo usa? — por consumidor", y)); y += 1
+    cons = 'consumer!=""'
+    P.append(ts(
+        "Tráfico por consumidor",
+        [target(f"sum by (consumer) (rate(kong_http_requests_total{{{cons}}}[$__rate_interval]))",
+                "{{consumer}}")],
+        0, y, w=12, unit="reqps", stack=True,
+        desc="Requests/s por consumidor de Kong (key-auth). Solo cuenta requests que "
+             "presentaron una key valida; los scanners (sin key) no aparecen aca.",
+    ))
+    P.append(ts(
+        "Errores por consumidor (4xx/5xx)",
+        [target("sum by (consumer, code) "
+                f'(rate(kong_http_requests_total{{{cons},code=~"[45].."}}[$__rate_interval]))',
+                "{{consumer}} · {{code}}")],
+        12, y, w=12, unit="reqps",
+        desc="Que consumidor recibe errores y de que tipo. Un 401 del backend (Bearer) "
+             "es normal antes del login ERP; un 429 es rate-limit.",
+    ))
+    y += 8
+    P.append(bargauge(
+        "Requests por consumidor (rango visible)",
+        [target(f"topk(10, sum by (consumer) (increase(kong_http_requests_total{{{cons}}}[$__range])))",
+                "{{consumer}}", instant=True)],
+        0, y, w=8,
+    ))
+    P.append(ts(
+        "Ancho de banda por consumidor",
+        [target(f"sum by (consumer, direction) (rate(kong_bandwidth_bytes{{{cons}}}[$__rate_interval]))",
+                "{{consumer}} · {{direction}}")],
+        8, y, w=16, unit="Bps",
+    ))
+    y += 8
+    tgt = target(f"sum by (consumer, service, route, code) "
+                 f"(increase(kong_http_requests_total{{{cons}}}[$__range]))", instant=True)
+    tgt["format"] = "table"
+    P.append(table(
+        "Consumidor × servicio × ruta (rango visible)", [tgt], 0, y, w=24, h=9,
+        desc="Detalle completo de uso: quien llamo a que servicio y ruta, con que codigo.",
+        transformations=[
+            {"id": "organize", "options": {
+                "excludeByName": {"Time": True},
+                "renameByName": {"consumer": "Consumidor", "service": "Servicio",
+                                 "route": "Ruta", "code": "Código", "Value": "Requests"}}},
+            {"id": "sortBy", "options": {"sort": [{"field": "Requests", "desc": True}]}},
+        ],
+    ))
+    y += 9
+
     # ------------------------------------------------------------ 5. capacidad --
     P.append(row("¿Va a aguantar? — capacidad del nodo", y, collapsed=True)); y += 1
     cap = [
@@ -611,7 +676,9 @@ def build() -> dict:
         ts("Conexiones nginx por estado",
            [target('sum by (state) (kong_nginx_connections_total{state=~"active|reading|writing|waiting"})',
                    "{{state}}")],
-           0, y + 8, w=12),
+           0, y + 8, w=12,
+           desc="Piso en reposo: active=5, writing=5 (4 workers conectados al socket de "
+                "eventos + el scrape). Lo que suba por encima de eso son clientes."),
         ts("Timers de nginx (pendientes vs corriendo)",
            [target("kong_nginx_timers", "{{state}}")],
            12, y + 8, w=12,
@@ -697,14 +764,14 @@ def build() -> dict:
 
 
 def push(dash: dict) -> None:
-    url = os.environ.get("GRAFANA_URL", "http://192.168.38.62:3000")
+    url = os.environ.get("GRAFANA_URL", "https://monitoring.grupoalemana.com")
     user = os.environ.get("GRAFANA_USER", "admin")
     pw = os.environ.get("GRAFANA_PASS")
     if not pw:
         sys.exit("ERROR: falta GRAFANA_PASS en el entorno.")
     payload = json.dumps({
         "dashboard": dash, "overwrite": True,
-        "message": "Umbral de bloqueo, IPs con más 404, métodos, rutas 2xx y links a Wazuh",
+        "message": os.environ.get("GRAFANA_MSG", "build_kong_dashboard.py"),
     }).encode()
     req = urllib.request.Request(
         f"{url}/api/dashboards/db", data=payload, method="POST",
@@ -736,6 +803,10 @@ def main() -> int:
 
     if args.push:
         push(dash)
+        # El host re-aprovisiona este uid desde un archivo al reiniciar Grafana: si no
+        # se actualiza, el próximo restart revierte lo que se acaba de subir (13/10).
+        print("   OJO: copiar tambien el JSON a seg-vs85-prod02:"
+              "~/kong-setup/grafana/provisioning/dashboards/kong-alemana.json")
     return 0
 
 

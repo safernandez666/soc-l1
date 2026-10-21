@@ -194,13 +194,13 @@
     },
     {
       "type": "stat",
-      "title": "RPS (5m)",
+      "title": "RPS en rutas (5m)",
       "id": 6,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "Solo requests que matchearon una ruta (uso del API). Prometheus NO cuenta los 404 sin ruta, que es casi todo lo que llega de Internet (scanners): para eso mirar 'Internet (5m)' y la sección de logs de acceso.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -462,13 +462,13 @@
     },
     {
       "type": "stat",
-      "title": "Conexiones activas",
+      "title": "Conexiones de clientes",
       "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "Conexiones activas de nginx MENOS el piso interno: cada worker de Kong mantiene una conexión fija al socket de eventos (/usr/local/kong/sockets/we) y el scrape de Prometheus suma otra. Sin restar, en reposo marca 5 (4 workers + scrape) sin ningún cliente.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -481,7 +481,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(kong_nginx_connections_total{state=\"active\"}) or vector(0)",
+          "expr": "clamp_min(sum(kong_nginx_connections_total{state=\"active\"}) - count(kong_memory_workers_lua_vms_bytes) - 1, 0) or vector(0)",
           "legendFormat": "__auto",
           "refId": "N",
           "instant": true,
@@ -525,13 +525,13 @@
     },
     {
       "type": "stat",
-      "title": "Nodos Kong",
+      "title": "Internet (5m)",
       "id": 16,
       "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
+        "type": "loki",
+        "uid": "loki"
       },
-      "description": "",
+      "description": "Requests que llegaron al gateway en los últimos 5 min según el log de acceso, con o sin ruta. Es el número que Prometheus no ve.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -541,14 +541,13 @@
       "targets": [
         {
           "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
+            "type": "loki",
+            "uid": "loki"
           },
-          "expr": "count(up{job=\"kong\"} == 1) or vector(0)",
+          "expr": "sum(count_over_time({job=\"kong\", kind=\"acceso\"} [5m])) or vector(0)",
           "legendFormat": "__auto",
           "refId": "P",
-          "instant": true,
-          "range": false
+          "queryType": "instant"
         }
       ],
       "options": {
@@ -577,7 +576,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
               }
             ]
@@ -1204,7 +1203,7 @@
             },
             {
               "title": "Ver en Wazuh (alertas, país, reglas)",
-              "url": "https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
+              "url": "https://siem.grupoalemana.com/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
               "targetBlank": true
             }
           ]
@@ -1464,7 +1463,7 @@
             },
             {
               "title": "Ver en Wazuh (alertas, país, reglas)",
-              "url": "https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
+              "url": "https://siem.grupoalemana.com/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085?_g=(time:(from:now-7d,to:now))&_a=(query:(language:kuery,query:'data.srcip:\"${__data.fields.ip}\"'))",
               "targetBlank": true
             }
           ]
@@ -2545,20 +2544,383 @@
     },
     {
       "type": "row",
-      "title": "¿Va a aguantar? — capacidad del nodo",
+      "title": "¿Quién lo usa? — por consumidor",
       "id": 78,
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 95
       },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Tráfico por consumidor",
+      "id": 80,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Requests/s por consumidor de Kong (key-auth). Solo cuenta requests que presentaron una key valida; los scanners (sin key) no aparecen aca.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumer) (rate(kong_http_requests_total{consumer!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{consumer}}",
+          "refId": "B",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errores por consumidor (4xx/5xx)",
+      "id": 82,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Que consumidor recibe errores y de que tipo. Un 401 del backend (Bearer) es normal antes del login ERP; un 429 es rate-limit.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumer, code) (rate(kong_http_requests_total{consumer!=\"\",code=~\"[45]..\"}[$__rate_interval]))",
+          "legendFormat": "{{consumer}} · {{code}}",
+          "refId": "D",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Requests por consumidor (rango visible)",
+      "id": 84,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 104
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "topk(10, sum by (consumer) (increase(kong_http_requests_total{consumer!=\"\"}[$__range])))",
+          "legendFormat": "{{consumer}}",
+          "refId": "F",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false,
+          "fields": ""
+        },
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 10,
+        "maxVizHeight": 26,
+        "namePlacement": "left",
+        "sizing": "manual",
+        "text": {
+          "valueSize": 18,
+          "titleSize": 12
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Ancho de banda por consumidor",
+      "id": 86,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 104
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumer, direction) (rate(kong_bandwidth_bytes{consumer!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{consumer}} · {{direction}}",
+          "refId": "H",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Consumidor × servicio × ruta (rango visible)",
+      "id": 88,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Detalle completo de uso: quien llamo a que servicio y ruta, con que codigo.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumer, service, route, code) (increase(kong_http_requests_total{consumer!=\"\"}[$__range]))",
+          "legendFormat": "__auto",
+          "refId": "J",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "consumer": "Consumidor",
+              "service": "Servicio",
+              "route": "Ruta",
+              "code": "Código",
+              "Value": "Requests"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Requests",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "¿Va a aguantar? — capacidad del nodo",
+      "id": 89,
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 121
+      },
       "panels": [
         {
           "type": "timeseries",
           "title": "Memoria compartida por diccionario (%)",
-          "id": 80,
+          "id": 91,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2568,7 +2930,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 96
+            "y": 122
           },
           "targets": [
             {
@@ -2578,7 +2940,7 @@
               },
               "expr": "100 * kong_memory_lua_shared_dict_bytes / kong_memory_lua_shared_dict_total_bytes",
               "legendFormat": "{{shared_dict}}",
-              "refId": "B",
+              "refId": "M",
               "instant": false,
               "range": true
             }
@@ -2626,7 +2988,7 @@
         {
           "type": "timeseries",
           "title": "Memoria Lua por worker",
-          "id": 82,
+          "id": 93,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2636,7 +2998,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 96
+            "y": 122
           },
           "targets": [
             {
@@ -2646,7 +3008,7 @@
               },
               "expr": "kong_memory_workers_lua_vms_bytes",
               "legendFormat": "worker {{pid}}",
-              "refId": "D",
+              "refId": "O",
               "instant": false,
               "range": true
             }
@@ -2694,17 +3056,17 @@
         {
           "type": "timeseries",
           "title": "Conexiones nginx por estado",
-          "id": 84,
+          "id": 95,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "description": "",
+          "description": "Piso en reposo: active=5, writing=5 (4 workers conectados al socket de eventos + el scrape). Lo que suba por encima de eso son clientes.",
           "gridPos": {
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 104
+            "y": 130
           },
           "targets": [
             {
@@ -2714,7 +3076,7 @@
               },
               "expr": "sum by (state) (kong_nginx_connections_total{state=~\"active|reading|writing|waiting\"})",
               "legendFormat": "{{state}}",
-              "refId": "F",
+              "refId": "Q",
               "instant": false,
               "range": true
             }
@@ -2762,7 +3124,7 @@
         {
           "type": "timeseries",
           "title": "Timers de nginx (pendientes vs corriendo)",
-          "id": 86,
+          "id": 97,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2772,7 +3134,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 104
+            "y": 130
           },
           "targets": [
             {
@@ -2782,7 +3144,7 @@
               },
               "expr": "kong_nginx_timers",
               "legendFormat": "{{state}}",
-              "refId": "H",
+              "refId": "S",
               "instant": false,
               "range": true
             }
@@ -2832,19 +3194,19 @@
     {
       "type": "row",
       "title": "Salud de los upstreams",
-      "id": 87,
+      "id": 98,
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 97
+        "y": 123
       },
       "panels": [
         {
           "type": "stat",
           "title": "Targets de los upstreams",
-          "id": 89,
+          "id": 100,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2854,7 +3216,7 @@
             "h": 6,
             "w": 12,
             "x": 0,
-            "y": 98
+            "y": 124
           },
           "targets": [
             {
@@ -2864,7 +3226,7 @@
               },
               "expr": "kong_upstream_target_health{state=\"healthy\"}",
               "legendFormat": "__auto",
-              "refId": "K",
+              "refId": "V",
               "instant": true,
               "range": false
             }
@@ -2923,7 +3285,7 @@
         {
           "type": "table",
           "title": "Detalle por estado",
-          "id": 91,
+          "id": 102,
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2933,7 +3295,7 @@
             "h": 6,
             "w": 12,
             "x": 12,
-            "y": 98
+            "y": 124
           },
           "targets": [
             {
@@ -2943,7 +3305,7 @@
               },
               "expr": "kong_upstream_target_health{state!=\"healthy\"} == 1",
               "legendFormat": "{{upstream}} → {{target}}: {{state}}",
-              "refId": "M",
+              "refId": "X",
               "instant": true,
               "range": false
             }
@@ -2974,16 +3336,16 @@
     {
       "type": "text",
       "title": "Antes de sacar conclusiones",
-      "id": 92,
+      "id": 103,
       "gridPos": {
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 99
+        "y": 125
       },
       "options": {
         "mode": "markdown",
-        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nPor eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los **logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí ve cada request de Internet. Las filas de métricas de abajo siguen describiendo la POC hasta que el plugin se habilite de forma global.\n\n**Qué se hace con lo que se ve.** Wazuh correlaciona el mismo log (reglas 100200–100241) y la **100207** (10 × 404 de una IP en 2 min) dispara en SOC-L1 una **cuarentena en el FortiGate (TTL 1 h)** + ticket + correo/Teams. [Dashboard de Wazuh](https://192.168.38.60/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085) con ataques por regla, IPs atacantes y país; desde los rankings por IP de arriba se salta con un click.\n\n**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos."
+        "content": "**El plugin de Prometheus no está viendo el tráfico de Internet.** Verificado el 2026-09-21: en 30 días hay **49 requests** en total, todos de `httpbin-service` y `admin-api` (los servicios de prueba de la POC), y **cero 404 históricos**. En el mismo período Wazuh registró **2.041 alertas de enumeración** (regla 100207) y **23.157 de 404**, desde **71 IPs distintas**.\n\nPor eso el tráfico real de `gateway.grupoalemana.com` se muestra desde los **logs de acceso** (sección *¿Qué le está pegando?*, datasource Loki): esa sí ve cada request de Internet. Las filas de métricas de abajo siguen describiendo la POC hasta que el plugin se habilite de forma global.\n\n**Qué se hace con lo que se ve.** Wazuh correlaciona el mismo log (reglas 100200–100241) y la **100207** (10 × 404 de una IP en 2 min) dispara en SOC-L1 una **cuarentena en el FortiGate (TTL 1 h)** + ticket + correo/Teams. [Dashboard de Wazuh](https://siem.grupoalemana.com/app/dashboards#/view/55101f30-b526-11f0-b4ab-f10742cb3085) con ataques por regla, IPs atacantes y país; desde los rankings por IP de arriba se salta con un click.\n\n**Retención: 15 días** en Prometheus y en Loki. Rangos mayores salen vacíos."
       }
     }
   ],
