@@ -134,7 +134,10 @@ def main():
     if a.insecure:
         ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
     base = a.base.rstrip("/")
-    h = {"Host": a.host_header} if a.host_header else {}
+    # El borde (FortiGate) responde 403 al UA por defecto de urllib ("Python-urllib/3.x"): hay que mandar uno propio.
+    h = {"User-Agent": "probar-kong-ordenes/1.0"}
+    if a.host_header:
+        h["Host"] = a.host_header
     hk = {**h, "apikey": key}
     resultados = []  # (ok, que comprueba)
 
