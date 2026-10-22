@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--upstream", default="http://172.16.1.35:8080",
                     help="backend; cambiar a https://...:443 cuando Matias migre")
     ap.add_argument("--preserve-host", action="store_true", help="mandar el Host publico al backend")
+    ap.add_argument("--no-key", action="store_true", help="no crear API key (se emite a mano, fuera de este log)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rollback", action="store_true")
     a = ap.parse_args()
@@ -124,6 +125,8 @@ def main():
         "retries": 0,             # no reintentar: las escrituras no son idempotentes
         "tags": [TAG],
     }
+    if proto == "https":
+        service["tls_verify"] = True   # wildcard Sectigo publico; el SNI sale del host del servicio
 
     if not dry:
         backup(k)
@@ -178,6 +181,8 @@ def main():
     keys = (k.get(f"/consumers/{CONSUMER}/key-auth") or {}).get("data", [])
     if keys:
         print("  = igual   ya tiene API key (no se vuelve a mostrar; para rotar: --rollback y reaplicar)")
+    elif a.no_key:
+        print("  - omitido API key (--no-key)")
     else:
         print("  + crear   API key")
         if not dry:
