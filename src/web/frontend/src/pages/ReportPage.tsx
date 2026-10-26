@@ -107,7 +107,7 @@ export function ReportPage() {
                   />
                   <div className="text-right">
                     <div className="text-sm font-semibold">Informe de caso</div>
-                    <div className="text-xs text-zinc-400">SOC-L1 · ZebraSecurity</div>
+                    <div className="text-xs text-zinc-400">zSOC · ZebraSecurity</div>
                   </div>
                 </header>
 
@@ -236,7 +236,7 @@ export function ReportPage() {
                   </Section>
 
                   <footer className="mt-8 border-t border-zinc-200 pt-3 text-[11px] text-zinc-400">
-                    Generado por SOC-L1 · ZebraSecurity — {new Date().toLocaleString("es-AR")}
+                    Generado por zSOC · ZebraSecurity — {new Date().toLocaleString("es-AR")}
                   </footer>
                 </div>
               </>

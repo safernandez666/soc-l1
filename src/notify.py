@@ -50,16 +50,18 @@ async def notify_case_closure(
         invgate_request_id=invgate_request_id,
     )
 
-    # FUTURO (hook Teams): cuando exista src/teams.py y el webhook esté configurado:
-    # if settings.teams_webhook_url:
-    #     from src.teams import send_teams_closure
-    #     await send_teams_closure(
-    #         settings, alert, plan, decision=decision,
-    #         timeline_events=timeline_events, execution_results=execution_results,
-    #     )
+    # Hook Teams (Fase 1): si el webhook está configurado, notifica el cierre por Teams.
+    # Fire-and-forget: send_teams_closure jamás propaga.
     if settings.teams_webhook_url:
-        logger.info(
-            "notify: teams_webhook_url configurado pero Teams aún no implementado "
-            "(alert=%s) - solo email enviado",
-            alert.alert_id,
+        from src.teams import send_teams_closure
+
+        await send_teams_closure(
+            settings, alert, plan,
+            decision=decision,
+            timeline_events=timeline_events,
+            execution_results=execution_results,
+            decided_by_ip=decided_by_ip,
+            decided_at=decided_at,
+            executed_at=executed_at,
+            invgate_request_id=invgate_request_id,
         )

@@ -342,3 +342,177 @@ async def test_enforce_dedup_no_rebloquea(fgt_alert: dict, tmp_path: Path) -> No
     # JSONL: solo el primer bloqueo quedó registrado
     lines = (tmp_path / "fgt_observations.jsonl").read_text().splitlines()
     assert len(lines) == 1
+
+
+# ===== Modo sombra por regla (fortigate_observe_only_rules) =====
+#
+# Estrena una familia de reglas nueva sin darle el gatillo: la enumeración de Kong
+# (100207) es correlación de N×404 nivel 8, no una firma IPS con exploit. Se observa
+# a quién bloquearía antes de promoverla a fortigate_auto_block_rules.
+
+
+@pytest.fixture
+def kong_alert() -> dict:
+    return json.loads((FIXTURES / "kong_enumeration_404.json").read_text())
+
+
+def _sombra_settings(**kw) -> Settings:
+    base = dict(
+        fortigate_observe_only_rules="100207",
+        protected_networks="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8",
+    )
+    base.update(kw)
+    return Settings(**base)
+
+
+def test_normalize_extrae_srcip_de_kong(kong_alert: dict) -> None:
+    """Sanity: el path nativo saca el srcip público real del cliente, no el del FortiGate."""
+    alert = normalize(kong_alert)
+    assert alert.wazuh_rule.id == "100207"
+    assert alert.network.src_ip_external == "62.210.142.163"
+
+
+def test_kong_sin_modo_sombra_no_es_candidata(kong_alert: dict) -> None:
+    """Sin configurar nada, 100207 no entra al auto-block: es el estado previo."""
+    d = evaluate(normalize(kong_alert), _settings())
+    assert d.candidate is False
+    assert d.reason == "no_rule_match"
+    assert d.observe_only is False
+
+
+def test_kong_en_modo_sombra_es_candidata_pero_marcada(kong_alert: dict) -> None:
+    d = evaluate(normalize(kong_alert), _sombra_settings())
+    assert d.candidate is True
+    assert d.should_block is True
+    assert d.ip == "62.210.142.163"
+    assert d.observe_only is True
+
+
+def test_kong_modo_sombra_bridge_docker_sigue_protegido(kong_alert: dict) -> None:
+    """172.18.0.1 (gateway del bridge de Docker, las pruebas de la POC) cae en
+    172.16.0.0/12 → PROTECTED_NETWORKS lo frena aunque el tuning no esté desplegado."""
+    alerta = copy.deepcopy(kong_alert)
+    alerta["data"]["srcip"] = "172.18.0.1"
+    d = evaluate(normalize(alerta), _sombra_settings())
+    assert d.candidate is True
+    assert d.should_block is False
+    assert d.reason == "protected"
+    assert d.protected_match == "172.16.0.0/12"
+
+
+def test_observe_only_gana_sobre_la_allowlist(kong_alert: dict) -> None:
+    """Si un ID está en las dos listas manda el modo sombra (lo seguro)."""
+    s = _sombra_settings(
+        fortigate_auto_block_rules="196201,100207",
+        fortigate_observe_only_rules="100207",
+    )
+    assert "100207" not in s.fortigate_auto_block_rules_set()
+    assert "196201" in s.fortigate_auto_block_rules_set()
+    assert evaluate(normalize(kong_alert), s).observe_only is True
+
+
+@pytest.mark.asyncio
+async def test_enforce_modo_sombra_no_toca_fortigate(
+    kong_alert: dict, tmp_path: Path
+) -> None:
+    """Fase 1 activa + regla en sombra → NO se llama a la API del FortiGate."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+    from src.models import FortigateActionResult
+
+    settings = _enforce_settings(
+        tmp_path, fortigate_observe_only_rules="100207"
+    )
+    factory, client = _mock_fgt_client(FortigateActionResult(
+        ok=True, ip="62.210.142.163", action="quarantine_ip", message="no debería usarse",
+    ))
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(normalize(kong_alert), settings)
+
+    client.quarantine_ip.assert_not_called()
+    assert outcome.executed is False
+    assert outcome.ok is False
+    assert outcome.decision.observe_only is True
+    assert outcome.decision.should_block is True  # "bloquearía", pero no bloqueó
+    assert "observe-only" in (outcome.message or "")
+
+
+@pytest.mark.asyncio
+async def test_enforce_sombra_no_le_saca_el_gatillo_a_las_ips(
+    fgt_alert: dict, tmp_path: Path
+) -> None:
+    """Regresión: tener reglas en sombra NO debe frenar el bloqueo vivo de las IPS."""
+    from unittest.mock import patch
+
+    from src.fortigate_autoblock import enforce
+    from src.models import FortigateActionResult
+
+    settings = _enforce_settings(
+        tmp_path, fortigate_observe_only_rules="100207"
+    )
+    factory, client = _mock_fgt_client(FortigateActionResult(
+        ok=True, ip="203.0.113.66", action="quarantine_ip", message="banned",
+    ))
+    with patch("src.fortigate_autoblock.FortigateClient", factory):
+        outcome = await enforce(normalize(fgt_alert), settings)
+
+    client.quarantine_ip.assert_called_once_with("203.0.113.66", ttl_seconds=3600)
+    assert outcome.decision.observe_only is False
+    assert outcome.ok is True
+
+
+def test_webhook_modo_sombra_observa_y_corta(kong_alert: dict, tmp_path: Path) -> None:
+    """E2E por el webhook: 202 'observed_fgt_autoblock' con mode=observe_only,
+    el FortiGate intacto y sin arrancar el pipeline del Narrator."""
+    import hashlib
+    import hmac
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from src.config import get_settings
+    from src.main import app
+    from src.models import FortigateActionResult
+
+    TEST_SECRET = "test-secret-32-chars-or-more-abc"
+
+    def _override() -> Settings:
+        return Settings(
+            wazuh_webhook_secret=TEST_SECRET,
+            webhook_allowed_ips="127.0.0.1,testclient",
+            fortigate_autoblock_enabled=True,  # Fase 1 viva
+            fortigate_observe_only_rules="100207",
+            fortigate_host="fg.test",
+            fortigate_token="t",
+            protected_networks="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8",
+            state_db_path=str(tmp_path / "state.db"),
+            smtp_host="",
+        )
+
+    factory, client = _mock_fgt_client(FortigateActionResult(
+        ok=True, ip="62.210.142.163", action="quarantine_ip", message="no debería usarse",
+    ))
+
+    app.dependency_overrides[get_settings] = _override
+    get_settings.cache_clear()
+    try:
+        body = json.dumps(kong_alert).encode()
+        sig = "sha256=" + hmac.new(TEST_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        with patch("src.fortigate_autoblock.FortigateClient", factory):
+            with TestClient(app) as c:
+                r = c.post(
+                    "/webhook/wazuh-alert",
+                    content=body,
+                    headers={"X-Wazuh-Signature": sig, "Content-Type": "application/json"},
+                )
+        assert r.status_code == 202
+        data = r.json()
+        assert data["status"] == "observed_fgt_autoblock"
+        assert data["mode"] == "observe_only"
+        assert data["would_block"] == "62.210.142.163"
+        assert data["rule_id"] == "100207"
+        client.quarantine_ip.assert_not_called()
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()

@@ -109,6 +109,7 @@ class EnrichedUser(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sam: str
     found_in_ad: bool
+    display_name: str | None = None  # nombre real de AD (displayName); backfilled, no LLM
     enabled: bool | None = None
     locked_out: bool | None = None
     department: str | None = None
@@ -439,6 +440,11 @@ SI RECIBÍS `{"_error": "MAX_RETRIES_EXCEEDED", ...}` en una tool response:
 PROCEDIMIENTO OBLIGATORIO (en este orden):
 1. Para CADA usuario en users_involved del input, llamá ldap_search_user con su `sam` \
 (idealmente en paralelo - una llamada por user). Si la lista está vacía, no llames.
+   Los users con role="mailbox_owner" salen de una alerta de correo (Defender for Office
+   365): son los DESTINATARIOS del mensaje, no atacantes. Enriquecelos igual (departamento,
+   manager) porque el analista los va a tener que contactar. Si alguno no está en AD suele
+   ser un buzón de otro dominio, NO un indicio de ataque: usá "no_ad_match" pero aclaralo
+   en el summary.
 2. Si la alerta tiene wazuh_rule.id, llamá wazuh_get_rule UNA SOLA VEZ con ese id.
 3. Si la alerta tiene file con sha256, llamá wazuh_recent_alerts(sha256=..., minutes=30) \
 UNA SOLA VEZ. Si NO hay sha256 pero hay host afectado, llamá wazuh_recent_alerts(host=..., minutes=30). \
@@ -454,7 +460,11 @@ CRITERIO PARA `flags` (priorización para el próximo agente):
 - "no_ad_match" → si un sam involucrado no existe en AD (puede ser ataque con cuenta inexistente).
 - "high_bad_pwd_count" → bad_pwd_count >= 5 (posible brute force previo).
 - "multiple_users_distinct_departments" → si los users tienen departments distintos en la misma alerta.
-- "mitre_<technique_id>" → uno por cada technique reportada por la rule (ej. "mitre_T1059").
+- "mitre_<technique_id>" → uno por cada technique reportada por la rule (ej. "mitre_T1059"). \
+Si la rule no tiene mapping pero alert.threat.mitre_techniques trae algo (lo reporta el \
+propio Defender), usá esas: NO reportes "sin mapeo MITRE" cuando ese campo tiene datos.
+- "phishing_delivered" → alerta de correo (alert.emails no vacío) con al menos una URL en \
+alert.emails[].urls.
 - "rule_high_severity" → si rule.level >= 10.
 - "rule_group_<group>" → para grupos críticos: lateral_movement, credential_access, \
 privilege_escalation, persistence, exfiltration. Ej "rule_group_lateral_movement".
@@ -508,4 +518,23 @@ async def enrich_alert(
         agent, input=user_input, context=ctx, max_turns=max_turns,
         timeout=120.0, label="enricher",
     )
-    return result.final_output_as(EnrichmentResult)
+    enrichment = result.final_output_as(EnrichmentResult)
+    _backfill_display_names(enrichment, ctx)
+    return enrichment
+
+
+def _backfill_display_names(enrichment: EnrichmentResult, ctx: EnricherContext) -> None:
+    """Sobreescribe display_name de cada user con el valor REAL de AD (no el del LLM).
+
+    El LLM tiende a alucinar nombres propios a partir del sam. La verdad está en el
+    cache de la tool ldap_search_user (clave `ldap:<sam>`), que guardó el `displayName`
+    crudo de AD. Reconciliamos contra ese cache para que el email/narrator usen el
+    nombre real (o None si AD no lo trae), nunca uno inventado.
+    """
+    for user in enrichment.users:
+        cached = ctx._call_cache.get(f"ldap:{user.sam}")
+        # Solo confiamos en el cache si hubo un hit real (found=true). Si no, sin nombre.
+        if cached and cached.get("found"):
+            user.display_name = cached.get("display_name")
+        else:
+            user.display_name = None

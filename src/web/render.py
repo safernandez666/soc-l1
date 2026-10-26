@@ -525,7 +525,7 @@ _NAV = [
 ]
 
 
-def _shell(active: str, settings: Settings, body: str, title: str = "SOC-L1") -> str:
+def _shell(active: str, settings: Settings, body: str, title: str = "zSOC") -> str:
     mode = "DRY-RUN" if settings.dry_run_mode else "LIVE"
     mode_token = "warn" if settings.dry_run_mode else "ok"
     nav = "".join(
@@ -535,12 +535,12 @@ def _shell(active: str, settings: Settings, body: str, title: str = "SOC-L1") ->
     )
     return f"""<!doctype html><html lang="en" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{h(title)} · SOC-L1</title><link rel="stylesheet" href="/ui/static/app.css"></head>
+<title>{h(title)} · zSOC</title><link rel="stylesheet" href="/ui/static/app.css"></head>
 <body><div class="app">
 <aside class="sidebar">
-  <div class="sidebar__brand">{_logo(24)}<span>SOC-L1</span></div>
+  <div class="sidebar__brand">{_logo(24)}<span>zSOC</span></div>
   <nav class="sidebar__nav">{nav}</nav>
-  <div class="sidebar__bottom">ZebraSecurity · SOC-L1</div>
+  <div class="sidebar__bottom">ZebraSecurity · zSOC</div>
 </aside>
 <div class="main">
   <header class="topbar">
@@ -584,7 +584,7 @@ def login_page(settings: Settings, error: str = "") -> str:
     return f"""<!doctype html><html lang="es" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="/ui/static/favicon.svg">
-<title>Acceso · SOC-L1</title>
+<title>Acceso · zSOC</title>
 <style>
   :root {{
     --bg:#0a0a0b; --card:#131316; --fg:#f4f5f0; --muted:#8b8f87;
@@ -668,7 +668,7 @@ def login_page(settings: Settings, error: str = "") -> str:
 <body><div class="ls-card">
   <canvas id="ls-particles"></canvas>
   <img class="ls-logo" src="/ui/static/zebra-logo.svg" alt="ZebraSecurity">
-  <div class="ls-eyebrow"><span class="ls-dot"></span>SOC-L1 · Centro de Operaciones</div>
+  <div class="ls-eyebrow"><span class="ls-dot"></span>zSOC · Centro de Operaciones</div>
   <p class="ls-sub">Ingresá para revisar casos, KPIs y la cola de aprobaciones.</p>
   {note}{err}{form}
 </div>

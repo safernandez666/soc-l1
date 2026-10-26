@@ -200,26 +200,41 @@ class InvgateClient:
         return result
 
     async def add_comment(
-        self, request_id: int, body: str, *, internal: bool = False
+        self, request_id: int, body: str, *, internal: bool = False,
+        is_solution: bool = False,
     ) -> InvgateTicketResult:
         """POST /incident.comment — agrega un comentario a un ticket existente.
 
         internal: True → nota interna (customer_visible=0), False → público.
+        is_solution: True → marca el comentario como SOLUCIÓN propuesta del incidente
+            (paso 1 del cierre; luego close_incident lo acepta). OJO: la solución DEBE
+            ser pública — InvGate rechaza marcar un comentario interno como solución
+            ("Cannot mark an internal comment as the solution"), así que con is_solution
+            forzamos customer_visible=1 aunque venga internal=True.
+
+        Requisito para is_solution: la cuenta de API necesita permiso de "resolver"
+        (habilitado 2026-07-23). Sin él responde 409 "not allowed to solve".
         """
         if not is_configured(self._settings):
             return self._missing_config_result()
         if self._client is None:
             return self._not_initialized_result()
 
+        # La solución tiene que ser pública sí o sí (ver docstring).
+        customer_visible = 1 if is_solution else (0 if internal else 1)
+        payload: dict[str, Any] = {
+            "request_id": request_id,
+            "author_id": self._settings.invgate_creator_id,
+            "comment": body,
+            "customer_visible": customer_visible,
+        }
+        if is_solution:
+            payload["is_solution"] = 1
+
         try:
             resp = await self._client.post(
                 "/incident.comment",
-                json={
-                    "request_id": request_id,
-                    "author_id": self._settings.invgate_creator_id,
-                    "comment": body,
-                    "customer_visible": 0 if internal else 1,
-                },
+                json=payload,
             )
         except httpx.HTTPError as e:
             logger.error("invgate: add_comment HTTP error: %s", e)
@@ -238,23 +253,91 @@ class InvgateClient:
             )
         return result
 
-    async def close_incident(
-        self, request_id: int, rating: int = 5
-    ) -> InvgateTicketResult:
-        """PUT /incident.solution.accept — cierra el ticket aceptando la solución.
+    async def get_incident(self, request_id: int) -> dict[str, Any] | None:
+        """Lee un ticket: GET /incident?id=N → dict del ticket, o None si falla.
 
-        InvGate no tiene un PUT genérico de status; los cambios de estado usan
-        endpoints dedicados. Para cerrar: /incident.solution.accept (rating 1-5).
+        Descubierto por probe read-only (2026-07-24): el endpoint devuelve el
+        incidente completo, incluyendo status_id / solved_at / closed_at /
+        closed_reason. Se usa para verificar que un cierre realmente aterrizó.
+        """
+        if not is_configured(self._settings) or self._client is None:
+            return None
+        try:
+            resp = await self._client.get("/incident", params={"id": request_id})
+        except httpx.HTTPError as e:
+            logger.warning("invgate: get_incident HTTP error id=%s: %s", request_id, e)
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "invgate: get_incident id=%s → HTTP %s", request_id, resp.status_code
+            )
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _ticket_is_resolved(self, ticket: dict[str, Any]) -> bool:
+        """¿El ticket llegó a un estado resuelto/cerrado? Señal primaria:
+        solved_at o closed_at presentes (InvGate los setea al resolver). Fallback:
+        status_id en INVGATE_CLOSED_STATUS_IDS, por si un workflow no poblara las
+        fechas."""
+        if ticket.get("solved_at") or ticket.get("closed_at"):
+            return True
+        sid = ticket.get("status_id")
+        try:
+            return int(sid) in self._settings.invgate_closed_status_ids_set()
+        except (TypeError, ValueError):
+            return False
+
+    async def close_incident(
+        self, request_id: int, rating: int = 5,
+        *, solution_comment: str | None = "Cierre automático SOC-L1: caso contenido, "
+        "no requiere acción humana.",
+    ) -> InvgateTicketResult:
+        """Cierra el ticket: propone una solución y la acepta (workflow InvGate).
+
+        InvGate NO tiene endpoint de cierre directo. La secuencia es:
+          1. POST /incident.comment con is_solution=1 (PÚBLICO) → propone la solución.
+          2. PUT  /incident.solution.accept (id, rating) → la acepta = cierra.
+
+        Detalles que causaban fallas (todos ya resueltos, validado e2e el 2026-07-23):
+          - El accept exige el parámetro `id` (NO `request_id`) en QUERY STRING. Mandarlo
+            en el body daba HTTP 428 "El parámetro id es requerido en PUT".
+          - La solución debe ser PÚBLICA (add_comment fuerza customer_visible=1 con
+            is_solution); si es interna → 409 "Cannot mark an internal comment as solution".
+          - Sin solución propuesta, el accept devuelve status=ERROR (no hay qué aceptar).
+          - rating<4 requeriría `comment`; usamos rating=5 por default para evitarlo.
+
+        PERMISO: proponer/aceptar solución necesita el permiso de "resolver solicitud" en
+        la cuenta de API (habilitado 2026-07-23). Sin él, el paso 1 responde 409 y el
+        ticket queda ABIERTO (best-effort). También puede fallar (409/ERROR) si el ticket
+        está en un estado que no admite solución (p.ej. ya intervenido por otro agente);
+        el llamador trata todo cierre como best-effort y nunca aborta por esto.
         """
         if not is_configured(self._settings):
             return self._missing_config_result()
         if self._client is None:
             return self._not_initialized_result()
 
+        # Paso 1: proponer la solución (pública). Si falla (409 sin permiso o estado no
+        # soluble), no tiene sentido intentar el accept: devolvemos el error tal cual.
+        if solution_comment:
+            sol = await self.add_comment(request_id, solution_comment, is_solution=True)
+            if not sol.ok:
+                logger.warning(
+                    "🎫 INVGATE propose-solution FAILED | request_id=%s error=%s "
+                    "(ticket queda abierto)",
+                    request_id, sol.error,
+                )
+                return sol
+
+        # Paso 2: aceptar la solución = cerrar.
         try:
             resp = await self._client.put(
                 "/incident.solution.accept",
-                json={"request_id": request_id, "rating": rating},
+                params={"id": request_id, "rating": rating},
             )
         except httpx.HTTPError as e:
             logger.error("invgate: close_incident HTTP error: %s", e)
@@ -263,11 +346,58 @@ class InvgateClient:
         result = self._parse_response(resp)
         if result.request_id is None:
             result = result.model_copy(update={"request_id": request_id})
-        if result.ok:
-            logger.info("🎫 INVGATE close_incident ok | request_id=%s", request_id)
-        else:
+
+        # Si el accept ya reportó ERROR, ni verificamos: devolvemos el fallo.
+        if not result.ok:
             logger.warning(
-                "🎫 INVGATE close_incident FAILED | request_id=%s error=%s",
+                "🎫 INVGATE close_incident FAILED (accept) | request_id=%s error=%s",
                 request_id, result.error,
             )
-        return result
+            return result
+
+        # VERIFICACIÓN read-back: que el accept devuelva OK NO garantiza que el
+        # ticket haya transicionado a resuelto (visto en prod: accept OK y el
+        # ticket sigue en status 7). Releemos y confirmamos con solved_at/closed_at.
+        ticket = await self.get_incident(request_id)
+        if ticket is None:
+            # No pudimos verificar. No mentimos: éxito no confirmado.
+            logger.warning(
+                "🎫 INVGATE close_incident UNVERIFIED | request_id=%s "
+                "(accept OK pero no se pudo releer el ticket)",
+                request_id,
+            )
+            return result.model_copy(
+                update={
+                    "ok": False,
+                    "error": "accept OK pero no se pudo verificar el cierre (get_incident falló)",
+                }
+            )
+
+        sid = ticket.get("status_id")
+        try:
+            sid_int = int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            sid_int = None
+
+        if self._ticket_is_resolved(ticket):
+            logger.info(
+                "🎫 INVGATE close_incident ok+verificado | request_id=%s status_id=%s",
+                request_id, sid_int,
+            )
+            return result.model_copy(update={"status_id": sid_int})
+
+        logger.warning(
+            "🎫 INVGATE close_incident NO-CERRÓ | request_id=%s accept=OK pero "
+            "status_id=%s (sin solved_at/closed_at) — ticket sigue ABIERTO",
+            request_id, sid_int,
+        )
+        return result.model_copy(
+            update={
+                "ok": False,
+                "status_id": sid_int,
+                "error": (
+                    f"accept devolvió OK pero el ticket sigue abierto "
+                    f"(status_id={sid_int}, sin solved_at/closed_at)"
+                ),
+            }
+        )

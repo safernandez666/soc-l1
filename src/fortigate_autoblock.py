@@ -32,6 +32,11 @@ def _observation_path(settings: Settings) -> Path:
     return Path(settings.state_db_path).with_name("fgt_observations.jsonl")
 
 
+def _ticket_path(settings: Settings) -> Path:
+    """JSONL de tickets InvGate generados por el auto-block (closed-loop auditoría)."""
+    return Path(settings.state_db_path).with_name("fgt_tickets.jsonl")
+
+
 def _notify_state_path(settings: Settings) -> Path:
     """JSON {ip: last_notified_iso} para deduplicar el email de observación por IP."""
     return Path(settings.state_db_path).with_name("fgt_notified.json")
@@ -82,6 +87,21 @@ def mark_notified(settings: Settings, ip: str) -> None:
         logger.exception("fgt-autoblock: no pude registrar la notificación")
 
 
+def detection_source(rule_id: str | None) -> tuple[str, str]:
+    """(etiqueta de la regla, frase de detección) según de dónde viene la alerta.
+
+    El auto-block nació para las IPS de FortiGate (1961xx/1962xx) y los textos decían
+    "alerta IPS" a secas; con Kong (1002xx, decoder/reglas 100200-100241) eso es falso.
+    """
+    try:
+        n = int(rule_id or "")
+    except ValueError:
+        n = -1
+    if 100200 <= n <= 100299:
+        return "Regla Kong", "una alerta de alta confianza en Kong (API gateway)"
+    return "Regla IPS", "una alerta IPS de alta confianza"
+
+
 @dataclass(frozen=True)
 class AutoBlockDecision:
     """Resultado de evaluar una alerta contra la política de auto-block."""
@@ -92,6 +112,7 @@ class AutoBlockDecision:
     reason: str  # would_block | no_rule_match | no_srcip | protected | invalid_ip
     protected_match: str | None = None  # CIDR protegido que matcheó (si reason=protected)
     duplicate: bool = False  # True si la IP ya se observó/bloqueó dentro de la ventana TTL
+    observe_only: bool = False  # regla en modo sombra: se avisa pero NUNCA se bloquea
 
     @property
     def should_block(self) -> bool:
@@ -101,21 +122,31 @@ class AutoBlockDecision:
 def evaluate(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     """Decide si la alerta dispara auto-block y cuál IP, aplicando PROTECTED_NETWORKS."""
     rule_id = alert.wazuh_rule.id
-    if not rule_id or rule_id not in settings.fortigate_auto_block_rules_set():
+    # Modo sombra: la regla es candidata (se evalúa, registra y avisa) pero enforce()
+    # no toca el firewall. Gana sobre la allowlist de bloqueo si está en las dos.
+    observe_only = bool(rule_id) and rule_id in settings.fortigate_observe_only_rules_set()
+    if not rule_id or (
+        rule_id not in settings.fortigate_auto_block_rules_set() and not observe_only
+    ):
         return AutoBlockDecision(False, None, rule_id, "no_rule_match")
 
     # En las alertas FortiGate IPS el atacante es el srcip (path nativo del normalizer).
     ip = alert.network.src_ip_external or alert.network.src_ip_internal
     if not ip or ip == "-":
-        return AutoBlockDecision(True, None, rule_id, "no_srcip")
+        return AutoBlockDecision(True, None, rule_id, "no_srcip", observe_only=observe_only)
 
     match = _ip_in_protected_networks(ip, settings.protected_networks_list())
     if match == "invalid_ip":
-        return AutoBlockDecision(True, None, rule_id, "invalid_ip")
+        return AutoBlockDecision(
+            True, None, rule_id, "invalid_ip", observe_only=observe_only
+        )
     if match is not None:
-        return AutoBlockDecision(True, None, rule_id, "protected", protected_match=match)
+        return AutoBlockDecision(
+            True, None, rule_id, "protected",
+            protected_match=match, observe_only=observe_only,
+        )
 
-    return AutoBlockDecision(True, ip, rule_id, "would_block")
+    return AutoBlockDecision(True, ip, rule_id, "would_block", observe_only=observe_only)
 
 
 def _record(
@@ -175,11 +206,12 @@ def observe(alert: NormalizedAlert, settings: Settings) -> AutoBlockDecision:
     if decision.should_block and decision.ip:
         mark_notified(settings, decision.ip)
     ttl_h = settings.fortigate_block_ttl_hours
+    motivo = "modo sombra" if decision.observe_only else "Fase 0"
     if decision.should_block:
         logger.info(
             "🔭 FGT-AUTOBLOCK OBSERVE | WOULD quarantine ip=%s rule=%s ttl=%sh "
-            "alert=%s (Fase 0: no ejecutado)",
-            decision.ip, decision.rule_id, ttl_h, alert.alert_id,
+            "alert=%s (%s: no ejecutado)",
+            decision.ip, decision.rule_id, ttl_h, alert.alert_id, motivo,
         )
     elif decision.reason == "protected":
         logger.info(
@@ -217,6 +249,15 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
     decision = evaluate(alert, settings)
     if not decision.candidate:
         return EnforceOutcome(decision, executed=False, ok=False)
+
+    # Modo sombra (fortigate_observe_only_rules): la regla todavía no se ganó el derecho
+    # a bloquear sola. Se delega en observe() —mismo dedup, mismo JSONL, mismo log— y se
+    # sale sin tocar FortiGate, aunque el autoblock global esté en Fase 1.
+    if decision.observe_only:
+        return EnforceOutcome(
+            observe(alert, settings), executed=False, ok=False,
+            message="observe-only: regla en modo sombra, no se ejecutó el quarantine",
+        )
 
     ttl_h = settings.fortigate_block_ttl_hours
 
@@ -289,6 +330,37 @@ async def enforce(alert: NormalizedAlert, settings: Settings) -> EnforceOutcome:
                 "🚫 FGT-AUTOBLOCK ENFORCE | quarantine OK ip=%s rule=%s ttl=%sh alert=%s exp=%s",
                 ip, decision.rule_id, ttl_h, alert.alert_id, r.expires_at,
             )
+            # El ban solo frena sesiones NUEVAS: si el atacante tiene una conexión
+            # abierta (keep-alive), sigue entrando hasta que se corte. Se mide y, si el
+            # api-user tiene permiso (fwgrp others read-write), se cierra. Best-effort.
+            # Evidencia del 2026-09-26: 67 requests a Kong tras el ban de 172.104.27.48.
+            try:
+                async with FortigateClient(settings) as fg2:
+                    ses = await fg2.close_sessions(ip)
+                if ses.get("error"):
+                    logger.warning(
+                        "FGT-AUTOBLOCK SESIONES | no pude listar sesiones de ip=%s: %s",
+                        ip, ses["error"],
+                    )
+                elif ses["found"] == 0:
+                    logger.info(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s sin sesiones vivas tras el ban", ip
+                    )
+                elif ses["permission_denied"]:
+                    logger.warning(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s tiene %d sesiones VIVAS (policies=%s) "
+                        "tras el ban y NO tengo permiso para cerrarlas: pedir en el FortiGate "
+                        "accprofile del api-user → fwgrp-permission others read-write",
+                        ip, ses["found"], ses["policies"],
+                    )
+                else:
+                    logger.info(
+                        "FGT-AUTOBLOCK SESIONES | ip=%s sesiones vivas=%d cerradas=%d "
+                        "fallidas=%d policies=%s",
+                        ip, ses["found"], ses["closed"], ses["failed"], ses["policies"],
+                    )
+            except Exception:  # noqa: BLE001 - nunca rompe el bloqueo ya hecho
+                logger.exception("FGT-AUTOBLOCK SESIONES | error revisando sesiones de ip=%s", ip)
         else:
             logger.error(
                 "FGT-AUTOBLOCK ENFORCE | quarantine FALLÓ ip=%s rule=%s alert=%s msg=%s",
@@ -311,9 +383,12 @@ def summarize(path: Path) -> dict:
 
     total = 0
     would_block = 0
+    ejecutados = 0  # Fase 1: bloqueo real aplicado (executed=True & block_ok=True)
+    ejecutados_fallidos = 0  # Fase 1: se intentó el bloqueo pero falló (block_ok=False)
     by_reason: Counter[str] = Counter()
     by_rule: Counter[str] = Counter()
     block_ips: set[str] = set()
+    blocked_ips: set[str] = set()  # IPs efectivamente bloqueadas en FortiGate
     protected_ips: set[str] = set()
     first_ts = last_ts = None
     if path.exists():
@@ -338,14 +413,98 @@ def summarize(path: Path) -> dict:
                     block_ips.add(r["ip"])
             elif r.get("reason") == "protected" and r.get("ip"):
                 protected_ips.add(r["ip"])
+            # Fase 1: distingue lo que SOC-L1 bloqueó DE VERDAD de lo que "bloquearía".
+            if r.get("executed"):
+                if r.get("block_ok"):
+                    ejecutados += 1
+                    if r.get("ip"):
+                        blocked_ips.add(r["ip"])
+                else:
+                    ejecutados_fallidos += 1
     return {
         "total_observaciones": total,
         "would_block": would_block,
+        "ejecutados": ejecutados,
+        "ejecutados_fallidos": ejecutados_fallidos,
         "ips_distintas_que_bloquearia": len(block_ips),
+        "ips_distintas_bloqueadas": len(blocked_ips),
         "ips_protegidas_evitadas": sorted(protected_ips),
         "por_reason": dict(by_reason),
         "por_regla": dict(by_rule),
         "ventana": {"desde": first_ts, "hasta": last_ts},
+    }
+
+
+def record_ticket(
+    settings: Settings,
+    *,
+    alert_id: str,
+    ip: str | None,
+    rule_id: str | None,
+    request_id: int | None,
+    created: bool,
+    closed: bool,
+) -> None:
+    """Append best-effort del resultado del ticket InvGate del auto-block.
+
+    Alimenta el resumen de tickets de la vista FortiGate (creados / cerrados /
+    abiertos esperando cierre). Nunca rompe el flujo de notificación.
+    """
+    try:
+        rec = {
+            "ts": datetime.now(tz=UTC).isoformat(),
+            "alert_id": alert_id,
+            "ip": ip,
+            "rule_id": rule_id,
+            "request_id": request_id,
+            "created": created,
+            "closed": closed,
+        }
+        with _ticket_path(settings).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - registro best-effort, nunca rompe el flujo
+        logger.exception("fgt-autoblock: no pude registrar el ticket InvGate")
+
+
+def summarize_tickets(path: Path) -> dict:
+    """Resumen de tickets InvGate del auto-block: creados / cerrados / abiertos.
+
+    Deduplica por request_id (un ticket que se reintenta cerrar no infla el conteo).
+    `abiertos` = creados que todavía NO se pudieron cerrar (típicamente HTTP 403 hasta
+    que la cuenta de API tenga permiso de cierre).
+    """
+    created_ids: set[int] = set()
+    closed_ids: set[int] = set()
+    creados_sin_id = 0  # InvGate respondió OK pero sin request_id (raro)
+    last_ts = None
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = r.get("ts")
+            if ts:
+                last_ts = max(last_ts or ts, ts)
+            rid = r.get("request_id")
+            if r.get("created"):
+                if isinstance(rid, int):
+                    created_ids.add(rid)
+                else:
+                    creados_sin_id += 1
+            if r.get("closed") and isinstance(rid, int):
+                closed_ids.add(rid)
+    creados = len(created_ids) + creados_sin_id
+    cerrados = len(closed_ids)
+    abiertos = len(created_ids - closed_ids) + creados_sin_id
+    return {
+        "creados": creados,
+        "cerrados": cerrados,
+        "abiertos": abiertos,
+        "ultimo_ts": last_ts,
     }
 
 

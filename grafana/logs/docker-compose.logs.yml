@@ -1,0 +1,37 @@
+# Logs de Kong para Grafana: Loki + Alloy. Compose aparte a propósito, para no
+# tocar el docker-compose.yml de la POC (levantarlo no reinicia Kong).
+#   docker compose -f docker-compose.logs.yml up -d
+services:
+  loki:
+    image: grafana/loki:3.5.5
+    container_name: loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./loki-config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    networks: [poc-network]
+    # Sin puerto publicado: solo Grafana (misma red) lo consulta.
+    mem_limit: 768m
+
+  alloy:
+    image: grafana/alloy:v1.10.2
+    container_name: alloy
+    restart: unless-stopped
+    command: run --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+    volumes:
+      - ./alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks: [poc-network]
+    depends_on: [loki]
+    mem_limit: 256m
+
+networks:
+  poc-network:
+    external: true
+    name: kong-setup_poc-network
+
+volumes:
+  loki-data:
+  alloy-data:

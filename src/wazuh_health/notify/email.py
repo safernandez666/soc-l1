@@ -65,14 +65,35 @@ class EmailNotifier:
         self._send(msg)
         return None
 
-    def notify_digest(self, *, subject: str, markdown: str) -> None:
-        """Send a plain-text digest (no WazuhHealthReport needed).
+    def notify_digest(
+        self, *, subject: str, markdown: str, html: str | None = None
+    ) -> None:
+        """Send the digest. Con `html` va multipart, si no queda solo texto.
 
-        Used by `wazuh-health once` to mail probe results without invoking the LLM.
+        Lo usa `wazuh-health once` para mandar el resultado de los probes sin
+        invocar al LLM. El Markdown viaja como parte text/plain: en un cliente
+        de correo, solo, se veían los `#` y los `**` literales.
         """
-        msg = EmailMessage()
-        msg["From"] = self._sender
-        msg["To"] = self._to
-        msg["Subject"] = subject
-        msg.set_content(markdown)
-        self._send(msg)
+        if html is None:
+            msg = EmailMessage()
+            msg["From"] = self._sender
+            msg["To"] = self._to
+            msg["Subject"] = subject
+            msg.set_content(markdown)
+            self._send(msg)
+            return
+
+        # El armado lo hace report_theme: Date, Message-ID, quoted-printable y
+        # el logo por Content-ID. Ver la nota de build_message() sobre No Deseado.
+        from src import report_theme as T
+
+        self._send(
+            T.build_message(
+                from_addr=self._sender,
+                recipients=[t.strip() for t in self._to.split(",") if t.strip()],
+                subject=subject,
+                html=html,
+                plain=markdown,
+                logo_bytes=T.load_logo(),
+            )
+        )

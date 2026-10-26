@@ -69,7 +69,7 @@ function ConfigView({
       <div className="mb-6">
         <h1 className="text-xl font-semibold">Configuración</h1>
         <p className="text-sm text-muted-foreground">
-          Settings operativos del SOC-L1. Se guardan en el servidor y se aplican en
+          Settings operativos del zSOC. Se guardan en el servidor y se aplican en
           caliente — los secretos solo se escriben, nunca se muestran.
         </p>
       </div>

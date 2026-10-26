@@ -1,0 +1,62 @@
+Grupo Alemana - Gerencia Tecnologia
+Reporte de vulnerabilidades y cumplimiento de parches - 28/08/2026
+
+AVISO SOBRE LA CALIDAD DE LOS DATOS
+
+2 host(s) con inventario desfasado: el detector conserva un build de SO anterior al que reporta el agente, asi que sus 5 hallazgos pueden estar ya parcheados.
+  SRVDC01              indexado 10.0.17763.5576 -> real 10.0.17763.5820 (4 hallazgos)
+  NB-GERENCIA&VENTAS   indexado 10.0.22631.3007 -> real 10.0.22631.3593 (1 hallazgos)
+1 host(s) sin ningun hallazgo pese a estar activos: SRVWSUS
+
+El problema esta en el detector de Wazuh, no en los datos de los agentes.
+
+CUMPLIMIENTO DE PARCHES POR HOST
+
+Hosts monitoreados: 5 (2 nuevos)
+Criticas: 6 (-2 vs. semana anterior)
+Altas: 2 (-9 vs. semana anterior)
+Medias/Bajas: 2 / 1
+Dejo de reportar: SRVOLD03 (no cuenta como mejora ni entra en el SLA)
+SLA de parcheo: 67% (2 mejoraron, 1 empeoraron, 0 sin cambios)
+
+Hosts con mayor movimiento (criticas + altas):
+  LNXWEB01               criticas 0->0  altas 1->2  (+1) EMPEORO
+  NB-GERENCIA&VENTAS     criticas 0->1  altas 0->0  (+1) EMPEORO
+  SRVFILE04              criticas 0->1  altas 0->0  (+1) EMPEORO
+  SRVDC01                criticas 4->2  altas 9->0  (-11) MEJORO
+  SRVAPP02               criticas 2->2  altas 1->0  (-1) MEJORO
+
+PRIORIZACION POR EXPLOTABILIDAD REAL
+
+Hallazgos activos: 13 en 5 hosts
+En catalogo CISA KEV: 4 (ligados a ransomware: 3)
+Con EPSS >= 50%: 6
+Con prioridad >= 80: 4
+Ciclo de vida: 4 nuevas, 2 resueltas, 1 reabiertas
+
+TOP 9 A PARCHEAR PRIMERO
+
+ 1. CVE-2021-44228 [KEV] | prioridad 99.2 | CVSS 10.0 | EPSS 97.44% | 1 host(s)
+    Producto: Apache Log4j
+ 2. CVE-2024-21412 [KEV] | prioridad 88.7 | CVSS 8.1 | EPSS 94.12% | 2 host(s)
+    Producto: Windows 11 Pro, Windows Server 2019
+ 3. CVE-2023-44487 [KEV] | prioridad 85.8 | CVSS 7.5 | EPSS 94.36% | 1 host(s)
+    Producto: nginx
+ 4. CVE-2024-3094 | prioridad 52.7 | CVSS 5.3 | EPSS 87.21% | 2 host(s)
+    Producto: xz-utils
+ 5. CVE-2024-38063 | prioridad 52.7 | CVSS 9.8 | EPSS 12.34% | 2 host(s)
+    Producto: Microsoft Edge (Chromium) <120>, Windows Server 2016, Windows Server 2019
+ 6. CVE-2025-30215 | prioridad 49.0 | CVSS 9.8 | EPSS 0.00% | 1 host(s)
+    Producto: Apache Tomcat
+ 7. CVE-2023-38545 | prioridad 45.3 | CVSS 8.8 | EPSS 4.21% | 1 host(s)
+    Producto: curl
+ 8. CVE-2022-40982 | prioridad 18.5 | CVSS 3.7 | EPSS 0.07% | 1 host(s)
+    Producto: intel-microcode
+ 9. CVE-2024-49040 | prioridad -5.0 | CVSS -1.0 | EPSS 0.00% | 1 host(s)
+    Producto: Microsoft Exchange Server
+
+Prioridad = CVSS x 5 + EPSS x 30 + CISA KEV x 20, tope 100.
+EPSS (FIRST.org) estima la probabilidad de explotacion en los proximos 30 dias.
+CISA KEV es el catalogo oficial de vulnerabilidades con explotacion confirmada.
+
+Generado por Wazuh SIEM. Run ID: wazuh-20260828063000

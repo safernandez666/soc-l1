@@ -1,0 +1,56 @@
+<!--
+  Tuning de ruido AD — SOC-L1 / 2026-07-21
+  ========================================
+  Reduce falsos positivos masivos de dos reglas custom "CRITICAL" que inundaban el
+  SIEM (análisis sobre 90 días de wazuh-alerts-*):
+
+    - rule 100123 (DCSync, level 12): 201.043 hits/90d. 96% = cuenta de Azure AD
+      Connect (MSOL_*) + cuentas de equipo de los Domain Controllers replicando
+      normalmente. Sólo 4 hits provienen de una cuenta de usuario (mbaez-adm).
+    - rule 100126 (audit policy changed / event 4719, level 13): 102.980 hits/90d,
+      ~5.000 por CADA server, todos con cuenta de EQUIPO ($) = refresco periódico de
+      GPO (benigno).
+
+  Estrategia: reglas hijas (if_sid) a level 0 que SUPRIMEN el alerta cuando el origen
+  es una fuente legítima conocida. Todo lo NO whitelisteado sigue disparando la regla
+  padre con su nivel crítico original (no se pierde detección real).
+
+  Requiere Wazuh 4.4+ (usa field type="pcre2"). Deploy: ver README-DEPLOY.md.
+-->
+<group name="active_directory,tuning,">
+
+  <!-- ===== 100123 DCSync (padre level 12) — supresión de replicación legítima ===== -->
+
+  <!-- Azure AD Connect: la cuenta MSOL_<guid> hace replicación de directorio de forma
+       legítima y continua. Prefijo (no el GUID completo) por si se reinstala AAD Connect. -->
+  <rule id="100223" level="0">
+    <if_sid>100123</if_sid>
+    <field name="win.eventdata.subjectUserName" type="pcre2">^MSOL_</field>
+    <description>AD DCSync: Azure AD Connect (MSOL) - replicacion legitima, suprimido (tuning)</description>
+    <group>active_directory_dcsync,tuning,</group>
+  </rule>
+
+  <!-- Cuentas de equipo de los Domain Controllers: la replicación DC-a-DC es normal.
+       Whitelist EXPLÍCITA por nombre — si aparece un DCSync desde otra cuenta de equipo
+       inesperada, NO se suprime y alerta como corresponde. -->
+  <rule id="100224" level="0">
+    <if_sid>100123</if_sid>
+    <field name="win.eventdata.subjectUserName" type="pcre2">^(SRVDC1|SRVDCVELEZ01|SRVDC2)\$$</field>
+    <description>AD DCSync: cuenta de equipo de Domain Controller - replicacion DC-a-DC legitima, suprimido (tuning)</description>
+    <group>active_directory_dcsync,tuning,</group>
+  </rule>
+
+  <!-- ===== 100126 audit policy changed (padre level 13) — supresión de refresco GPO =====
+       Los ~103k/90d son event 4719 disparados por cuentas de EQUIPO ($) por el refresco
+       de GPO. Se mantiene CRITICAL para cambios hechos por cuentas de USUARIO (sin $).
+       TRADE-OFF: un cambio de política malicioso ejecutado como SYSTEM/cuenta de equipo
+       también quedaría suprimido. El fix de fondo es en la GPO/audit policy (frenar el
+       churn de 4719); esta supresión sólo corta el ruido a nivel regla. -->
+  <rule id="100226" level="0">
+    <if_sid>100126</if_sid>
+    <field name="win.eventdata.subjectUserName" type="pcre2">\$$</field>
+    <description>AD audit policy changed: cuenta de equipo (refresco GPO) - benigno, suprimido (tuning)</description>
+    <group>active_directory_audit_change,tuning,</group>
+  </rule>
+
+</group>

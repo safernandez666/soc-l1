@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src import report_theme
 from src.agents.narrator import NarratorPlan, ProposedAction
 from src.config import Settings
 from src.mailer import (
@@ -133,15 +134,35 @@ def test_build_message_has_multipart_and_correct_headers(settings, alert, plan) 
     assert "text/html" in types
 
 
-def test_subject_truncates_long_titles(settings, alert) -> None:
+def test_subject_fits_inbox_budget(settings, alert) -> None:
+    """El asunto se recorta al presupuesto de bandeja, no a un slice fijo.
+
+    Outlook corta la lista cerca de los 72 caracteres. Antes el titulo se
+    cortaba a 60 fijos y despues se le concatenaba host y ticket, asi que el
+    asunto igual se pasaba y lo que se perdia era la cola -- justo el ticket.
+    """
     long_title_alert = alert.model_copy(update={"title": "A" * 200})
     plan = NarratorPlan(
         executive_summary="s", risk_level="low", actions=[], rationale="r"
     )
     msg = _build_message(settings, long_title_alert, plan, "TKN")
-    # Title sliced a 60 chars
-    assert "A" * 60 in msg["Subject"]
-    assert "A" * 61 not in msg["Subject"]
+    assert len(msg["Subject"]) <= report_theme.SUBJECT_BUDGET
+    # El recorte cae sobre el titulo; prefijo y estado quedan intactos porque
+    # son lo que filtran las reglas de bandeja.
+    assert msg["Subject"].startswith("[SOC L1][INCIDENTE] LOW \u00b7 ")
+    assert "\u2026" in msg["Subject"]
+    assert "desktop-1234" in msg["Subject"]
+
+
+def test_subject_no_gira_al_vacio_con_campos_minimos() -> None:
+    """El recorte corta el loop cuando ya no puede achicar nada mas.
+
+    Con campos que no bajan de `_MIN_CAMPO` no hay forma de entrar en el
+    presupuesto: la funcion tiene que devolver igual, no colgarse.
+    """
+    s = report_theme.subject("INCIDENTE", "CRITICAL", "abcdefghijkl", "mnopqrstuvwx", budget=20)
+    assert s.startswith("[SOC L1][INCIDENTE] CRITICAL")
+    assert len(s) > 20  # no entra, pero devolvio
 
 
 @pytest.mark.asyncio
@@ -232,8 +253,18 @@ def test_closure_subject_distinguishes_decision(settings, alert, plan) -> None:
         execution_results=[], decided_by_ip="1.2.3.4",
         decided_at="2026-06-06T14:05:00+00:00", executed_at="2026-06-06T14:05:02+00:00",
     )
-    assert "CERRADO: APROBADO" in msg["Subject"]
-    assert "desktop-1234" in msg["Subject"]
+    # "CERRADO" es el ESTADO (posicion fija, filtrable) y la decision el
+    # contexto. El host NO va: en el cierre el titulo ya lo identifica y
+    # sacarlo es lo que deja entrar al ticket dentro del presupuesto.
+    assert msg["Subject"].startswith("[SOC L1][INCIDENTE] CERRADO \u00b7 APROBADO \u00b7 ")
+    assert len(msg["Subject"]) <= report_theme.SUBJECT_BUDGET
+
+    rechazado = _build_closure_message(
+        settings, alert, plan, decision="rejected", timeline_events=TIMELINE_EVENTS,
+        execution_results=[], decided_by_ip="1.2.3.4",
+        decided_at="2026-06-06T14:05:00+00:00", executed_at=None,
+    )
+    assert "RECHAZADO" in rechazado["Subject"]
 
 
 def test_closure_html_escapes_user_data(alert) -> None:
@@ -284,3 +315,189 @@ async def test_closure_invokes_smtp_when_configured(settings, alert, plan) -> No
             executed_at="2026-06-06T14:05:02+00:00",
         )
         mocked.assert_called_once()
+
+
+# ===== Alertas de correo (Defender for Office 365) =====
+
+
+@pytest.fixture
+def o365_alert():
+    raw = json.loads((FIXTURES / "defender_o365_malicious_url.json").read_text())
+    return normalize(raw)
+
+
+@pytest.fixture
+def o365_plan() -> NarratorPlan:
+    return NarratorPlan(
+        executive_summary="Dos buzones recibieron un correo con URL maliciosa.",
+        risk_level="low",
+        actions=[
+            ProposedAction(
+                type="notify_only",
+                target="jperez, mgomez",
+                justification="Defender ya removió los mensajes.",
+            )
+        ],
+        rationale="Phishing removido post-entrega.",
+    )
+
+
+def test_o365_html_has_email_section(o365_alert, o365_plan) -> None:
+    """El correo trae asunto, destinatarios, remitente y URL.
+
+    Regresión: estas alertas llegaban con "Información principal" vacía porque
+    todo el template colgaba de device.hostname / files, que en O365 no existen.
+    """
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "Correos involucrados (2)" in html
+    assert "jperez@contoso.com" in html
+    assert "mgomez@contoso.com" in html
+    assert "abre.ai/rw8y" in html
+    assert "200.41.220.50" in html
+    assert "Actualiz" in html  # el asunto, escapado
+
+
+def test_o365_html_pivot_is_subject_not_none(o365_alert, o365_plan) -> None:
+    """Sin host, el titular es el asunto + buzones (antes decía "-")."""
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "Buzones" in html
+    assert "<strong>-</strong>" not in html
+
+
+def test_o365_html_shows_vendor_mitre(o365_alert, o365_plan) -> None:
+    html = _build_html_body(
+        o365_alert, o365_plan, "http://x/a", "http://x/r", ttl_hours=24
+    )
+    assert "T1566.002" in html
+
+
+def test_o365_text_body_has_emails(o365_alert, o365_plan) -> None:
+    txt = _build_text_body(o365_alert, o365_plan, "http://x/a", "http://x/r")
+    assert "CORREOS INVOLUCRADOS (2)" in txt
+    assert "jperez@contoso.com" in txt
+    assert "abre.ai/rw8y" in txt
+    assert "(sin host)" not in txt
+
+
+def test_endpoint_email_has_no_email_section(alert, plan) -> None:
+    """Las alertas de endpoint siguen igual: sin sección de correos."""
+    html = _build_html_body(alert, plan, "http://x/a", "http://x/r", ttl_hours=24)
+    assert "Correos involucrados" not in html
+
+
+# ===== Correo de observación: modo sombra vs Fase 0 =====
+# El texto viejo afirmaba "el bloqueo real lo sigue haciendo custom-email-unified",
+# que es falso desde el 2026-07-07, y llamaba "Regla IPS" a cualquier regla —
+# incluida 100207 (Kong), que es correlación de 404, no una firma IPS.
+
+
+def _render_observacion(**kw) -> tuple[str, str]:
+    """Devuelve (texto_plano, html) del correo de observación."""
+    import asyncio
+    import html as H
+    import re
+    from unittest.mock import patch
+
+    from src import mailer
+
+    cap: dict = {}
+    s = Settings(smtp_host="x", smtp_to_approvers="a@b.c", smtp_from="soc@x")
+    base = dict(
+        alert_id="1790012345.999", ip="62.210.142.163", rule_id="100207",
+        host="seg-vs85-prod01", ttl_hours=1,
+        rule_desc="Kong: Multiple 404 errors from 62.210.142.163 - "
+                  "Possible endpoint enumeration or scanning",
+    )
+    base.update(kw)
+    with patch.object(mailer, "_send_sync", lambda st, m: cap.__setitem__("m", m)):
+        asyncio.run(mailer.send_fgt_observation_email(s, **base))
+    msg = cap["m"]
+    plano = msg.get_body(preferencelist=("plain",)).get_content()
+    crudo = msg.get_body(preferencelist=("html",)).get_content()
+    visible = H.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", crudo)))
+    return plano, visible
+
+
+def test_observacion_sombra_no_dice_IPS_ni_fase_0() -> None:
+    plano, visible = _render_observacion(observe_only=True)
+    for texto in (plano, visible):
+        assert "MODO SOMBRA" in texto or "modo sombra" in texto
+        assert "Regla IPS" not in texto, "100207 no es una regla IPS"
+        assert "Fase 0" not in texto, "el autoblock está en Fase 1"
+        assert "custom-email-unified" not in texto, "ese integration se retiró el 07/07"
+    # Dice explícitamente que las IPS siguen bloqueando: es la duda que genera el aviso.
+    assert "siguen bloqueando en vivo" in visible
+
+
+def test_observacion_fase0_no_miente_sobre_quien_bloquea() -> None:
+    plano, visible = _render_observacion(observe_only=False, rule_id="196201")
+    for texto in (plano, visible):
+        assert "custom-email-unified" not in texto
+        assert "deshabilitado" in texto  # nadie bloquea, que es la verdad en Fase 0
+
+
+def test_observacion_no_deja_entidades_html_sin_resolver() -> None:
+    """Las etiquetas pasan por html.escape(): si traen &iacute; salen literales."""
+    _, visible = _render_observacion(observe_only=True)
+    for entidad in ("&iacute;", "&mdash;", "&aacute;", "&oacute;"):
+        assert entidad not in visible, f"{entidad} quedó sin resolver en el correo"
+    assert "Bloquearía la IP" in visible
+
+
+def test_observacion_dice_QUE_detecto_no_solo_el_numero_de_regla() -> None:
+    """Un "regla 100207" pelado no le dice nada a quien lee el correo a las 3 AM."""
+    plano, visible = _render_observacion(observe_only=True)
+    for texto in (plano, visible):
+        assert "Kong" in texto
+        assert "endpoint enumeration" in texto
+
+
+# --- Correo de BLOQUEO ejecutado: mismo template para IPS y para Kong -------------
+
+
+def _render_bloqueo(**kw) -> tuple[str, str]:
+    """Devuelve (texto_plano, html_visible) del correo de bloqueo ejecutado."""
+    import asyncio
+    import html as H
+    import re
+    from unittest.mock import patch
+
+    from src import mailer
+
+    cap: dict = {}
+    s = Settings(smtp_host="x", smtp_to_approvers="a@b.c", smtp_from="soc@x")
+    base = dict(
+        alert_id="1790088849.68371440", ip="216.180.246.205", rule_id="100207",
+        host="seg-vs85-prod01", ttl_hours=1,
+        expires_at="2026-09-22T15:54:11+00:00",
+        rule_desc="Kong: Multiple 404 errors from 216.180.246.205 - "
+                  "Possible endpoint enumeration or scanning",
+    )
+    base.update(kw)
+    with patch.object(mailer, "_send_sync", lambda st, m: cap.__setitem__("m", m)):
+        asyncio.run(mailer.send_fgt_block_email(s, **base))
+    msg = cap["m"]
+    plano = msg.get_body(preferencelist=("plain",)).get_content()
+    crudo = msg.get_body(preferencelist=("html",)).get_content()
+    visible = H.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", crudo)))
+    return plano, visible
+
+
+def test_bloqueo_kong_no_dice_IPS_y_dice_que_detecto() -> None:
+    plano, visible = _render_bloqueo()
+    for texto in (plano, visible):
+        assert "Regla IPS" not in texto, "100207 es correlación de Kong, no firma IPS"
+        assert "Regla Kong" in texto
+        assert "endpoint enumeration" in texto
+    assert "FortiGate · IP bloqueada" in visible  # mismo template que las IPS
+    assert "alerta IPS" not in visible
+
+
+def test_bloqueo_ips_conserva_el_texto_de_siempre() -> None:
+    plano, visible = _render_bloqueo(rule_id="196210", rule_desc=None)
+    assert "Regla IPS" in plano
+    assert "alerta IPS de alta confianza" in visible

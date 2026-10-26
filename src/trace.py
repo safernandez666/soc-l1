@@ -29,7 +29,7 @@ def _now_iso() -> str:
 class TimelineEvent:
     """Un hito del pipeline. `summary` reusa el texto que ya se computa para los logs."""
 
-    stage: str  # "triage" | "enricher" | "threat_intel" | "narrator"
+    stage: str  # "triage" | "enricher" | "threat_intel" | "wazuh_evidence" | "narrator"
     ts: str  # ISO8601 UTC
     summary: str
     detail: str | None = None  # opcional: flags, counts, verdict

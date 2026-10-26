@@ -226,3 +226,65 @@ class FortigateClient:
             expires_at=expires_at,
             message=f"IP {ip} banned for {ttl_seconds}s (until {expires_at})",
         )
+
+    # ===== Sesiones vivas (post-cuarentena) =====
+    #
+    # POR QUE EXISTE: el 2026-09-26 SOC-L1 puso en cuarentena a 172.104.27.48 (policy
+    # 128 "Public-GATEWAY", VIP de Kong) y Kong recibio 67 requests mas de esa IP en los
+    # 13 minutos siguientes. El ban (banned users) se aplica al armar sesiones NUEVAS;
+    # una sesion TCP ya establecida (keep-alive de un scanner) sigue pasando hasta que
+    # expira o se corta. Estos dos metodos miden eso y, con permiso, lo cortan.
+    #
+    # Permiso: `firewall/session/close` exige en el accprofile del api-user
+    # `fwgrp-permission others read-write`. Con el perfil actual (others=none) el
+    # cierre devuelve 403 y se reporta como `permission_denied=True`, sin romper nada.
+
+    async def list_sessions(self, ip: str, limit: int = 500) -> list[dict[str, Any]]:
+        """Sesiones vivas cuyo ORIGEN es `ip`.
+
+        GET /api/v2/monitor/firewall/session?ip_version=ipv4&srcaddr=<ip>. El filtro
+        `srcaddr` del FortiOS no siempre se aplica (verificado en 7.4.12: devuelve la
+        tabla completa), asi que se filtra ademas del lado cliente por `saddr`.
+        """
+        body = await self._get(
+            "/api/v2/monitor/firewall/session",
+            params={"ip_version": "ipv4", "srcaddr": ip, "count": limit},
+        )
+        results = body.get("results", {})
+        detalles = results.get("details", []) if isinstance(results, dict) else results
+        return [s for s in (detalles or []) if str(s.get("saddr")) == ip]
+
+    async def close_sessions(self, ip: str) -> dict[str, Any]:
+        """Cierra las sesiones vivas originadas en `ip`. Best-effort.
+
+        POST /api/v2/monitor/firewall/session/close por cada tupla
+        {pro, saddr, daddr, sport, dport}. Devuelve un resumen:
+          found, closed, failed, permission_denied, policies (ids distintos).
+        """
+        out: dict[str, Any] = {
+            "found": 0, "closed": 0, "failed": 0, "permission_denied": False, "policies": [],
+        }
+        try:
+            sesiones = await self.list_sessions(ip)
+        except FortigateError as e:
+            out["error"] = str(e)[:200]
+            return out
+        out["found"] = len(sesiones)
+        out["policies"] = sorted({int(s.get("policyid", 0) or 0) for s in sesiones})
+        for s in sesiones:
+            payload = {
+                "pro": str(s.get("proto", "tcp")),
+                "saddr": str(s.get("saddr")),
+                "daddr": str(s.get("daddr")),
+                "sport": int(s.get("sport", 0) or 0),
+                "dport": int(s.get("dport", 0) or 0),
+            }
+            try:
+                await self._post("/api/v2/monitor/firewall/session/close", json=payload)
+                out["closed"] += 1
+            except FortigateError as e:
+                out["failed"] += 1
+                if "403" in str(e):
+                    out["permission_denied"] = True
+                    break  # el resto va a fallar igual; no machacar la API
+        return out

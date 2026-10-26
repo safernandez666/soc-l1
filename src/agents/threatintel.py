@@ -12,6 +12,7 @@ Cache anti-loop por (tool, args) en el contexto (mismo patrón que Enricher).
 
 PROCEDIMIENTO esperado del LLM (forzado en system prompt):
   1. Por cada file en alert.files con SHA256 → vt_lookup_hash
+     Por cada sender_ip de alert.emails → abuseipdb_check
   2. Por cada IP en alert.network (src/dst) → abuseipdb_check
   3. Sintetizar en ThreatIntelResult
 
@@ -385,6 +386,9 @@ PROCEDIMIENTO OBLIGATORIO:
 2. Por cada IP en alert.network que NO sea None ni RFC1918 (10.*, 172.16-31.*, 192.168.*):
    - llamá abuseipdb_check(ip)
    - llamá fortigate_check_ip(ip)  ← solo si tenés FortiGate configurado
+2b. Por cada `sender_ip` distinto en alert.emails[] (alertas de correo de Defender for
+   Office 365) que sea pública y que NO hayas chequeado ya en el paso 2 → abuseipdb_check.
+   Es el origen real del phishing. NO chequees 255.255.255.255 ni IPs privadas.
 3. Componé y devolvé EXACTAMENTE el JSON de ThreatIntelResult.
 
 CRITERIO PARA `flags`:

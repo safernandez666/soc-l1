@@ -17,7 +17,7 @@ import logging
 import os
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -192,6 +192,13 @@ class Settings(BaseSettings):
         )
     )
     fortigate_block_ttl_hours: int = Field(default=1)
+    # Reglas en MODO SOMBRA: se evalúan como candidatas (dedup, registro en el JSONL y
+    # aviso por mail/Teams) pero NUNCA ejecutan el quarantine, aunque
+    # fortigate_autoblock_enabled=True. Sirve para estrenar una familia de reglas nueva
+    # —p. ej. la enumeración de Kong (100207), que es correlación nivel 8 y no una firma
+    # IPS— y medir a quién bloquearíamos antes de promoverla a fortigate_auto_block_rules.
+    # Si un ID aparece en las dos listas gana esta (lo seguro), y se loguea el conflicto.
+    fortigate_observe_only_rules: str = Field(default="")
     # Fase 0: mandar un email de OBSERVACIÓN ("esto bloquearía X") al detectar un
     # candidato a auto-block, sin ejecutar nada. Temporal, para tener visibilidad por
     # mail hasta el cutover a Fase 1 (ahí se apaga). Dedup por IP dentro de la ventana TTL.
@@ -227,6 +234,13 @@ class Settings(BaseSettings):
     invgate_customer_id: int = Field(default=5, validation_alias="CUSTOMER_ID_INVGATE")
     invgate_category_id: int = Field(default=59, validation_alias="CATEGORY_ID_INVGATE")
     invgate_verify_ssl: bool = Field(default=True, validation_alias="INVGATE_VERIFY_SSL")
+    # status_id de InvGate que cuentan como "resuelto/cerrado" para la verificación
+    # read-back de close_incident. En la instancia de Grupo Alemana, status 5 =
+    # "Resuelto" (setea solved_at); 7 y 8 = abierto. La señal primaria es igual
+    # solved_at/closed_at != null; esto es el fallback si esos campos faltaran.
+    invgate_closed_status_ids: str = Field(
+        default="5", validation_alias="INVGATE_CLOSED_STATUS_IDS"
+    )
 
     # SMTP para email approvals (Exchange 2016 con STARTTLS en server cliente)
     smtp_host: str = Field(default="")
@@ -268,6 +282,15 @@ class Settings(BaseSettings):
     # lo lee solo-lectura (descomprimir en cada request sería inviable).
     wazuh_alerts_archive_dir: str = Field(default="/var/ossec/logs/alerts")
     alert_volume_cache_path: str = Field(default="/var/lib/soc-l1/alert_volume.json")
+
+    # Ciclo de vida de vulnerabilidades. La escribe el pipeline de vuln (indexer →
+    # store); el panel /ui la lee solo-lectura. El nombre de la env var es el que ya
+    # usa src/vuln/store.py (VULN_STATE_DB): se acepta también el nombre del campo
+    # para poder construir Settings(vuln_state_db_path=...) en los tests.
+    vuln_state_db_path: str = Field(
+        default="/opt/soc-l1/vuln_lifecycle.db",
+        validation_alias=AliasChoices("VULN_STATE_DB", "vuln_state_db_path"),
+    )
 
     # ===== GUI / Dashboard (ZebraSecurity) =====
     # Panel de revisión solo-lectura sobre state.db, servido en /ui detrás de login.
@@ -332,6 +355,16 @@ class Settings(BaseSettings):
             if host.strip()
         }
 
+    def invgate_closed_status_ids_set(self) -> set[int]:
+        """status_id que cuentan como resuelto/cerrado (fallback de la verificación
+        read-back si solved_at/closed_at no vinieran). Ignora valores no numéricos."""
+        out: set[int] = set()
+        for tok in self.invgate_closed_status_ids.split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                out.add(int(tok))
+        return out
+
     def defender_configured(self) -> bool:
         """True si están los 3 datos para hablar con la API de MDE."""
         return bool(
@@ -351,9 +384,19 @@ class Settings(BaseSettings):
         ]
 
     def fortigate_auto_block_rules_set(self) -> set[str]:
-        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1))."""
-        return {
+        """IDs de reglas Wazuh que disparan el auto-block FortiGate (lookup O(1)).
+
+        Excluye las de modo sombra: si un ID está en las dos listas, observe-only manda.
+        """
+        crudas = {
             r.strip() for r in self.fortigate_auto_block_rules.split(",") if r.strip()
+        }
+        return crudas - self.fortigate_observe_only_rules_set()
+
+    def fortigate_observe_only_rules_set(self) -> set[str]:
+        """IDs de reglas candidatas que se observan pero NUNCA bloquean (modo sombra)."""
+        return {
+            r.strip() for r in self.fortigate_observe_only_rules.split(",") if r.strip()
         }
 
     def dry_run_for(self, action_type: str) -> bool:

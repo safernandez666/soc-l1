@@ -1,9 +1,20 @@
+import { useState } from "react"
 import { Link, useParams } from "react-router-dom"
-import { api, type CaseDetail, type TimelineEvent } from "@/lib/api"
+import {
+  api,
+  type PlanAction,
+  type CaseDetail,
+  type ExecMode,
+  type Session,
+  type TimelineEvent,
+} from "@/lib/api"
 import { useFetch } from "@/lib/useFetch"
+import { simulatedFamilies, useExecMode } from "@/lib/useExecMode"
+import { statusLabel } from "@/lib/status"
 import { StateView } from "@/components/StateView"
 import { StatusBadge, RiskPill } from "@/components/badges"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Table,
@@ -14,14 +25,6 @@ import {
   TableRow,
 } from "@/components/ui/table"
 
-const STATUS_LABEL: Record<string, string> = {
-  pending: "Pendiente",
-  approved: "Aprobado",
-  executed: "Ejecutado",
-  rejected: "Rechazado",
-  expired: "Expirado",
-}
-
 // Reconstruye el timeline igual que render.case_page: eventos base + decisión + ejecución.
 function buildTimeline(c: CaseDetail): TimelineEvent[] {
   const events: TimelineEvent[] = [...(c.timeline || [])]
@@ -29,7 +32,7 @@ function buildTimeline(c: CaseDetail): TimelineEvent[] {
     events.push({
       stage: "decision",
       ts: c.decided_at,
-      summary: `${STATUS_LABEL[c.status] ?? c.status} por ${c.decided_by_ip ?? "?"}`,
+      summary: `${statusLabel(c.status)} por ${c.decided_by_ip ?? "?"}`,
       detail: (c.decided_by_ua || "").slice(0, 120) || null,
     })
   }
@@ -55,9 +58,188 @@ function Kv({ k, v }: { k: string; v: string }) {
   )
 }
 
+/** Aviso de modo simulación. Sin esto el panel mostraba "ok" en acciones
+ *  que nunca tocaron FortiGate, AD ni Defender. */
+function DryRunNotice({
+  mode,
+  session,
+  pending,
+}: {
+  mode: ExecMode
+  session: Session | null
+  pending: boolean
+}) {
+  const familias = simulatedFamilies(session)
+  const detalle =
+    mode === "mixed" && familias.length > 0
+      ? `Se simulan: ${familias.join(", ")}. El resto se ejecuta de verdad.`
+      : "Las acciones quedan registradas pero no se aplican en FortiGate, AD ni Defender."
+  return (
+    <div
+      className="flex items-start gap-3 rounded-xl px-4 py-3.5"
+      style={{
+        background: "color-mix(in oklab, var(--zs-warn) 7%, transparent)",
+        boxShadow: "inset 0 0 0 1px color-mix(in oklab, var(--zs-warn) 30%, transparent)",
+      }}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--zs-warn)"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="mt-0.5 h-[18px] w-[18px] shrink-0"
+        aria-hidden
+      >
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z" />
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+      </svg>
+      <div className="flex flex-col gap-0.5">
+        <div className="text-sm font-semibold" style={{ color: "var(--zs-warn)" }}>
+          {pending ? "Al aprobar, se simula" : "Modo simulación activo"}
+        </div>
+        <div className="text-[13px] leading-relaxed text-[var(--zs-text-secondary)]">
+          {detalle}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Barra de decisión. Hasta acá el panel era solo-lectura y la única forma de
+ *  aprobar era el link del correo; esto pega contra la misma ruta de decisión. */
+function DecisionBar({
+  rowid,
+  actions,
+  mode,
+  onDecided,
+}: {
+  rowid: string
+  actions: PlanAction[]
+  mode: ExecMode | null
+  onDecided: () => void
+}) {
+  const [selected, setSelected] = useState<Set<number>>(
+    () => new Set(actions.map((_, i) => i))
+  )
+  const [busy, setBusy] = useState<null | "approved" | "rejected">(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = (i: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
+
+  const decide = async (decision: "approved" | "rejected") => {
+    setBusy(decision)
+    setError(null)
+    try {
+      await api.decide(
+        rowid,
+        decision,
+        decision === "approved" ? [...selected].sort((a, b) => a - b) : null
+      )
+      onDecided()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo registrar la decisión")
+      setBusy(null)
+    }
+  }
+
+  const n = selected.size
+  const approveLabel =
+    mode === "live"
+      ? "Aprobar y ejecutar"
+      : mode === "dry_run"
+        ? "Aprobar y simular"
+        : "Aprobar"
+
+  return (
+    <Card style={{ boxShadow: "inset 0 0 0 1px color-mix(in oklab, var(--primary) 30%, transparent)" }}>
+      <CardHeader>
+        <CardTitle className="text-sm">Decisión</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {actions.length > 0 && (
+          <div className="flex flex-col gap-2">
+            {actions.map((a, i) => (
+              <label
+                key={i}
+                className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-1.5 hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(i)}
+                  onChange={() => toggle(i)}
+                  disabled={busy !== null}
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--primary)]"
+                />
+                <span className="flex flex-col gap-0.5">
+                  <span className="font-mono text-xs">
+                    {a.type} → {a.target || "—"}
+                  </span>
+                  {a.justification && (
+                    <span className="text-xs text-muted-foreground">
+                      {a.justification}
+                    </span>
+                  )}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-col gap-0.5">
+            <div className="text-sm font-medium">
+              {actions.length === 0
+                ? "El plan no propone acciones"
+                : `${n} de ${actions.length} acción${actions.length === 1 ? "" : "es"} elegida${n === 1 ? "" : "s"}`}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Queda registrado con tu IP y timestamp en el timeline del caso.
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => decide("rejected")}
+              disabled={busy !== null}
+              style={{ borderColor: "color-mix(in oklab, var(--zs-danger) 45%, transparent)", color: "var(--zs-danger)" }}
+            >
+              {busy === "rejected" ? "Rechazando…" : "Rechazar"}
+            </Button>
+            <Button
+              onClick={() => decide("approved")}
+              disabled={busy !== null}
+            >
+              {busy === "approved" ? "Aprobando…" : approveLabel}
+            </Button>
+          </div>
+        </div>
+
+        {error && (
+          <p className="text-sm" style={{ color: "var(--zs-danger)" }}>
+            {error}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export function CasePage() {
   const { rowid } = useParams()
-  const state = useFetch(() => api.case(rowid!), [rowid])
+  // Se incrementa al decidir para refrescar el caso sin recargar la página.
+  const [reload, setReload] = useState(0)
+  const state = useFetch(() => api.case(rowid!), [rowid, reload])
+  const { mode, session } = useExecMode()
 
   return (
     <StateView state={state}>
@@ -72,6 +254,10 @@ export function CasePage() {
         const selected = new Set(c.selected_actions || [])
         const hasSelection = (c.selected_actions || []).length > 0
         const timeline = buildTimeline(c)
+        const isPending = c.status === "pending"
+        const anySimulated = c.execution_result.some((er) => er?.simulated)
+        const showNotice =
+          (mode === "dry_run" || mode === "mixed") && (isPending || anySimulated)
 
         return (
           <div className="space-y-5">
@@ -81,6 +267,10 @@ export function CasePage() {
             >
               ← Volver a la cola
             </Link>
+
+            {showNotice && mode && (
+              <DryRunNotice mode={mode} session={session} pending={isPending} />
+            )}
 
             {/* Header */}
             <Card>
@@ -105,6 +295,15 @@ export function CasePage() {
                 </div>
               </CardContent>
             </Card>
+
+            {isPending && rowid && (
+              <DecisionBar
+                rowid={rowid}
+                actions={actions}
+                mode={mode}
+                onDecided={() => setReload((r) => r + 1)}
+              />
+            )}
 
             <div className="grid gap-5 lg:grid-cols-2">
               <Card>
@@ -139,63 +338,66 @@ export function CasePage() {
               </Card>
             </div>
 
-            {/* Acciones propuestas */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Acciones propuestas</CardTitle>
-              </CardHeader>
-              <CardContent className={actions.length ? "p-0" : ""}>
-                {actions.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    El plan no propone acciones.
-                  </p>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Acción</TableHead>
-                        <TableHead>Target</TableHead>
-                        <TableHead>Justificación</TableHead>
-                        <TableHead className="text-right">Elegida</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {actions.map((a, i) => {
-                        const chosen = !hasSelection || selected.has(i)
-                        return (
-                          <TableRow key={i}>
-                            <TableCell className="font-mono text-xs">
-                              {a.type}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs">
-                              {a.target || "—"}
-                            </TableCell>
-                            <TableCell className="text-xs text-muted-foreground">
-                              {a.justification || "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <Badge
-                                variant="outline"
-                                style={{
-                                  borderColor: chosen
-                                    ? "var(--zs-ok)"
-                                    : "var(--zs-text-muted)",
-                                  color: chosen
-                                    ? "var(--zs-ok)"
-                                    : "var(--zs-text-muted)",
-                                }}
-                              >
-                                {chosen ? "sí" : "no"}
-                              </Badge>
-                            </TableCell>
-                          </TableRow>
-                        )
-                      })}
-                    </TableBody>
-                  </Table>
-                )}
-              </CardContent>
-            </Card>
+            {/* Acciones propuestas — cuando el caso ya se decidió. Mientras está
+                pendiente, las acciones se eligen arriba en la barra de decisión. */}
+            {!isPending && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Acciones propuestas</CardTitle>
+                </CardHeader>
+                <CardContent className={actions.length ? "p-0" : ""}>
+                  {actions.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      El plan no propone acciones.
+                    </p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Acción</TableHead>
+                          <TableHead>Target</TableHead>
+                          <TableHead>Justificación</TableHead>
+                          <TableHead className="text-right">Elegida</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {actions.map((a, i) => {
+                          const chosen = !hasSelection || selected.has(i)
+                          return (
+                            <TableRow key={i}>
+                              <TableCell className="font-mono text-xs">
+                                {a.type}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
+                                {a.target || "—"}
+                              </TableCell>
+                              <TableCell className="text-xs text-muted-foreground">
+                                {a.justification || "—"}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <Badge
+                                  variant="outline"
+                                  style={{
+                                    borderColor: chosen
+                                      ? "var(--zs-ok)"
+                                      : "var(--zs-text-muted)",
+                                    color: chosen
+                                      ? "var(--zs-ok)"
+                                      : "var(--zs-text-muted)",
+                                  }}
+                                >
+                                  {chosen ? "sí" : "no"}
+                                </Badge>
+                              </TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
             {/* Resultado de ejecución */}
             <Card>
@@ -227,19 +429,35 @@ export function CasePage() {
                             {er.target || "—"}
                           </TableCell>
                           <TableCell>
-                            <Badge
-                              variant="outline"
-                              style={{
-                                borderColor: er.ok
-                                  ? "var(--zs-ok)"
-                                  : "var(--zs-danger)",
-                                color: er.ok
-                                  ? "var(--zs-ok)"
-                                  : "var(--zs-danger)",
-                              }}
-                            >
-                              {er.ok ? "ok" : "fail"}
-                            </Badge>
+                            <div className="flex items-center gap-1.5">
+                              <Badge
+                                variant="outline"
+                                style={{
+                                  borderColor: er.ok
+                                    ? "var(--zs-ok)"
+                                    : "var(--zs-danger)",
+                                  color: er.ok
+                                    ? "var(--zs-ok)"
+                                    : "var(--zs-danger)",
+                                }}
+                              >
+                                {er.ok ? "ok" : "fail"}
+                              </Badge>
+                              {er.simulated && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] uppercase tracking-wide"
+                                  style={{
+                                    borderColor:
+                                      "color-mix(in oklab, var(--zs-warn) 45%, transparent)",
+                                    color: "var(--zs-warn)",
+                                  }}
+                                  title="Simulada: no se aplicó en el sistema destino"
+                                >
+                                  simulada
+                                </Badge>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground">
                             {er.message || "—"}
