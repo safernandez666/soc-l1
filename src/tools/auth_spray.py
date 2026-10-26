@@ -96,6 +96,7 @@ class AuthSpraySummary:
     existing: set[str] = field(default_factory=set)
     origins: Counter = field(default_factory=Counter)
     successes: list[str] = field(default_factory=list)
+    burst_found: bool = False
 
     def to_text(self) -> str:
         if not self.failures and not self.successes:
@@ -219,6 +220,7 @@ def summarize_auth_failures(
     burst = _spray_burst(events, *_defender_activity(alert))
     if burst is not None:
         summary.start, summary.end = burst
+        summary.burst_found = True
         start, end = burst
     events = [e for e in events if start <= e[0] <= end]
 

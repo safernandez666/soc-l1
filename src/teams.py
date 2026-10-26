@@ -121,6 +121,19 @@ def _text(text: str, *, wrap: bool = True, spacing: str = "Default",
     }
 
 
+_EVIDENCE_CARD_MAX = 600
+
+
+def _evidence_blocks(alert: NormalizedAlert) -> list[dict[str, Any]]:
+    """Evidencia de Wazuh recortada para la card (el detalle completo va al ticket)."""
+    if not alert.wazuh_evidence:
+        return []
+    text = alert.wazuh_evidence
+    if len(text) > _EVIDENCE_CARD_MAX:
+        text = text[:_EVIDENCE_CARD_MAX].rstrip() + "… (detalle en el ticket)"
+    return [_text("**Evidencia en Wazuh:**", spacing="Medium"), _text(text, is_subtle=True)]
+
+
 async def _post_card(settings: Settings, card: dict[str, Any], *, kind: str,
                      alert_id: str) -> None:
     """POSTea la card al webhook de Teams. Fire-and-forget (nunca propaga)."""
@@ -194,6 +207,7 @@ async def send_teams_approval_request(
             ("Acciones propuestas", str(len(plan.actions))),
         ]),
         _text(plan.executive_summary, spacing="Medium"),
+        *_evidence_blocks(alert),
         _text("**Acciones propuestas:**", spacing="Medium"),
         _text(_actions_summary(plan)),
     ]

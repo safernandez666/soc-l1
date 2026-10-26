@@ -20,7 +20,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
@@ -616,6 +616,54 @@ async def _attach_wazuh_evidence_safely(
         logger.exception("wazuh_evidence failed for alert id=%s", alert.alert_id)
 
 
+_FOLLOWUP_QUIET = timedelta(minutes=10)
+
+
+async def _spray_followup_safely(
+    settings: Settings,
+    alert: NormalizedAlert,
+    request_id: int,
+    *,
+    poll_seconds: float = 300,
+    max_seconds: float = 3 * 3600,
+    sleep=asyncio.sleep,
+) -> bool:
+    """Cuando la ráfaga de spray termina, suma al ticket el resumen completo.
+
+    El ticket se crea ~20 min después del primer evento y el spray puede seguir
+    una hora más; el resumen inicial queda parcial. Espera a que pasen 10 min sin
+    actividad y comenta el total (nota interna). Vive en memoria: si el servicio
+    se reinicia, no se retoma. Devuelve True si publicó la actualización.
+    """
+    try:
+        from src.tools.auth_spray import summarize_auth_failures
+        from src.tools.invgate import InvgateClient
+
+        waited = 0.0
+        while waited <= max_seconds:
+            await sleep(poll_seconds)
+            waited += poll_seconds
+            summary = await asyncio.to_thread(summarize_auth_failures, alert)
+            if not summary.burst_found:
+                return False
+            if summary.end > datetime.now(tz=timezone.utc) - _FOLLOWUP_QUIET:
+                continue  # sigue activa
+            text = summary.to_text()
+            if text == alert.wazuh_evidence:
+                return False  # nada nuevo respecto del ticket
+            async with InvgateClient(settings) as client:
+                await client.add_comment(
+                    request_id,
+                    "Actualización de la evidencia en Wazuh: la ráfaga terminó.\n\n" + text,
+                    internal=True,
+                )
+            logger.info("🔎 SPRAY_FOLLOWUP | ticket=%s alert=%s", request_id, alert.alert_id)
+            return True
+    except Exception:
+        logger.exception("spray followup failed | ticket=%s alert=%s", request_id, alert.alert_id)
+    return False
+
+
 async def _run_enricher_safely(
     alert: NormalizedAlert, settings: Settings, priority: str, trace: PipelineTrace
 ):
@@ -810,6 +858,8 @@ async def _run_narrator_and_request_approval(
                 "invgate", f"Ticket #{invgate_request_id} creado en InvGate",
                 detail=f"prioridad por risk={plan.risk_level}",
             )
+        if invgate_request_id and alert.wazuh_evidence:
+            _spawn(_spray_followup_safely(settings, alert, invgate_request_id))
 
         token = await create_pending_approval(
             settings.state_db_path,

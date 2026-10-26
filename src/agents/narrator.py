@@ -91,6 +91,10 @@ class NarratorPlan(BaseModel):
 
 SYSTEM_PROMPT = """Sos el agente NARRATOR de un SOC L1. Recibís un bundle JSON con:
   - alert: la alerta normalizada (incluye device, files, threat, wazuh_rule, users_involved)
+    Si alert.wazuh_evidence existe, es la correlación de fallos de autenticación de Wazuh \
+(cantidad, nombres probados, cuentas que existen, orígenes, logons exitosos): usala para \
+dimensionar el alcance y NO la contradigas. 0xC000006A prueba que el nombre existe, no que la \
+cuenta esté habilitada.
   - triage: la decisión del Triage agent (verdict, reason, confidence)
   - enrichment: contexto local recolectado (users desde AD, rule details, flags)
   - threat_intel: (puede ser null) contexto externo de VirusTotal (file hashes) y \

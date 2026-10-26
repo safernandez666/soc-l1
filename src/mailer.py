@@ -211,6 +211,10 @@ def _build_text_body(
     lines.append("ANALISIS")
     lines.append(plan.rationale)
     lines.append("")
+    if alert.wazuh_evidence:
+        lines.append("EVIDENCIA EN WAZUH")
+        lines.append(alert.wazuh_evidence)
+        lines.append("")
 
     # Contexto local (MITRE + cuentas AD + flags)
     if enrichment is not None:
@@ -796,6 +800,14 @@ def _build_html_body(
             accent=_theme.C_HIGH, bg=_theme.C_WARN_BG,
         ),
     )
+
+    if alert.wazuh_evidence:
+        cuerpo += _theme.section(
+            "Evidencia en Wazuh",
+            "Correlaci&oacute;n autom&aacute;tica de fallos de autenticaci&oacute;n",
+            f'<div style="font-family:{_theme.FONT};font-size:12px;line-height:19px;'
+            f'color:{_theme.C_TEXT};white-space:pre-line;">{_esc(alert.wazuh_evidence)}</div>',
+        )
 
     cuerpo += _theme.section(
         f"Acciones propuestas ({len(plan.actions)})",
