@@ -5,7 +5,7 @@ description = "SOC L1 multi-agent SOAR for Wazuh + Defender alerts"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",
-    "pydantic-settings>=2.5",
+    "pydantic-settings>=2.14.2",
     "ldap3>=2.9",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
