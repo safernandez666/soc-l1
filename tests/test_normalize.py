@@ -259,3 +259,44 @@ def test_is_public_ip(ip, expected) -> None:
     from src.normalize import _is_public_ip
 
     assert _is_public_ip(ip) is expected
+
+
+# ===== MDI: enumeración de cuentas con origen "178-16-53-33" =====
+
+
+def _mdi_enumeration(source_host: str | None) -> dict:
+    """Mínimo de una alerta MDI de enumeración: origen + DC destino + cuentas."""
+    return {
+        "rule": {"id": "200003", "level": 10, "description": "Defender [medium]: enum",
+                 "groups": ["azure", "defender", "defender_medium"]},
+        "data": {
+            "id": "ri1_aml", "title": "Suspected account enumeration", "severity": "medium",
+            "productName": "Microsoft Defender for Identity",
+            "evidence": [
+                {"@odata.type": "#microsoft.graph.security.deviceEvidence",
+                 "roles": ["source"], "hostName": source_host, "deviceDnsName": source_host},
+                {"@odata.type": "#microsoft.graph.security.deviceEvidence",
+                 "roles": ["destination"], "hostName": "srvdc2",
+                 "deviceDnsName": "srvdc2.grupoalemana.dns", "lastIpAddress": "192.168.32.28"},
+            ],
+        },
+    }
+
+
+def test_mdi_enumeration_dashed_hostname_becomes_external_ip() -> None:
+    alert = normalize(_mdi_enumeration("178-16-53-33"))
+    assert alert.network.src_ip_external == "178.16.53.33"
+    assert alert.network.src_ip_internal is None
+
+
+def test_mdi_enumeration_private_dashed_hostname_is_internal() -> None:
+    alert = normalize(_mdi_enumeration("192-168-38-20"))
+    assert alert.network.src_ip_internal == "192.168.38.20"
+    assert alert.network.src_ip_external is None
+
+
+@pytest.mark.parametrize("host", [None, "NULL", "srvweb01", "999-1-1-1", "1-2-3"])
+def test_mdi_enumeration_without_ip_in_hostname_stays_empty(host) -> None:
+    alert = normalize(_mdi_enumeration(host))
+    assert alert.network.src_ip_external is None
+    assert alert.network.src_ip_internal is None

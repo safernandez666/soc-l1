@@ -105,6 +105,42 @@ def _is_public_ip(ip: str | None) -> bool:
     )
 
 
+_DASHED_IPV4 = re.compile(r"^(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})$")
+
+
+def _ip_from_dashed_hostname(name: str | None) -> str | None:
+    """'178-16-53-33' (o '178-16-53-33.dominio') -> '178.16.53.33'.
+
+    Cuando MDI no resuelve el origen de una enumeración NTLM/Kerberos, deja como
+    host el nombre de estación que mandó el cliente: una IP con guiones. Sin esto
+    el ticket sale sin origen aunque la IP esté en la evidencia.
+    """
+    if not name:
+        return None
+    m = _DASHED_IPV4.match(name.strip().split(".")[0])
+    if not m:
+        return None
+    candidate = ".".join(m.groups())
+    try:
+        return str(ipaddress.IPv4Address(candidate))
+    except ValueError:
+        return None
+
+
+def _source_ip_from_device_evidence(evidence: list[dict[str, Any]]) -> str | None:
+    """IP del dispositivo de rol 'source' cuando su nombre es una IP con guiones."""
+    for e in evidence:
+        if "deviceEvidence" not in (e.get("@odata.type") or ""):
+            continue
+        if "source" not in (e.get("roles") or []):
+            continue
+        for key in ("hostName", "deviceDnsName"):
+            ip = _ip_from_dashed_hostname(e.get(key))
+            if ip:
+                return ip
+    return None
+
+
 def _parse_office365_evidence(
     evidence: list[dict[str, Any]],
 ) -> tuple[list[User], list[EmailEvidence], str | None]:
@@ -277,6 +313,12 @@ def _parse_defender(
         src_ip_external=device.external_ip or sender_ip,
         dst_ip=None,
     )
+    named_ip = _source_ip_from_device_evidence(evidence)
+    if named_ip and not (network.src_ip_internal or network.src_ip_external):
+        if _is_public_ip(named_ip):
+            network.src_ip_external = named_ip
+        else:
+            network.src_ip_internal = named_ip
 
     threat = Threat(
         provider=data.get("productName") or "Microsoft Defender for Endpoint",
