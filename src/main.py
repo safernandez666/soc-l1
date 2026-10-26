@@ -566,6 +566,8 @@ async def _enrich_and_request_approval(
         logger.info("enricher_skipped | id=%s ENABLE_ENRICHER=false", alert.alert_id)
         return
 
+    await _attach_wazuh_evidence_safely(alert, settings, trace)
+
     # Lanzamos Enricher y ThreatIntel en paralelo (comparten la referencia al trace)
     enrichment_task = asyncio.create_task(_run_enricher_safely(alert, settings, priority, trace))
 
@@ -587,6 +589,31 @@ async def _enrich_and_request_approval(
     await _run_narrator_and_request_approval(
         alert, decision, settings, enrichment, threat_intel, trace
     )
+
+
+async def _attach_wazuh_evidence_safely(
+    alert: NormalizedAlert, settings: Settings, trace: PipelineTrace
+) -> None:
+    """Enumeración de cuentas: suma el resumen de 4776/4625 de Wazuh a la alerta.
+
+    Va antes del Enricher/Narrator para que el plan y el ticket lo vean. Si falla
+    no aborta el pipeline.
+    """
+    try:
+        from src.tools.auth_spray import is_account_enumeration, summarize_auth_failures
+
+        if not is_account_enumeration(alert):
+            return
+        summary = await asyncio.to_thread(summarize_auth_failures, alert)
+        alert.wazuh_evidence = summary.to_text()
+        logger.info("🔎 WAZUH_EVIDENCE | id=%s\n%s", alert.alert_id, alert.wazuh_evidence)
+        trace.add(
+            "wazuh_evidence",
+            f"{summary.failures} fallos de autenticación, {len(summary.names)} nombres, "
+            f"{len(summary.successes)} logons exitosos",
+        )
+    except Exception:
+        logger.exception("wazuh_evidence failed for alert id=%s", alert.alert_id)
 
 
 async def _run_enricher_safely(
@@ -860,7 +887,8 @@ async def _create_invgate_ticket_safely(
             f"Acciones propuestas ({len(plan.actions)}):\n"
             + ("\n".join(action_lines) if action_lines else "  (ninguna)")
             + f"\n\nAnálisis:\n{plan.rationale}\n\n"
-            f"---\n"
+            + (f"Evidencia en Wazuh:\n{alert.wazuh_evidence}\n\n" if alert.wazuh_evidence else "")
+            + f"---\n"
             f"Alert ID: {alert.alert_id}\n"
             f"Host: {alert.device.hostname}\n"
             f"Wazuh rule: {alert.wazuh_rule.id} (level {alert.wazuh_rule.level})\n"

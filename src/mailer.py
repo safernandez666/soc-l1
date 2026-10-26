@@ -1274,6 +1274,7 @@ _STAGE_META = {
     "triage":       ("info",    "🔍 TRIAGE"),
     "enricher":     ("default", "🧩 ENRICHER"),
     "threat_intel": ("warning", "🛰️ THREAT INTEL"),
+    "wazuh_evidence": ("warning", "🔎 WAZUH"),
     "narrator":     ("success", "🧠 NARRATOR"),
     "invgate":      ("info",    "🎫 TICKET"),
     "decision":     ("info",    "👤 DECISIÓN"),

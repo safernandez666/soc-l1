@@ -120,6 +120,8 @@ class NormalizedAlert(BaseModel):
     network: Network
     threat: Threat
     raw: dict[str, Any]
+    # Evidencia correlacionada por SOC L1 (p.ej. fallos 4776/4625 de una enumeración).
+    wazuh_evidence: str | None = None
 
 
 # ===== Active Directory =====
