@@ -22,7 +22,7 @@ import urllib.request
 
 TAG = "ordenes-api"
 SERVICE = "ordenes-api"
-CONSUMER = "ordenes-integracion"
+CONSUMER = "zennon"
 
 
 def routes(hosts):

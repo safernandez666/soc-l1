@@ -1,0 +1,50 @@
+<!--
+  Kong - descarga masiva de datos (BOLA / exfiltracion por /buscar y /obtener)
+  Rule ID range: 100250 - 100251   (libres; 100242-100299 sin uso al 2026-10-22)
+
+  Contexto: pentest ZS-ADV-2026-1022 (22/10/2026). Con una apikey valida y el login de UNA empresa se
+  bajaron 84.216 registros en 4 requests HTTP 200 de ~15 MB. Ninguna regla actual lo ve: no hay 401 ni 404,
+  son pedidos legitimos. El log de Kong ya trae los bytes de la respuesta justo despues del status:
+
+      ... "GET /api/MsGestion/abm/clientes/buscar HTTP/1.1" 200 15728640 "-" "curl/8.21.0" ...
+
+  El decoder (0375-kong-decoder.xml) NO extrae los bytes, asi que la regla matchea sobre full_log con PCRE2 y
+  no hace falta tocar el decoder.
+
+  100250  Una respuesta 200 de >= 1 MB (7+ digitos) desde /api/Ms*/abm/<entidad>/(buscar|obtener).
+          Nivel 5: solo evidencia, no manda aviso.
+  100251  3 o mas de esas desde la misma IP en 10 minutos. Nivel 10.
+          Va a FORTIGATE_OBSERVE_ONLY_RULES (modo sombra): avisa a quien bloquearia, NO bloquea.
+
+  Falsos positivos a medir en sombra: una app/ERP legitima que baje listados grandes (reportes, sync).
+  El umbral de 1 MB sale de lo observado: respuestas normales de /buscar medidas 90 B y 18 KB.
+
+  Instalacion (requiere root en el manager):
+    1. cp deploy/kong-mass-download-rules.xml /var/ossec/etc/rules/kong-mass-download-rules.xml
+       chown root:wazuh ...; chmod 660 ...
+    2. /var/ossec/bin/wazuh-logtest   (pegar una linea de ejemplo y ver que dispare 100250)
+    3. systemctl restart wazuh-manager
+    4. Rutear 100251 en el integrator custom-email-unified de ossec.conf (las reglas hijas NO heredan el
+       ruteo del padre: hay que listarla explicita; ver deploy/route-kong-rules-fase2.py).
+    5. .env de SOC-L1: FORTIGATE_OBSERVE_ONLY_RULES=100204,100240,100241,100251  y reiniciar soc-l1.service.
+-->
+
+<group name="kong,">
+
+  <!-- Respuesta grande (>= 1 MB) de un endpoint de consulta del ERP -->
+  <rule id="100250" level="5">
+    <if_sid>100201</if_sid>
+    <regex type="pcre2">"GET /api/Ms\w+/abm/\w+/(?:buscar|obtener)\S* HTTP/[\d.]+" 200 \d{7,} </regex>
+    <description>Kong: respuesta grande (>= 1 MB) en $(url) desde $(srcip)</description>
+    <group>kong,data_exfiltration,mass_download,</group>
+  </rule>
+
+  <!-- Descarga masiva: 3 respuestas grandes de la misma IP en 10 minutos -->
+  <rule id="100251" level="10" frequency="3" timeframe="600">
+    <if_matched_sid>100250</if_matched_sid>
+    <same_source_ip />
+    <description>Kong: descarga masiva de datos desde $(srcip) - 3+ respuestas >= 1 MB en 10 min (posible exfiltracion / BOLA)</description>
+    <group>kong,attack,data_exfiltration,mass_download,</group>
+  </rule>
+
+</group>
