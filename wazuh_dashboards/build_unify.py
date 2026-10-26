@@ -70,7 +70,7 @@ BASE = Path(__file__).resolve().parent
 DST = BASE / "improved" / "unify.ndjson"
 DASHBOARD_URL = os.getenv("WAZUH_DASHBOARD_URL", "https://127.0.0.1:443")
 ENV_FILE = os.path.expanduser("~/scripts/ia/.env")
-GRAFANA_KONG = "http://192.168.38.62:3000/d/kong-alemana/kong-alemana"
+GRAFANA_KONG = "https://monitoring.grupoalemana.com/d/kong-alemana/kong-alemana"
 
 D_AD = "89a1ac90-a384-11f0-b4ab-f10742cb3085"
 D_IPS = "b63c34c0-a067-11f0-b4ab-f10742cb3085"

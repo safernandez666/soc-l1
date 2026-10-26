@@ -30,7 +30,8 @@ QUE CAMBIA
 - Se conservan las vistas de paises (build_kong_geo.py) y la tabla de detalle.
 
 Las visualizaciones EXISTENTES se editan en su lugar (mismo id) para que otros
-dashboards o links guardados no se rompan; las nuevas se crean con uuid4. Antes de
+dashboards o links guardados no se rompan; las nuevas se crean con uuid4 la primera vez
+y despues reusan el id de la que tenga el mismo titulo (idempotente). Antes de
 construir se exporta el dashboard vivo y se guarda copia en original/ para volver atras:
 
     curl -sk -u $OPENSEARCH_USER:$OPENSEARCH_PASS -H 'osd-xsrf: true' \
@@ -60,10 +61,10 @@ ORIG_DIR = BASE / "original"
 KONG_DASH_ID = "55101f30-b526-11f0-b4ab-f10742cb3085"
 DASHBOARD_URL = os.getenv("WAZUH_DASHBOARD_URL", "https://127.0.0.1:443")
 ENV_FILE = os.path.expanduser("~/scripts/ia/.env")
-GRAFANA_URL = "http://192.168.38.62:3000/d/kong-alemana/kong-alemana"
+GRAFANA_URL = "https://monitoring.grupoalemana.com/d/kong-alemana/kong-alemana"
 
 # Reglas de correlacion: una alerta cada N eventos, NO son requests.
-CORRELACION = "100204 OR 100207 OR 100211 OR 100240 OR 100241"
+CORRELACION = "100204 OR 100207 OR 100209 OR 100211 OR 100240 OR 100241"
 Q_KONG = "rule.groups: kong"
 Q_REQUESTS = f"rule.groups: kong AND NOT rule.id: ({CORRELACION})"
 Q_ATAQUES = "rule.groups: kong AND rule.groups: attack"
@@ -204,12 +205,14 @@ NOTA_MD = f"""### Cómo leer este tablero
 **De dónde salen los datos.** Kong (Docker en `seg-vs85-prod02`, 192.168.38.62) manda su log de
 acceso por **syslog UDP 514** al manager de Wazuh. El decoder `kong-decoder` saca **IP origen, método,
 ruta y código HTTP**; las reglas **100200–100241** clasifican cada request y correlacionan ataques:
-**100207** = 10 × 404 de la misma IP en 2 min (enumeración) · **100204** = 5 × 401 en 1 min (fuerza bruta)
-· **100241** = 20 requests en 1 min · **100240** = 10 × 4xx en 1 min · **100222** = DELETE.
+**100207** = 10 × 404 de la misma IP en 2 min (enumeración) · **100209** = 15 × 404 en 1 h (enumeración lenta)
+· **100204** = 5 × 401 en 1 min (fuerza bruta) · **100241** = 20 requests en 1 min · **100240** = 10 × 4xx
+que no sean 404 en 1 min (recolgada el 2026-10-13: antes no podía disparar) · **100222** = DELETE.
 
-**Qué pasa con lo que se ve acá.** La regla **100207 está ruteada a SOC-L1** (desde el 2026-09-22):
-cada disparo pone la IP en **cuarentena en el FortiGate (banned, TTL 1 h)**, abre y cierra ticket
-en InvGate y avisa por correo y Teams. **100204 / 100240 / 100241 solo alertan**, no bloquean.
+**Qué pasa con lo que se ve acá.** **100207** (desde el 2026-09-22) y **100209** (desde el 2026-09-27)
+**bloquean**: SOC-L1 pone la IP en **cuarentena en el FortiGate (banned, TTL 1 h)**, corta sus sesiones
+vivas, abre y cierra ticket en InvGate y avisa por correo y Teams. **100204 / 100240 / 100241 están en
+modo sombra**: SOC-L1 las registra como "bloquearía" pero no bloquea, para medir falsos positivos.
 
 **Lo que este tablero NO ve.** Solo llegan alertas de nivel ≥ 3 (todas las de Kong lo son). El decoder
 no extrae user-agent ni Host: para eso está el **log de acceso crudo en Grafana** →
@@ -218,8 +221,7 @@ no extrae user-agent ni Host: para eso está el **log de acceso crudo en Grafana
 **Cifras.** "Requests" excluye las alertas de correlación para contar eventos de acceso reales.
 "Ataques detectados" cuenta disparos de las reglas de correlación (un disparo = un lote de requests).
 
-*Rearmado 2026-09-27 (`wazuh_dashboards/build_kong_v2.py`). El aviso "Sin datos" de julio quedó
-obsoleto: el syslog de Kong se restableció el 2026-08-26.*
+*Rearmado 2026-09-27, nota actualizada 2026-10-13 (`wazuh_dashboards/build_kong_v2.py`).*
 """
 
 
@@ -250,6 +252,17 @@ def main() -> int:
     layout: list[tuple[str, int, int, int, int]] = []   # (vis_id, x, y, w, h)
 
     def usar(vis: dict, x: int, y: int, w: int, h: int) -> None:
+        # Idempotencia: una visualizacion "nueva" (clonada, uuid4) que ya existe en el
+        # dashboard vivo con el mismo titulo reusa ese id. Sin esto cada corrida creaba
+        # 5 copias y dejaba huerfanas las anteriores (visto 2026-10-13).
+        if vis["id"] not in objs:
+            titulo = vis["attributes"]["title"]
+            usados = {v["id"] for v in salida}
+            previa = next((o["id"] for o in objs.values()
+                           if o["type"] == "visualization" and o["id"] not in usados
+                           and o["attributes"].get("title") == titulo), None)
+            if previa:
+                vis["id"] = previa
         salida.append(vis)
         layout.append((vis["id"], x, y, w, h))
 
@@ -261,7 +274,7 @@ def main() -> int:
     set_query(v, Q_REQUESTS)
     set_state(v, "Kong · Requests", vs,
               "Eventos de acceso vistos por Wazuh. Excluye las reglas de correlación "
-              "(100204/100207/100211/100240/100241), que no son requests.")
+              "(100204/100207/100209/100211/100240/100241), que no son requests.")
     usar(v, 0, y, 8, 7)
 
     v = clonar(objs[V_TOTAL])
@@ -277,7 +290,7 @@ def main() -> int:
     set_query(v, Q_ATAQUES)
     set_state(v, "Kong · Ataques detectados", vs,
               "Disparos de las reglas de correlación (grupo attack): 100207 enumeración, "
-              "100204 fuerza bruta, 100240 múltiples 4xx, 100241 alta frecuencia.")
+              "100209 enumeración lenta, 100204 fuerza bruta, 100240 múltiples 4xx, 100241 alta frecuencia.")
     usar(v, 16, y, 8, 7)
 
     v = clonar(objs[V_SECURITY])
@@ -321,8 +334,8 @@ def main() -> int:
                   terms("3", "rule.id", 6, "Regla", schema="group")]
     set_query(v, Q_ATAQUES)
     set_state(v, "Kong · Ataques detectados por regla (por día)", vs,
-              "100207 enumeración (bloquea en FortiGate vía SOC-L1) · 100204 fuerza bruta · "
-              "100240 múltiples 4xx · 100241 alta frecuencia.")
+              "100207 y 100209 enumeración (bloquean en FortiGate vía SOC-L1) · 100204 fuerza bruta · "
+              "100240 múltiples 4xx sin 404 · 100241 alta frecuencia.")
     usar(v, 24, y, 24, 12)
     y += 12
 
